@@ -27,7 +27,7 @@ header[data-testid="stHeader"],
     display: none !important;
 }
 
-/* Menyesuaikan padding konten utama agar pas & rapat ke atas */
+/* Mengeser & Menyesuaikan padding konten utama agar pas & rapat ke atas */
 .main .block-container {
     padding-top: 2rem !important;
     padding-bottom: 2rem !important;
@@ -201,7 +201,72 @@ div[data-testid="stAlert"] {
 }
 
 /* ==========================================
-   7. FOOTER REMOVAL
+   7. CUSTOM ANIMATED SPINNER & LOADING CARD
+   ========================================== */
+/* Kustomisasi Spinner bawaan st.spinner */
+[data-testid="stSpinner"] {
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    padding: 1.2rem !important;
+    background: rgba(255, 255, 255, 0.85) !important;
+    backdrop-filter: blur(8px) !important;
+    border: 1px solid #CBD5E1 !important;
+    border-radius: 12px !important;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.05) !important;
+}
+
+[data-testid="stSpinner"] > div {
+    border-top-color: #2563EB !important;
+    border-left-color: #3B82F6 !important;
+    width: 2.2rem !important;
+    height: 2.2rem !important;
+}
+
+/* Custom Card Loading (3 Titik Pulse) */
+.custom-loader-card {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 16px 24px;
+    background: #FFFFFF;
+    border-radius: 12px;
+    border: 1px solid #CBD5E1;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    margin: 15px 0;
+}
+
+.custom-loader-dots {
+    display: flex;
+    gap: 6px;
+}
+
+.custom-loader-dots div {
+    width: 10px;
+    height: 10px;
+    background-color: #2563EB;
+    border-radius: 50%;
+    animation: loader-pulse 1.2s infinite ease-in-out;
+}
+
+.custom-loader-dots div:nth-child(2) { animation-delay: 0.2s; }
+.custom-loader-dots div:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes loader-pulse {
+    0%, 100% {
+        transform: scale(0.8);
+        opacity: 0.3;
+    }
+    50% {
+        transform: scale(1.2);
+        opacity: 1;
+        background-color: #1D4ED8;
+    }
+}
+
+/* ==========================================
+   8. FOOTER REMOVAL
    ========================================== */
 footer {
     visibility: hidden !important;
