@@ -119,8 +119,12 @@ def generate_boq_number(sequence_num=1):
     return f"{sequence_num:04d}/CLX/BOQ/{month_roman}/{now.year}"
 
 
+# ==============================================================================
+# CACHED DATA FETCHING (OPTIMASI PERFORMA)
+# ==============================================================================
+@st.cache_data(ttl=120, show_spinner=False)
 def get_all_saved_boq():
-    """Mengambil seluruh data BOQ tersimpan dari sheet DB BOQ"""
+    """Mengambil seluruh data BOQ tersimpan dari sheet DB BOQ (Cached 2 menit)"""
     try:
         sh = get_google_sheet_connection()
         if not sh:
@@ -144,10 +148,11 @@ def get_all_saved_boq():
         return []
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def get_existing_saved_site_charger_pairs():
     """
     Mengambil set tuple (site_name_lowercase, charger_type_lowercase) 
-    yang sudah tersimpan di DB BOQ agar pengecekan duplikasi presisi.
+    yang sudah tersimpan di DB BOQ (Cached 2 menit).
     """
     saved_boqs = get_all_saved_boq()
     saved_pairs = set()
@@ -159,9 +164,10 @@ def get_existing_saved_site_charger_pairs():
     return saved_pairs
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_query_site_options(exclude_saved=True):
     """
-    Mengambil daftar site aktif dari sheet Query.
+    Mengambil daftar site aktif dari sheet Query (Cached 2 menit).
     Memfilter status DROP & CANCEL serta (Site Name + Charger Type) yang sudah tersimpan di DB BOQ.
     """
     site_options = []
@@ -185,12 +191,12 @@ def fetch_query_site_options(exclude_saved=True):
                         address_val = str(row[6]).strip() if len(row) > 6 else "-"
                         raw_prov_val = str(row[8]).strip() if len(row) > 8 else ""
 
-                        # 🔍 FILTER 1: Eliminasi status DROP atau CANCEL
+                        # FILTER 1: Eliminasi status DROP atau CANCEL
                         status_upper = status_val.upper()
                         if "DROP" in status_upper or "CANCEL" in status_upper:
                             continue
 
-                        # 🔍 FILTER 2: Presisi (Site Name + Charger Type) yang sudah tersimpan
+                        # FILTER 2: Presisi (Site Name + Charger Type) yang sudah tersimpan
                         pair_key = (site_val.strip().lower(), charger_val.strip().lower())
                         if exclude_saved and pair_key in existing_saved_pairs:
                             continue
@@ -231,8 +237,9 @@ def fetch_query_site_options(exclude_saved=True):
     return site_options, site_data_map
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def load_boq_dataframe(charging_type, province_str):
-    """Membaca template Excel berdasarkan jenis charger dan wilayah/provinsi"""
+    """Membaca template Excel berdasarkan jenis charger dan wilayah/provinsi (Cached 10 menit)"""
     region_normalized = map_to_standard_province(province_str)
     raw_charging_key = charging_type.upper().strip()
 
@@ -245,7 +252,7 @@ def load_boq_dataframe(charging_type, province_str):
     }
     target_sheet = sheet_map.get(raw_charging_key, raw_charging_key)
     
-    # 🔍 INDEKS KOLOM UNTUK TIAP WILAYAH
+    # INDEKS KOLOM UNTUK TIAP WILAYAH
     region_col_indices = {
         "JAVA": 0, 
         "SUMATERA": 8, 
@@ -459,154 +466,191 @@ def render():
 
     tab_create, tab_edit = st.tabs(["➕ Buat BOQ Baru", "✏️ Edit / Reuse / Re-Download BOQ"])
 
-    # Fetch site options (Excluding Site + Charger Type combinations that are already saved)
+    # Fetch site options
     site_options, site_data_map = fetch_query_site_options(exclude_saved=True)
+
+    # OPSI DIBUAT KOSONG / PLACEHOLDER SECARA DEFAULT (SOLUSI MASALAH 1)
+    PLACEHOLDER_OPTION = "-- Pilih Site Name & Charger --"
+    dropdown_options = [PLACEHOLDER_OPTION] + sorted(list(site_options))
 
     # ==========================================================================
     # TAB 1: BUAT BOQ BARU
     # ==========================================================================
     with tab_create:
         st.subheader("1. Informasi Site & Spesifikasi")
+        
+        # TAMPILKAN BANNER SUKSES & DOWNLOAD PDF DARI SIMPANAN TERAKHIR (SOLUSI MASALAH 2)
+        if "last_saved_info" in st.session_state and st.session_state["last_saved_info"]:
+            last_info = st.session_state["last_saved_info"]
+            st.success(f"🎉 **BOQ Berhasil Disimpan!** Nomor BOQ: `{last_info['boq_no']}` untuk **{last_info['site_name']}**")
+            st.download_button(
+                label=f"📥 Download PDF BOQ Terakhir Disimpan ({last_info['site_name']})",
+                data=last_info["pdf_bytes"],
+                file_name=last_info["filename"],
+                mime="application/pdf",
+                key="btn_download_last_saved"
+            )
+            st.markdown("---")
+
         col_s1, col_s2 = st.columns(2)
 
         with col_s1:
             selected_label = st.selectbox(
                 "Pilih Site Name & Charger (Filtered: Drop/Cancel & Saved BOQ Pair Excluded)", 
-                sorted(list(site_options))
+                dropdown_options,
+                index=0
             )
 
-        current_meta = site_data_map.get(selected_label, {
-            "site_name": selected_label, "epc": "-", "address": "-", "charger": "-", "province": "JAVA", "raw_province": "-"
-        })
+        # Jika belum memilih site (posisi default "kosong")
+        if selected_label == PLACEHOLDER_OPTION:
+            st.info("💡 Silakan pilih **Site Name & Charger** dari dropdown di atas untuk membuat BOQ baru.")
+        else:
+            current_meta = site_data_map.get(selected_label, {
+                "site_name": selected_label, "epc": "-", "address": "-", "charger": "-", "province": "JAVA", "raw_province": "-"
+            })
 
-        selected_site = current_meta.get("site_name", selected_label)
+            selected_site = current_meta.get("site_name", selected_label)
 
-        with col_s2:
-            site_address = st.text_input("Address (Kolom G)", value=current_meta["address"])
+            with col_s2:
+                site_address = st.text_input("Address (Kolom G)", value=current_meta["address"])
 
-        col_s3, col_s4, col_s5 = st.columns([1.5, 1.5, 1])
-        with col_s3:
-            charging_type = st.text_input("Charging Type (Kolom C)", value=current_meta["charger"])
-        with col_s4:
-            province = st.text_input("Province Standar (Kolom I Mapped)", value=current_meta["province"])
-            st.caption(f"📍 Raw Province Sheet: `{current_meta.get('raw_province', '-')}`")
-        with col_s5:
-            epc_name = st.text_input("EPC Name (Kolom B)", value=current_meta.get("epc", "-"))
+            col_s3, col_s4, col_s5 = st.columns([1.5, 1.5, 1])
+            with col_s3:
+                charging_type = st.text_input("Charging Type (Kolom C)", value=current_meta["charger"])
+            with col_s4:
+                province = st.text_input("Province Standar (Kolom I Mapped)", value=current_meta["province"])
+                st.caption(f"📍 Raw Province Sheet: `{current_meta.get('raw_province', '-')}`")
+            with col_s5:
+                epc_name = st.text_input("EPC Name (Kolom B)", value=current_meta.get("epc", "-"))
 
-        # 🔍 CEK INTEGRITAS PRESISI BERSAMAAN: (SITE NAME + CHARGER TYPE)
-        saved_pairs = get_existing_saved_site_charger_pairs()
-        current_pair_key = (selected_site.strip().lower(), charging_type.strip().lower())
-        is_already_saved = current_pair_key in saved_pairs or selected_site == "-"
+            # CEK INTEGRITAS PRESISI BERSAMAAN: (SITE NAME + CHARGER TYPE)
+            saved_pairs = get_existing_saved_site_charger_pairs()
+            current_pair_key = (selected_site.strip().lower(), charging_type.strip().lower())
+            is_already_saved = current_pair_key in saved_pairs or selected_site == "-"
 
-        if is_already_saved and selected_site != "-":
-            st.warning(f"⚠️ **Peringatan:** Kombinasi Site `{selected_site}` dengan Charger `{charging_type}` sudah pernah dibuatkan BOQ! Silakan gunakan Tab **'Edit / Reuse / Re-Download BOQ'** jika ingin memperbarui data.")
-        elif selected_site == "-":
-            st.info("ℹ️ Semua kombinasi Site & Charger aktif di sheet Query telah dibuatkan BOQ.")
+            if is_already_saved and selected_site != "-":
+                st.warning(f"⚠️ **Peringatan:** Kombinasi Site `{selected_site}` dengan Charger `{charging_type}` sudah pernah dibuatkan BOQ! Silakan gunakan Tab **'Edit / Reuse / Re-Download BOQ'** jika ingin memperbarui data.")
+            elif selected_site == "-":
+                st.info("ℹ️ Semua kombinasi Site & Charger aktif di sheet Query telah dibuatkan BOQ.")
 
-        df_boq, target_sheet, region_normalized = load_boq_dataframe(charging_type, province)
+            df_boq, target_sheet, region_normalized = load_boq_dataframe(charging_type, province)
 
-        if df_boq is not None and not df_boq.empty:
-            st.subheader(f"2. Table BOQ ({target_sheet} - {region_normalized}) Auto Load")
-            st.info("💡 Khusus **CABLING AND ACCESSORIES INSTALLATION** (Poin 1-3), **Qty/Volume** dapat diubah secara manual:")
+            if df_boq is not None and not df_boq.empty:
+                st.subheader(f"2. Table BOQ ({target_sheet} - {region_normalized}) Auto Load")
+                st.info("💡 Khusus **CABLING AND ACCESSORIES INSTALLATION** (Poin 1-3), **Qty/Volume** dapat diubah secara manual:")
 
-            e_start = False
-            editable_indices = []
-            for idx, row in df_boq.iterrows():
-                no_val = str(row.get("NO", "")).strip().upper()
-                if "CABLING AND ACCESSORIES" in str(row.get("Item", "")).upper() or no_val == "E":
-                    e_start = True
-                    continue
-                elif no_val in ["A", "B", "C", "D", "F"]:
-                    e_start = False
+                e_start = False
+                editable_indices = []
+                for idx, row in df_boq.iterrows():
+                    no_val = str(row.get("NO", "")).strip().upper()
+                    if "CABLING AND ACCESSORIES" in str(row.get("Item", "")).upper() or no_val == "E":
+                        e_start = True
+                        continue
+                    elif no_val in ["A", "B", "C", "D", "F"]:
+                        e_start = False
 
-                if e_start and no_val in ["1", "2", "3"]:
-                    editable_indices.append(idx)
+                    if e_start and no_val in ["1", "2", "3"]:
+                        editable_indices.append(idx)
 
-            col_e1, col_e2, col_e3 = st.columns(3)
-            for idx in editable_indices:
-                no_val = str(df_boq.loc[idx, "NO"])
-                item_name = str(df_boq.loc[idx, "Item"])
-                current_qty = parse_qty_num(df_boq.loc[idx, "Unit/Volume"])
+                col_e1, col_e2, col_e3 = st.columns(3)
+                for idx in editable_indices:
+                    no_val = str(df_boq.loc[idx, "NO"])
+                    item_name = str(df_boq.loc[idx, "Item"])
+                    current_qty = parse_qty_num(df_boq.loc[idx, "Unit/Volume"])
 
-                col_target = col_e1 if no_val == "1" else (col_e2 if no_val == "2" else col_e3)
-                with col_target:
-                    new_qty = st.number_input(
-                        f"Qty Poin {no_val}: {item_name[:25]}...",
-                        min_value=0.0,
-                        value=float(current_qty),
-                        step=1.0,
-                        key=f"qty_e_{no_val}_{selected_label}",
-                    )
-                    df_boq.loc[idx, "Unit/Volume"] = str(int(new_qty) if new_qty.is_integer() else new_qty)
+                    col_target = col_e1 if no_val == "1" else (col_e2 if no_val == "2" else col_e3)
+                    with col_target:
+                        new_qty = st.number_input(
+                            f"Qty Poin {no_val}: {item_name[:25]}...",
+                            min_value=0.0,
+                            value=float(current_qty),
+                            step=1.0,
+                            key=f"qty_e_{no_val}_{selected_label}",
+                        )
+                        df_boq.loc[idx, "Unit/Volume"] = str(int(new_qty) if new_qty.is_integer() else new_qty)
 
-            parent_headers = ["A", "B", "C", "D", "E", "F"]
-            current_parent_idx = None
-            current_parent_sum = 0.0
+                parent_headers = ["A", "B", "C", "D", "E", "F"]
+                current_parent_idx = None
+                current_parent_sum = 0.0
 
-            for idx, row in df_boq.iterrows():
-                no_val = str(row.get("NO", "")).strip().upper()
-                if no_val in parent_headers:
-                    if current_parent_idx is not None and current_parent_sum > 0:
-                        df_boq.loc[current_parent_idx, "TOTAL PRICE"] = current_parent_sum
-                    current_parent_idx = idx
-                    current_parent_sum = 0.0
-                    vol_num = parse_qty_num(row.get("Unit/Volume", 0))
-                    up_num = parse_price(row.get("UNIT PRICE", 0))
-                    if vol_num > 0 and up_num > 0:
-                        df_boq.loc[idx, "TOTAL PRICE"] = vol_num * up_num
-                else:
-                    vol_num = parse_qty_num(row.get("Unit/Volume", 0))
-                    up_num = parse_price(row.get("UNIT PRICE", 0))
-                    tp = (vol_num * up_num) if (vol_num > 0 and up_num > 0) else parse_price(row.get("TOTAL PRICE", 0))
-                    df_boq.loc[idx, "TOTAL PRICE"] = tp
-                    current_parent_sum += tp
-
-            if current_parent_idx is not None and current_parent_sum > 0:
-                df_boq.loc[current_parent_idx, "TOTAL PRICE"] = current_parent_sum
-
-            sub_total = sum(parse_price(row.get("TOTAL PRICE", 0)) for _, row in df_boq.iterrows() if str(row.get("NO", "")).strip().upper() in parent_headers)
-            vat_amount = sub_total * 0.11
-            grand_total = sub_total + vat_amount
-
-            display_df = df_boq.copy()
-            for c in ["UNIT PRICE", "TOTAL PRICE"]:
-                display_df[c] = display_df[c].apply(lambda x: f"Rp. {x:,.0f}".replace(",", ".") if parse_price(x) > 0 else "-")
-
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-            st.markdown("---")
-            c_res1, c_res2 = st.columns([2, 1])
-            with c_res1:
-                st.success(f"✅ Tabel BOQ Aktif: **{selected_site}** | Tipe Charger: **{charging_type}** | Wilayah: **{region_normalized}**")
-            with c_res2:
-                st.metric(label="Total Contractor Price (Inc. VAT 11%)", value=f"Rp. {grand_total:,.0f}".replace(",", "."))
-
-            st.subheader("3. Action & Generate PDF")
-            col_btn1, col_btn2 = st.columns(2)
-
-            with col_btn1:
-                # 🚀 PERLINDUNGAN SIMPAN: Di-disable jika (Site Name + Charger Type) sudah tersimpan
-                if st.button("🚀 Simpan ke Database (DB BOQ)", type="primary", disabled=is_already_saved):
-                    if is_already_saved:
-                        st.error(f"❌ Gagal Simpan! Kombinasi '{selected_site}' ({charging_type}) sudah terdaftar di database.")
+                for idx, row in df_boq.iterrows():
+                    no_val = str(row.get("NO", "")).strip().upper()
+                    if no_val in parent_headers:
+                        if current_parent_idx is not None and current_parent_sum > 0:
+                            df_boq.loc[current_parent_idx, "TOTAL PRICE"] = current_parent_sum
+                        current_parent_idx = idx
+                        current_parent_sum = 0.0
+                        vol_num = parse_qty_num(row.get("Unit/Volume", 0))
+                        up_num = parse_price(row.get("UNIT PRICE", 0))
+                        if vol_num > 0 and up_num > 0:
+                            df_boq.loc[idx, "TOTAL PRICE"] = vol_num * up_num
                     else:
-                        with st.spinner("Memproses penyimpanan ke DB BOQ..."):
-                            boq_no = save_to_db_boq(selected_site, charging_type, sub_total, grand_total, epc_name)
-                            if boq_no:
-                                update_google_sheet_summary(selected_site, selected_site, sub_total, grand_total)
-                                st.success(f"✅ BOQ Berhasil Dibuat dengan No: `{boq_no}` untuk **{epc_name}**!")
-                                st.rerun()
+                        vol_num = parse_qty_num(row.get("Unit/Volume", 0))
+                        up_num = parse_price(row.get("UNIT PRICE", 0))
+                        tp = (vol_num * up_num) if (vol_num > 0 and up_num > 0) else parse_price(row.get("TOTAL PRICE", 0))
+                        df_boq.loc[idx, "TOTAL PRICE"] = tp
+                        current_parent_sum += tp
 
-            with col_btn2:
+                if current_parent_idx is not None and current_parent_sum > 0:
+                    df_boq.loc[current_parent_idx, "TOTAL PRICE"] = current_parent_sum
+
+                sub_total = sum(parse_price(row.get("TOTAL PRICE", 0)) for _, row in df_boq.iterrows() if str(row.get("NO", "")).strip().upper() in parent_headers)
+                vat_amount = sub_total * 0.11
+                grand_total = sub_total + vat_amount
+
+                display_df = df_boq.copy()
+                for c in ["UNIT PRICE", "TOTAL PRICE"]:
+                    display_df[c] = display_df[c].apply(lambda x: f"Rp. {x:,.0f}".replace(",", ".") if parse_price(x) > 0 else "-")
+
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+                st.markdown("---")
+                c_res1, c_res2 = st.columns([2, 1])
+                with c_res1:
+                    st.success(f"✅ Tabel BOQ Aktif: **{selected_site}** | Tipe Charger: **{charging_type}** | Wilayah: **{region_normalized}**")
+                with c_res2:
+                    st.metric(label="Total Contractor Price (Inc. VAT 11%)", value=f"Rp. {grand_total:,.0f}".replace(",", "."))
+
+                st.subheader("3. Action & Generate PDF")
+                col_btn1, col_btn2 = st.columns(2)
+
+                # Generate PDF bytes untuk site yang aktif dipilih
                 pdf_bytes = generate_boq_pdf(
                     selected_site, site_address, charging_type, region_normalized, df_boq, sub_total, vat_amount, grand_total
                 )
-                st.download_button(
-                    label="📥 Download PDF BOQ (1 Page Fit)",
-                    data=pdf_bytes,
-                    file_name=f"BOQ_{charging_type}_{region_normalized}_{selected_site.replace(' ', '_')}.pdf",
-                    mime="application/pdf",
-                )
+                filename_pdf = f"BOQ_{charging_type}_{region_normalized}_{selected_site.replace(' ', '_')}.pdf"
+
+                with col_btn1:
+                    # PERLINDUNGAN SIMPAN: Di-disable jika (Site Name + Charger Type) sudah tersimpan
+                    if st.button("🚀 Simpan ke Database (DB BOQ)", type="primary", disabled=is_already_saved):
+                        if is_already_saved:
+                            st.error(f"❌ Gagal Simpan! Kombinasi '{selected_site}' ({charging_type}) sudah terdaftar di database.")
+                        else:
+                            with st.spinner("Memproses penyimpanan ke DB BOQ..."):
+                                boq_no = save_to_db_boq(selected_site, charging_type, sub_total, grand_total, epc_name)
+                                if boq_no:
+                                    update_google_sheet_summary(selected_site, selected_site, sub_total, grand_total)
+                                    
+                                    # Hapus cache agar data terbaru dibaca ulang
+                                    st.cache_data.clear()
+                                    
+                                    # Simpan PDF & info ke session state agar tidak hilang saat reset form
+                                    st.session_state["last_saved_info"] = {
+                                        "boq_no": boq_no,
+                                        "site_name": selected_site,
+                                        "pdf_bytes": pdf_bytes,
+                                        "filename": filename_pdf
+                                    }
+                                    st.rerun()
+
+                with col_btn2:
+                    st.download_button(
+                        label="📥 Download PDF BOQ (Draft Preview)",
+                        data=pdf_bytes,
+                        file_name=filename_pdf,
+                        mime="application/pdf",
+                        key=f"dl_active_{selected_site}"
+                    )
 
     # ==========================================================================
     # TAB 2: EDIT / REUSE / RE-DOWNLOAD BOQ TERSIMPAN
@@ -696,10 +740,11 @@ def render():
                             epc_name=edit_epc_name
                         )
                         if success:
+                            st.cache_data.clear() # Reset cache setelah update
                             st.success(f"🎉 BOQ `{selected_data.get('BOQ No.', '-')}` berhasil diperbarui ke Site: `{edit_site_name}` ({edit_charger_type})!")
                             st.rerun()
 
-            # 📥 RE-DOWNLOAD PDF UNTUK SEMUA STATUS BOQ
+            # RE-DOWNLOAD PDF UNTUK SEMUA STATUS BOQ
             with col_act2:
                 df_boq_edit, _, reg_norm = load_boq_dataframe(edit_charger_type, edit_province)
                 
@@ -715,7 +760,6 @@ def render():
                         file_name=f"BOQ_{selected_data.get('BOQ No.', '').replace('/', '_')}_{edit_site_name.replace(' ', '_')}_{edit_charger_type}.pdf",
                         mime="application/pdf",
                     )
-
 
 if __name__ == "__main__":
     render()
