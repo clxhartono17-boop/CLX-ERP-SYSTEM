@@ -12,11 +12,33 @@
     color: #0F172A !important;
 }
 
+/* ==========================================
+   2. STREAMLIT HEADER & TOP BAR REMOVAL
+   ========================================== */
+/* Menyembunyikan bar hitam/header bawaan Streamlit secara total */
+header[data-testid="stHeader"],
+[data-testid="stHeader"] {
+    display: none !important;
+    background: transparent !important;
+}
+
+/* Menghilangkan tombol toolbar / decoration di bagian atas */
+[data-testid="stDecoration"] {
+    display: none !important;
+}
+
+/* Menyesuaikan padding konten utama agar pas & rapat ke atas */
+.main .block-container {
+    padding-top: 2rem !important;
+    padding-bottom: 2rem !important;
+}
+
 /* Judul & Headings */
 h1, h2, h3, h4, h5, h6 { 
     font-family: 'Plus Jakarta Sans', sans-serif !important; 
     color: #0F172A !important;
     font-weight: 700 !important;
+    letter-spacing: -0.02em;
 }
 
 /* Teks Deskripsi & Label Input */
@@ -26,12 +48,19 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ==========================================
-   2. SIDEBAR STYLING
+   3. SIDEBAR STYLING
    ========================================== */
 section[data-testid="stSidebar"] {
-    background: rgba(230, 238, 245, 0.75) !important;
-    backdrop-filter: blur(12px);
+    background: rgba(230, 238, 245, 0.85) !important;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
     border-right: 1px solid #CBD5E1 !important;
+}
+
+/* Menggeser tombol buka/tutup sidebar agar tetap rapi setelah header hilang */
+[data-testid="stSidebarCollapseButton"] {
+    top: 0.5rem !important;
+    color: #0F172A !important;
 }
 
 section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
@@ -42,15 +71,16 @@ section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
 section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] {
     background: #3B82F6 !important;
     border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(59, 130, 246, 0.25);
 }
+
 section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] p {
     color: #FFFFFF !important;
 }
 
 /* ==========================================
-   3. INPUT FIELDS, SELECTBOX, & TEXTAREA (PUTIH & TERANG)
+   4. INPUT FIELDS, SELECTBOX, & TEXTAREA
    ========================================== */
-/* Memaksa Semua Container Input Berwarna Putih Bersih */
 div[data-baseweb="input"],
 div[data-baseweb="input"] > div,
 div[data-baseweb="select"],
@@ -66,12 +96,14 @@ div[data-testid="stDateInput"] input {
     border: 1px solid #94A3B8 !important;
     border-radius: 8px !important;
     font-weight: 500 !important;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+    transition: all 0.2s ease-in-out;
 }
 
 /* Saat Input di-Focus/Diklik */
 div[data-baseweb="input"]:focus-within,
-div[data-baseweb="select"]:focus-within {
+div[data-baseweb="select"]:focus-within,
+div[data-baseweb="textarea"]:focus-within {
     border-color: #2563EB !important;
     box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2) !important;
 }
@@ -96,6 +128,8 @@ div[data-baseweb="menu"],
 ul[role="listbox"] {
     background-color: #FFFFFF !important;
     border: 1px solid #CBD5E1 !important;
+    border-radius: 8px !important;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1) !important;
 }
 
 li[role="option"] {
@@ -107,7 +141,7 @@ li[role="option"]:hover {
     background-color: #F1F5F9 !important;
 }
 
-/* Tag Multiselect (Alokasi Site) */
+/* Tag Multiselect */
 span[data-baseweb="tag"] {
     background-color: #2563EB !important;
     color: #FFFFFF !important;
@@ -115,7 +149,7 @@ span[data-baseweb="tag"] {
 }
 
 /* ==========================================
-   4. BUTTON STYLING (MODERN BLUE)
+   5. BUTTON STYLING (MODERN BLUE)
    ========================================== */
 div.stButton > button {
     background-color: #2563EB !important;
@@ -123,21 +157,24 @@ div.stButton > button {
     border: none !important;
     border-radius: 8px !important;
     font-weight: 600 !important;
-    padding: 0.5rem 1.2rem !important;
+    padding: 0.55rem 1.25rem !important;
     box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2) !important;
-    transition: all 0.2s ease !important;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
 
 div.stButton > button:hover {
     background-color: #1D4ED8 !important;
     transform: translateY(-1px);
-    box-shadow: 0 4px 6px rgba(37, 99, 235, 0.3) !important;
+    box-shadow: 0 4px 8px rgba(37, 99, 235, 0.35) !important;
+}
+
+div.stButton > button:active {
+    transform: translateY(0);
 }
 
 /* ==========================================
-   5. TABLE & DATA EDITOR (MEMAKSA MENJADI TERANG)
+   6. TABLE & DATA EDITOR
    ========================================== */
-/* Container Utama Tabel */
 [data-testid="stDataFrame"],
 [data-testid="stDataEditor"],
 .glideDataEditor,
@@ -146,6 +183,7 @@ div[data-testid="stTable"] {
     border: 1px solid #CBD5E1 !important;
     border-radius: 10px !important;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05) !important;
+    overflow: hidden;
 }
 
 /* Memaksa Semua Teks di Dalam Tabel Menjadi Gelap/Jelas */
@@ -154,10 +192,18 @@ div[data-testid="stTable"] {
     color: #0F172A !important;
 }
 
-/* Info Box / Banner Biru Muda di Atas Tabel */
+/* Info Box / Banner / Alert */
 div[data-testid="stAlert"] {
     background-color: #E0F2FE !important;
     color: #0369A1 !important;
     border: 1px solid #BAE6FD !important;
     border-radius: 8px !important;
+}
+
+/* ==========================================
+   7. FOOTER REMOVAL
+   ========================================== */
+footer {
+    visibility: hidden !important;
+    height: 0px !important;
 }
