@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -13,7 +14,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from PIL import Image as PILImage
 
 # ==============================================================================
-# 🎯 SPREADSHEET ID
+# 🎯 SPREADSHEET ID & KONSTANTA
 # ==============================================================================
 SPREADSHEET_ID = "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
 
@@ -24,15 +25,33 @@ MONTH_ROMAN = {
 
 @st.cache_resource
 def init_gspread():
-    cred_path = "credentials.json"
-    if not os.path.exists(cred_path):
-        st.error(f"🚨 File '{cred_path}' tidak ditemukan di root folder project!")
-        return None, None, None, None
+    """Fungsi inisialisasi gspread yang fleksibel (Cloud Secrets vs Local File)"""
+    gc = None
+    
+    # 1. Coba baca dari Streamlit Secrets (Untuk Streamlit Cloud)
+    if "gcp_service_account" in st.secrets:
+        try:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            gc = gspread.service_account_from_dict(creds_dict)
+        except Exception as e:
+            st.warning(f"⚠️ Gagal menghubungkan Secrets Cloud: {e}")
 
+    # 2. Jika Secrets tidak ada, baca dari file fisik credentials.json (Untuk Localhost)
+    if gc is None:
+        cred_path = "credentials.json"
+        if os.path.exists(cred_path):
+            try:
+                gc = gspread.service_account(filename=cred_path)
+            except Exception as e:
+                st.error(f"🚨 File credentials.json ditemukan tapi gagal dibaca: {e}")
+                return None, None, None, None
+        else:
+            st.error("🚨 Kredensial tidak ditemukan! Harap set 'Secrets' di Streamlit Cloud atau sediakan file 'credentials.json' di localhost.")
+            return None, None, None, None
+
+    # 3. Buka Spreadsheet
     try:
-        gc = gspread.service_account(filename=cred_path)
         sh = gc.open_by_key(SPREADSHEET_ID)
-
         sheet_query = sh.worksheet("Query")
         sheet_dropdown = sh.worksheet("Master Dropdown")
         sheet_erp = sh.worksheet("ERP Project")
@@ -53,9 +72,9 @@ def get_raw_matrix(sheet):
 
 
 def generate_auto_invoice_no(sheet_db):
-    """Generate No. Invoice Otomatis -> Format: 0000/INV/CLX/VIII/2026"""
+    """Generate No. Invoice Otomatis -> Format: 0000/INV/CLX/BULAN_ROMAWI/TAHUN"""
     now = datetime.now()
-    roman_month = MONTH_ROMAN.get(now.month, "VIII")
+    roman_month = MONTH_ROMAN.get(now.month, "I")
     year = now.year
 
     if sheet_db:
@@ -75,7 +94,6 @@ def create_invoice_pdf(data):
     """Fungsi Pembuat File PDF Invoice dengan Header.png & Footer.png"""
     buffer = io.BytesIO()
     
-    # Margin atas & bawah disesuaikan agar isi PDF tidak bertabrakan dengan gambar Header/Footer
     doc = SimpleDocTemplate(
         buffer, 
         pagesize=letter, 
@@ -106,23 +124,19 @@ def create_invoice_pdf(data):
     if not os.path.exists(footer_path):
         footer_path = os.path.abspath("assets/Footer.png")
 
-    # Fungsi Callback untuk Menggambar Header & Footer Tepat di Kertas (Canvas)
+    # Callback Header & Footer
     def draw_header_footer(canvas, doc):
         canvas.saveState()
-        page_w, page_h = letter # Lebar & Tinggi Halaman Letter
+        page_w, page_h = letter 
         
-        # Draw Header Image (Bagian Atas)
         if os.path.exists(header_path):
             try:
-                # Menempelkan header persis di paling atas halaman
                 canvas.drawImage(header_path, 0, page_h - 75, width=page_w, height=75, mask='auto')
             except Exception:
                 pass
 
-        # Draw Footer Image (Bagian Bawah)
         if os.path.exists(footer_path):
             try:
-                # Menempelkan footer persis di paling bawah halaman
                 canvas.drawImage(footer_path, 0, 0, width=page_w, height=65, mask='auto')
             except Exception:
                 pass
@@ -210,7 +224,7 @@ def create_invoice_pdf(data):
     elements.append(summary_table)
     elements.append(Spacer(1, 15))
 
-    # --- 5. PAYMENT INFO TABLE (KOTAK TABEL LENGKAP & RAPI) ---
+    # --- 5. PAYMENT INFO TABLE ---
     pay_table_data = [
         [Paragraph("<b>PAYMENT INFO</b>", pay_title_style), "", ""],
         [Paragraph("Bank Name", normal_bold), ":", Paragraph("BANK CENTRAL ASIA (BCA)", normal_text)],
@@ -220,12 +234,12 @@ def create_invoice_pdf(data):
     
     payment_info_table = Table(pay_table_data, colWidths=[85, 10, 205])
     payment_info_table.setStyle(TableStyle([
-        ('SPAN', (0,0), (2,0)),                                     # Merge Header
-        ('BACKGROUND', (0,0), (2,0), colors.HexColor("#E2E8F0")),   # Background Header Abu-abu
-        ('PADDING', (0,0), (-1,-1), 4),                             # Cell Padding
+        ('SPAN', (0,0), (2,0)),
+        ('BACKGROUND', (0,0), (2,0), colors.HexColor("#E2E8F0")),
+        ('PADDING', (0,0), (-1,-1), 4),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#A0AEC0")),  # Garis Sel Tabel
-        ('BOX', (0,0), (-1,-1), 1, colors.HexColor("#2B6CB0")),     # Border Luar Utama
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#A0AEC0")),
+        ('BOX', (0,0), (-1,-1), 1, colors.HexColor("#2B6CB0")),
     ]))
 
     # Signature Block
@@ -236,7 +250,6 @@ def create_invoice_pdf(data):
     President Director
     """, ParagraphStyle(name="SigStyle", parent=styles['Normal'], fontSize=8.5, leading=12, alignment=1))
 
-    # Penempatan Sejajar Bagian Bawah
     bottom_grid = Table([[payment_info_table, sig_block]], colWidths=[300, 240])
     bottom_grid.setStyle(TableStyle([
         ('VALIGN', (0,0), (-1,-1), 'BOTTOM'),
@@ -245,7 +258,6 @@ def create_invoice_pdf(data):
     ]))
     elements.append(bottom_grid)
 
-    # Build PDF dengan memanggil callback draw_header_footer
     doc.build(elements, onFirstPage=draw_header_footer, onLaterPages=draw_header_footer)
     buffer.seek(0)
     return buffer.getvalue()
@@ -290,7 +302,6 @@ def render():
             st.text_input("No. Invoice (Auto Generated)", value=auto_inv_no, disabled=True)
             inv_date = st.date_input("Invoice Date", datetime.now())
 
-            # --- SITE NAME OPTIONS ---
             site_name = ""
             if selected_project == "VGreen - Project":
                 site_options = []
@@ -305,7 +316,6 @@ def render():
             else:
                 site_name = st.text_input("Item Description / Site Name", placeholder="Ketik Site Name secara manual...")
 
-        # --- AUTO FETCH CHARGING TYPE & WO ---
         charging_type = ""
         wo_number = ""
 
@@ -325,7 +335,6 @@ def render():
 
         st.markdown("### 💳 Detail Pembayaran & Termin")
         
-        # --- 🔒 DETEKSI & ELIMINASI TERMIN YANG SUDAH DIPAKAI DARI DB INVOICE ---
         all_possible_termins = ["35%", "60%", "5%"]
         used_termins = []
 
@@ -337,7 +346,6 @@ def render():
                     if db_site == site_name.strip().lower():
                         used_termins.append(db_term)
 
-        # Filter opsi termin yang BELUM pernah dipakai
         available_termins = [t for t in all_possible_termins if t not in used_termins]
 
         if selected_project == "VGreen - Project":
@@ -345,7 +353,7 @@ def render():
                 st.warning(f"ℹ️ Termin yang sudah pernah dibuat untuk site **{site_name}**: {', '.join(set(used_termins))}")
             
             if not available_termins:
-                st.error(f"⛔ Semua termin (35%, 60%, 5%) untuk site **{site_name}** sudah terpakai di DB Invoice! Tidak bisa membuat invoice lagi.")
+                st.error(f"⛔ Semua termin (35%, 60%, 5%) untuk site **{site_name}** sudah terpakai di DB Invoice!")
 
         c1, c2, c3 = st.columns(3)
 
@@ -361,7 +369,6 @@ def render():
                 st.selectbox("Termin Pembayaran", options=["Penuh / Lunas"], disabled=True)
                 pct_val = 0.0
 
-        # --- FETCH BOQ AMOUNT (ERP Project Kolom E = Indeks 4, Kolom M = Indeks 12) ---
         boq_amount = 0.0
         if selected_project == "VGreen - Project" and site_name and len(raw_erp) > 1:
             for row in raw_erp[1:]:
@@ -389,7 +396,6 @@ def render():
         with c3:
             tax_rate = st.number_input("PPN / Tax (%)", min_value=0.0, value=11.0, step=0.5)
 
-        # Totals
         termin_amount = unit_price
         tax_amount = termin_amount * (tax_rate / 100)
         grand_total = termin_amount + tax_amount
@@ -431,7 +437,6 @@ def render():
                     st.success(f"✅ Invoice **{auto_inv_no}** berhasil disimpan ke Sheet 'DB Invoice'!")
                     st.balloons()
 
-                    # Render PDF Bytes
                     pdf_payload = {
                         "project_name": selected_project,
                         "inv_no": auto_inv_no,
