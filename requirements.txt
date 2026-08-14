@@ -4,3 +4,4 @@ gspread
 google-auth
 num2words
 st-gsheets-connection
+reportlab
