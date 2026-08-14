@@ -250,10 +250,8 @@ def generate_do_a5_pdf(data):
 # RENDER MAIN PAGE
 # ==============================================================================
 def render():
-    # 🎨 INJEKSI CSS ULTRA STRICT UNTUK MERUBAH INPUT & TABEL MENJADI PUTIH BERSIH
     st.markdown("""
         <style>
-        /* 1. Paksa SEMUA input text, text-area, & selectbox menjadi PUTIH */
         div[data-baseweb="input"],
         div[data-baseweb="input"] > div,
         div[data-baseweb="textarea"],
@@ -271,7 +269,6 @@ def render():
             opacity: 1 !important;
         }
 
-        /* 2. Warna Opsi Dropdown (Selectbox) saat terbuka */
         div[data-baseweb="popover"], div[data-baseweb="menu"] {
             background-color: #FFFFFF !important;
             color: #000000 !important;
@@ -284,20 +281,17 @@ def render():
             background-color: #E2E8F0 !important;
         }
 
-        /* 3. Placeholder / Teks Petunjuk */
         ::placeholder, textarea::placeholder, input::placeholder {
             color: #64748B !important;
             -webkit-text-fill-color: #64748B !important;
             opacity: 1 !important;
         }
 
-        /* 4. Tag Pilihan pada Multiselect (Alokasi Site) */
         span[data-baseweb="tag"] {
-            background-color: #3B82F6 !important; /* Warna biru cerah */
+            background-color: #3B82F6 !important;
             color: #FFFFFF !important;
         }
 
-        /* 5. FIX TABEL (st.data_editor) Menjadi Terang/Putih */
         div[data-testid="stDataFrame"], 
         div[data-testid="stDataEditor"],
         .glideDataEditor {
@@ -306,7 +300,6 @@ def render():
             border: 1px solid #CBD5E1 !important;
         }
 
-        /* 6. Judul, Subjudul, Label & Teks Global */
         label, p, h1, h2, h3, h4, .stMarkdown {
             color: #0F172A !important;
         }
@@ -314,7 +307,11 @@ def render():
     """, unsafe_allow_html=True)
 
     st.title("🚚 Delivery Order (DO) Generator")
-    st.caption("Divisi Supply Chain Management (SCM) - Create, Print & Search DO")
+    st.caption("Divisi Supply Chain Management (SCM) - Create, Print, Search & Relocation DO")
+
+    # Inisialisasi State Histori Relokasi jika belum ada
+    if "relocation_history" not in st.session_state:
+        st.session_state.relocation_history = []
 
     charging_list, exp_list = load_master_dropdown()
     epc_list = load_epc_list()
@@ -322,7 +319,7 @@ def render():
     tab_form, tab_preview, tab_search = st.tabs([
         "📝 Form Create DO",
         "🖨️ Preview & PDF Cetak (A5)",
-        "🔍 Search & Edit DO"
+        "🔍 Search, Edit & Relokasi Site"
     ])
 
     # --------------------------------------------------------------------------
@@ -463,11 +460,11 @@ def render():
             )
 
     # --------------------------------------------------------------------------
-    # TAB 3: SEARCH & EDIT DO
+    # TAB 3: SEARCH, EDIT & RELOKASI SITE
     # --------------------------------------------------------------------------
     with tab_search:
-        st.subheader("🔍 Cari & Edit Delivery Order")
-        st.caption("Cari DO berdasarkan Nomor DO untuk mengedit data atau mencetak ulang PDF.")
+        st.subheader("🔍 Cari, Edit & Relokasi Site Delivery Order")
+        st.caption("Cari DO berdasarkan Nomor DO untuk mengedit data, merelokasi site material, atau melihat histori relokasi.")
 
         existing_dos = get_all_do_numbers()
         
@@ -488,7 +485,7 @@ def render():
                 else:
                     st.error("Data DO tidak ditemukan di database.")
 
-        # Tampilkan Form Edit jika Data Ditemukan
+        # Tampilkan Form Edit & Relokasi jika Data Ditemukan
         if "edit_do_data" in st.session_state and st.session_state.edit_do_data:
             edit_data = st.session_state.edit_do_data
             st.divider()
@@ -508,7 +505,6 @@ def render():
             st.write("**Material Items:**")
             df_edit_mat = pd.DataFrame(edit_data['materials'])
             
-            # Kolom yang ditampilkan di editor
             cols_to_show = ["No", "Material Code", "Material Name", "Qty", "uom", "Site Allocation", "Remarks"]
             cols_existing = [c for c in cols_to_show if c in df_edit_mat.columns]
             
@@ -519,9 +515,81 @@ def render():
                 key="editor_search_do"
             )
 
+            # ==================================================================
+            # 🔄 MODUL FITUR RELOKASI SITE MATERIAL
+            # ==================================================================
+            st.markdown("---")
+            st.subheader("🔁 Form Relokasi Material Site")
+            st.info("Gunakan modul ini jika ada material yang salah alokasi dan harus dipindahkan ke site lain tanpa menghilangkan histori.")
+
+            with st.expander("📌 Klik di sini untuk Melakukan Relokasi Material", expanded=False):
+                # Ambil daftar material yang tersedia
+                mat_options = edited_mat_df["Material Name"].tolist() if "Material Name" in edited_mat_df.columns else []
+                
+                col_r1, col_r2, col_r3 = st.columns(3)
+                with col_r1:
+                    target_mat_name = st.selectbox("Pilih Material yang Direlokasi:", options=mat_options, key="reloc_mat")
+                
+                # Cari site asal dari material terpilih
+                current_site_val = ""
+                if target_mat_name and not edited_mat_df.empty:
+                    match_row = edited_mat_df[edited_mat_df["Material Name"] == target_mat_name]
+                    if not match_row.empty:
+                        col_site = "Site Allocation" if "Site Allocation" in match_row.columns else "Site Alocation"
+                        current_site_val = match_row.iloc[0][col_site]
+
+                with col_r2:
+                    old_site = st.text_input("Site Asal (Old Site)", value=current_site_val, disabled=True, key="reloc_old_site")
+                with col_r3:
+                    new_site = st.text_input("Site Tujuan Baru (New Site)", placeholder="Contoh: Stasiun Kediri", key="reloc_new_site")
+
+                reloc_reason = st.text_input("Alasan Relokasi / CatatanTambahan:", placeholder="Contoh: Salah kirim tim lapangan / Revisi WO", key="reloc_reason")
+
+                if st.button("🔀 Eksekusi Relokasi Site", type="secondary"):
+                    if not new_site:
+                        st.error("Site Tujuan Baru wajib diisi!")
+                    elif old_site == new_site:
+                        st.warning("Site Asal dan Site Tujuan Baru tidak boleh sama!")
+                    else:
+                        now_stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        
+                        # Update dataframe & tambahkan histori di remarks
+                        col_site_key = "Site Allocation" if "Site Allocation" in edited_mat_df.columns else "Site Alocation"
+                        for idx, row in edited_mat_df.iterrows():
+                            if row["Material Name"] == target_mat_name:
+                                edited_mat_df.at[idx, col_site_key] = new_site
+                                old_rem = str(row.get("Remarks", ""))
+                                new_rem = f"[Relokasi {now_stamp}: dari '{old_site}' ke '{new_site}'. Ket: {reloc_reason}] {old_rem}".strip()
+                                edited_mat_df.at[idx, "Remarks"] = new_rem
+
+                        # Simpan ke histori relokasi session
+                        st.session_state.relocation_history.append({
+                            "no_do": e_no_do,
+                            "timestamp": now_stamp,
+                            "material": target_mat_name,
+                            "old_site": old_site,
+                            "new_site": new_site,
+                            "reason": reloc_reason
+                        })
+
+                        st.success(f"✅ Berhasil merelokasi **{target_mat_name}** dari **{old_site}** ke **{new_site}**!")
+                        st.rerun()
+
+            # ==================================================================
+            # 📜 HISTORI RELOKASI MATERIAL
+            # ==================================================================
+            # Filter histori relokasi khusus untuk No DO yang sedang dibuka
+            do_hist = [h for h in st.session_state.relocation_history if h["no_do"] == e_no_do]
+            if do_hist:
+                st.markdown("#### 📜 Audit Trail / Histori Relokasi DO Ini")
+                df_hist = pd.DataFrame(do_hist)
+                st.dataframe(df_hist[["timestamp", "material", "old_site", "new_site", "reason"]], use_container_width=True)
+
+            st.markdown("---")
+
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
-                if st.button("💾 Simpan Perubahan DO", type="primary"):
+                if st.button("💾 Simpan Perubahan DO & Relokasi ke Database", type="primary"):
                     updated_materials = edited_mat_df.to_dict(orient="records")
                     payload_update = []
                     
@@ -533,8 +601,8 @@ def render():
                             "Material Code": row.get("Material Code"),
                             "Material Name": row.get("Material Name"),
                             "Qty": row.get("Qty"),
-                            "uom": row.get("uom"),
-                            "Site Allocation": row.get("Site Allocation"),
+                            "uom": row.get("uom", row.get("UoM")),
+                            "Site Allocation": row.get("Site Allocation", row.get("Site Alocation")),
                             "Remarks": row.get("Remarks", ""),
                             "To": e_to,
                             "Phone No.": e_contact,
@@ -542,10 +610,9 @@ def render():
                             "EPC": e_epc
                         })
 
-                    with st.spinner("Memperbarui database..."):
+                    with st.spinner("Memperbarui database Google Sheets..."):
                         if update_do_in_db_material_out(e_no_do, payload_update):
-                            st.success(f"Berhasil memperbarui {e_no_do}!")
-                            # Update session state
+                            st.success(f"Berhasil memperbarui {e_no_do} di database!")
                             st.session_state.current_do = {
                                 "no_do": e_no_do,
                                 "date": e_date,
@@ -558,7 +625,7 @@ def render():
                             st.rerun()
 
             with col_btn2:
-                if st.button("🖨️ Set Ke Preview & Cetak PDF"):
+                if st.button("🖨️ Set Ke Preview & Cetak PDF Baru"):
                     st.session_state.current_do = {
                         "no_do": edit_data['no_do'],
                         "date": edit_data['date'],
@@ -566,7 +633,7 @@ def render():
                         "to": edit_data['to'],
                         "contact": edit_data['contact'],
                         "address": edit_data['address'],
-                        "materials": edit_data['materials']
+                        "materials": edited_mat_df.to_dict(orient="records")
                     }
                     st.info("Data DO ini telah diset untuk preview! Buka tab **🖨️ Preview & PDF Cetak (A5)** untuk mengunduh PDF-nya.")
 
