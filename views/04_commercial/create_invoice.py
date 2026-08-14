@@ -316,6 +316,7 @@ def render():
             else:
                 site_name = st.text_input("Item Description / Site Name", placeholder="Ketik Site Name secara manual...")
 
+        # --- AUTO FETCH CHARGING TYPE & WO ---
         charging_type = ""
         wo_number = ""
 
@@ -335,25 +336,46 @@ def render():
 
         st.markdown("### 💳 Detail Pembayaran & Termin")
         
-        all_possible_termins = ["35%", "60%", "5%"]
+        # --- 🔄 OPSI PILIHAN SKEMA TOP (TERMS OF PAYMENT) ---
+        top_schema_options = {
+            "Skema Standar (35% - 60% - 5%)": ["35%", "60%", "5%"],
+            "Skema Baru (10% - 85% - 5%)": ["10%", "85%", "5%"]
+        }
+        
+        selected_schema = st.selectbox(
+            "Skema TOP (Terms of Payment)", 
+            options=list(top_schema_options.keys()),
+            help="Pilih skema TOP yang berlaku sesuai kesepakatan customer"
+        )
+        all_possible_termins = top_schema_options[selected_schema]
+
+        # --- 🔒 DETEKSI & ELIMINASI TERMIN YANG SUDAH TERBIT ---
         used_termins = []
 
         if selected_project == "VGreen - Project" and len(raw_db) > 1:
             for r in raw_db[1:]:
                 if len(r) > 6:
+                    db_charging = r[3].strip().lower()
                     db_site = r[4].strip().lower()
                     db_term = r[6].strip()
-                    if db_site == site_name.strip().lower():
+
+                    if db_site == site_name.strip().lower() and db_charging == charging_type.strip().lower():
                         used_termins.append(db_term)
 
         available_termins = [t for t in all_possible_termins if t not in used_termins]
 
         if selected_project == "VGreen - Project":
             if used_termins:
-                st.warning(f"ℹ️ Termin yang sudah pernah dibuat untuk site **{site_name}**: {', '.join(set(used_termins))}")
+                st.warning(
+                    f"ℹ️ Termin yang sudah pernah dibuat untuk site **{site_name}** "
+                    f"({charging_type}): **{', '.join(set(used_termins))}**"
+                )
             
             if not available_termins:
-                st.error(f"⛔ Semua termin (35%, 60%, 5%) untuk site **{site_name}** sudah terpakai di DB Invoice!")
+                st.error(
+                    f"⛔ Semua termin pada {selected_schema} untuk site **{site_name}** "
+                    f"({charging_type}) sudah terpakai di DB Invoice! Tidak bisa membuat invoice lagi."
+                )
 
         c1, c2, c3 = st.columns(3)
 
@@ -369,6 +391,7 @@ def render():
                 st.selectbox("Termin Pembayaran", options=["Penuh / Lunas"], disabled=True)
                 pct_val = 0.0
 
+        # --- FETCH BOQ AMOUNT ---
         boq_amount = 0.0
         if selected_project == "VGreen - Project" and site_name and len(raw_erp) > 1:
             for row in raw_erp[1:]:
@@ -402,6 +425,7 @@ def render():
 
         st.info(f"""
         **Ringkasan Perhitungan:**
+        * **Skema TOP Terpilih:** {selected_schema}
         * **BOQ Amount Base (Sheet ERP):** Rp {boq_amount:,.2f}
         * **Nilai Invoice ({selected_termin}):** Rp {termin_amount:,.2f}
         * **PPN ({tax_rate}%):** Rp {tax_amount:,.2f}
