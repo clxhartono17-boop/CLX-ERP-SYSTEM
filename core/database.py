@@ -1,5 +1,6 @@
 import os
 import io
+import time
 import base64
 import requests
 import gspread
@@ -196,80 +197,86 @@ def save_reimbursement_to_sheet(payload):
 
 @st.cache_data(ttl=300)
 def get_all_reimbursements():
-    try:
-        sh = get_google_sheet_connection()
-        worksheet = sh.worksheet(SHEET_REIMBURSEMENT)
-        all_data = worksheet.get_all_values()
+    max_retries = 3
+    retry_delay = 3
+    for attempt in range(max_retries):
+        try:
+            sh = get_google_sheet_connection()
+            worksheet = sh.worksheet(SHEET_REIMBURSEMENT)
+            all_data = worksheet.get_all_values()
 
-        if not all_data or len(all_data) < 2:
+            if not all_data or len(all_data) < 2:
+                return []
+
+            grouped = {}
+            for row in all_data[1:]:
+                if len(row) < 8:
+                    continue
+
+                form_no = row[2]
+                if not form_no:
+                    continue
+
+                pic = row[1]
+                date_str = row[3]
+                desc = row[4]
+                qty = int(row[5]) if str(row[5]).isdigit() else 1
+                amt = float(str(row[6]).replace(",", "").replace("Rp", "").strip() or 0)
+                tot = float(str(row[7]).replace(",", "").replace("Rp", "").strip() or 0)
+                remarks = row[8] if len(row) > 8 else ""
+                status_coo = row[9] if len(row) > 9 and row[9] else "Pending"
+                status_cfo = row[10] if len(row) > 10 and row[10] else "Pending"
+
+                raw_evident = row[11] if len(row) > 11 else ""
+                clean_evident = str(raw_evident).strip()
+                if clean_evident in ["0", "0.0", "None", "none"]:
+                    clean_evident = ""
+
+                if status_coo == "Rejected" or status_cfo == "Rejected":
+                    overall_status = "Rejected"
+                elif status_coo == "Approved" and status_cfo == "Approved":
+                    overall_status = "Approved"
+                elif status_coo == "Approved":
+                    overall_status = "Pending CFO"
+                else:
+                    overall_status = "Pending COO"
+
+                if form_no not in grouped:
+                    grouped[form_no] = {
+                        "form_no": form_no,
+                        "pic": pic,
+                        "date": date_str,
+                        "remarks": remarks,
+                        "status_coo": status_coo,
+                        "status_cfo": status_cfo,
+                        "status": overall_status,
+                        "items": [],
+                        "grand_total": 0.0,
+                        "image_links": []
+                    }
+
+                grouped[form_no]["items"].append({
+                    "no": len(grouped[form_no]["items"]) + 1,
+                    "description": desc,
+                    "qty": qty,
+                    "amount": amt,
+                    "total": tot,
+                    "evident": clean_evident
+                })
+
+                if clean_evident and clean_evident.startswith("http") and clean_evident not in grouped[form_no]["image_links"]:
+                    grouped[form_no]["image_links"].append(clean_evident)
+                    
+                grouped[form_no]["grand_total"] += tot
+
+            return list(grouped.values())
+
+        except Exception as e:
+            if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) and attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+                continue
+            st.error(f"❌ Gagal mengambil data Reimbursement: {e}")
             return []
-
-        grouped = {}
-        for row in all_data[1:]:
-            if len(row) < 8:
-                continue
-
-            form_no = row[2]
-            if not form_no:
-                continue
-
-            pic = row[1]
-            date_str = row[3]
-            desc = row[4]
-            qty = int(row[5]) if str(row[5]).isdigit() else 1
-            amt = float(str(row[6]).replace(",", "").replace("Rp", "").strip() or 0)
-            tot = float(str(row[7]).replace(",", "").replace("Rp", "").strip() or 0)
-            remarks = row[8] if len(row) > 8 else ""
-            status_coo = row[9] if len(row) > 9 and row[9] else "Pending"
-            status_cfo = row[10] if len(row) > 10 and row[10] else "Pending"
-
-            raw_evident = row[11] if len(row) > 11 else ""
-            clean_evident = str(raw_evident).strip()
-            if clean_evident in ["0", "0.0", "None", "none"]:
-                clean_evident = ""
-
-            if status_coo == "Rejected" or status_cfo == "Rejected":
-                overall_status = "Rejected"
-            elif status_coo == "Approved" and status_cfo == "Approved":
-                overall_status = "Approved"
-            elif status_coo == "Approved":
-                overall_status = "Pending CFO"
-            else:
-                overall_status = "Pending COO"
-
-            if form_no not in grouped:
-                grouped[form_no] = {
-                    "form_no": form_no,
-                    "pic": pic,
-                    "date": date_str,
-                    "remarks": remarks,
-                    "status_coo": status_coo,
-                    "status_cfo": status_cfo,
-                    "status": overall_status,
-                    "items": [],
-                    "grand_total": 0.0,
-                    "image_links": []
-                }
-
-            grouped[form_no]["items"].append({
-                "no": len(grouped[form_no]["items"]) + 1,
-                "description": desc,
-                "qty": qty,
-                "amount": amt,
-                "total": tot,
-                "evident": clean_evident
-            })
-
-            if clean_evident and clean_evident.startswith("http") and clean_evident not in grouped[form_no]["image_links"]:
-                grouped[form_no]["image_links"].append(clean_evident)
-                
-            grouped[form_no]["grand_total"] += tot
-
-        return list(grouped.values())
-
-    except Exception as e:
-        st.error(f"❌ Gagal mengambil data Reimbursement: {e}")
-        return []
 
 
 def update_reimbursement_status(form_no_target, new_status, approver_role, note=""):
@@ -500,60 +507,76 @@ def update_do_in_db_material_out(no_do_target, updated_rows_data):
 
 
 # ==============================================================================
-# 5. HELPER QUERY SHEET (DIOPTIMALKAN DENGAN CACHING UNTUK MENCEGAH ERROR 429)
+# 5. HELPER QUERY SHEET (DILINDUNGI CACHING & RETRY PROTEKSI ERROR 429)
 # ==============================================================================
 
-@st.cache_data(ttl=600)  # Data di-cache selama 10 menit
+@st.cache_data(ttl=1800)  # Menjadikan cache bertahan 30 menit untuk menekan request API
 def get_query_sheet_data():
     """
-    Mengambil data Sheet 'Query' secara utuh sebagai DataFrame dan di-cache.
-    Dipanggil oleh fetch_raw_query_data() di do.py.
+    Mengambil data Sheet 'Query' secara utuh sebagai DataFrame dengan Proteksi Backoff 429 Rate Limit.
     """
-    try:
-        sh = get_google_sheet_connection()
-        worksheet = sh.worksheet(SHEET_QUERY)
-        data = worksheet.get_all_records()
-        
-        if data:
-            return pd.DataFrame(data)
-        
-        all_values = worksheet.get_all_values()
-        if len(all_values) > 1:
-            headers = all_values[0]
-            rows = all_values[1:]
-            return pd.DataFrame(rows, columns=headers)
+    max_retries = 3
+    retry_delay = 3  # Jeda awal 3 detik jika terkena kuota limit
+    
+    for attempt in range(max_retries):
+        try:
+            sh = get_google_sheet_connection()
+            worksheet = sh.worksheet(SHEET_QUERY)
+            data = worksheet.get_all_records()
+            
+            if data:
+                return pd.DataFrame(data)
+            
+            all_values = worksheet.get_all_values()
+            if len(all_values) > 1:
+                headers = all_values[0]
+                rows = all_values[1:]
+                return pd.DataFrame(rows, columns=headers)
 
-        return pd.DataFrame()
+            return pd.DataFrame()
 
-    except Exception as e:
-        st.warning(f"⚠️ Gagal membaca Sheet '{SHEET_QUERY}': {e}")
-        return pd.DataFrame()
+        except Exception as e:
+            # Jika terkena Google Rate Limit (HTTP 429 / RESOURCE_EXHAUSTED)
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "RATE_LIMIT_EXCEEDED" in str(e):
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))  # Menunggu 3s, 6s, dst.
+                    continue
+            
+            st.warning(f"⚠️ Batas kuota pembacaan Google API tercapai pada Sheet '{SHEET_QUERY}'. Menggunakan data fallback/kosong sementara.")
+            return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
 def get_used_sites_from_db_material_out():
     """
     Membaca Sheet 'DB Material Out' untuk mendapatkan daftar site
-    yang sudah terpakai (Kolom I / Index 8).
+    yang sudah terpakai (Kolom I / Index 8) dengan proteksi rate limit.
     """
-    try:
-        sh = get_google_sheet_connection()
-        worksheet = sh.worksheet(SHEET_MATERIAL_OUT)
-        all_rows = worksheet.get_all_values()
+    max_retries = 3
+    retry_delay = 3
+    
+    for attempt in range(max_retries):
+        try:
+            sh = get_google_sheet_connection()
+            worksheet = sh.worksheet(SHEET_MATERIAL_OUT)
+            all_rows = worksheet.get_all_values()
 
-        if not all_rows or len(all_rows) < 2:
+            if not all_rows or len(all_rows) < 2:
+                return []
+
+            used_sites = set()
+            for row in all_rows[1:]:
+                if len(row) > 8 and str(row[8]).strip():
+                    used_sites.add(str(row[8]).strip())
+
+            return list(used_sites)
+
+        except Exception as e:
+            if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) and attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+                continue
+            st.warning(f"⚠️ Gagal mengambil used sites dari '{SHEET_MATERIAL_OUT}': {e}")
             return []
-
-        used_sites = set()
-        for row in all_rows[1:]:
-            if len(row) > 8 and str(row[8]).strip():
-                used_sites.add(str(row[8]).strip())
-
-        return list(used_sites)
-
-    except Exception as e:
-        st.warning(f"⚠️ Gagal mengambil used sites dari '{SHEET_MATERIAL_OUT}': {e}")
-        return []
 
 
 def get_epc_and_charging_dropdown_options():
@@ -563,7 +586,6 @@ def get_epc_and_charging_dropdown_options():
         if df.empty:
             return [], []
 
-        # Mengambil opsi kolom berdasarkan nama kolom atau index
         epc_col = df.columns[1] if len(df.columns) > 1 else None
         charging_col = df.columns[2] if len(df.columns) > 2 else None
 
