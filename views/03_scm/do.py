@@ -23,19 +23,24 @@ try:
         save_do_to_db_material_out,
         get_all_do_numbers,
         get_do_by_number,
-        update_do_in_db_material_out
+        update_do_in_db_material_out,
+        get_used_sites_from_db_material_out,
+        get_query_sheet_data  # Fungsi untuk mengambil data Sheet "Query"
     )
 except ImportError:
-    # Fallback dummy jika terputus
-    def generate_do_number(): return "0001/CLX/DO/VII/2026"
+    # Handler bawaan jika modul core.database belum terhubung
+    def generate_do_number(is_reloc=False): 
+        return "0002/CLX/DO-RELOC/VIII/2026" if is_reloc else "0001/CLX/DO/VIII/2026"
     def save_do_to_db_material_out(data): return True
     def get_all_do_numbers(): return []
     def get_do_by_number(no): return None
     def update_do_in_db_material_out(no, data): return True
+    def get_used_sites_from_db_material_out(): return []
+    def get_query_sheet_data(): return pd.DataFrame()
 
 
 # ==============================================================================
-# FUNGSI HELPER & LOGIC DATA
+# FUNGSI HELPER & LOGIC DATA SHEET "QUERY" (TANPA FALLBACK DATA)
 # ==============================================================================
 
 def load_master_dropdown():
@@ -44,22 +49,108 @@ def load_master_dropdown():
     expeditions = ["BCE", "Lalamove", "Self Pick Up", "JNE", "TIKI"]
     return charging_types, expeditions
 
+def fetch_raw_query_data():
+    """
+    Mengambil data Sheet 'Query' secara langsung dari Google Sheets.
+    Fallback data dummy telah dihapus total agar jika ada error koneksi,
+    pesan peringatan muncul secara transparan.
+    """
+    try:
+        df = get_query_sheet_data()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+    except Exception as e:
+        st.error(f"⚠️ Gagal mengambil data dari Google Sheets: {e}")
+    
+    return pd.DataFrame()
+
 def load_epc_list():
-    """Membaca data EPC dari Sheet 'Query' Kolom B"""
-    return ["PT Sunrise Internusa", "CLX", "PT Energi Nusantara"]
+    """Membaca daftar unik EPC Name dari Sheet 'Query' Kolom B"""
+    df_query = fetch_raw_query_data()
+    if not df_query.empty:
+        col_epc = 'EPC Name' if 'EPC Name' in df_query.columns else 'epc'
+        if col_epc in df_query.columns:
+            return sorted(df_query[col_epc].dropna().unique().tolist())
+    return []
 
 def load_filtered_sites(epc, charging_type):
-    """Filter data site pada Sheet 'Query' Kolom F (Maksimal 15 Site)"""
-    all_sites = [
-        "Stasiun Madiun", "Stasiun Ngawi", "Stasiun Magetan", "Stasiun Caruban",
-        "Stasiun Lamongan", "Stasiun Bojonegoro", "[T1D3] SWADAYA 2",
-        "[TAQ5] GOTONG ROYONG", "[TQY8] RAYA BAYUR", "Stasiun Kediri",
-        "Stasiun Blitar", "Stasiun Jombang", "Stasiun Kertosono", "Stasiun Tulungagung", "Stasiun Nganjuk"
-    ]
-    return all_sites[:15]
+    """
+    Membaca & Memfilter Sheet 'Query' dengan kriteria:
+    1. Kolom D (Project Status) BUKAN 'Drop' atau 'Cancel'
+    2. Kolom B (EPC Name) == epc & Kolom C (Charging Type) == charging_type
+    3. Mengeliminasi site di Kolom F yang SUDAH ada di Sheet 'DB Material Out' (Kolom U)
+    4. MENAMPILKAN SEMUA SITE HASIL FILTERING (Tanpa dibatasi 15 item di dropdown)
+    """
+    df_query = fetch_raw_query_data()
+    
+    # Ambil site yang sudah terpakai di DB Material Out (Kolom U)
+    try:
+        used_sites = get_used_sites_from_db_material_out()
+    except Exception:
+        used_sites = []
+
+    if df_query.empty:
+        return []
+
+    # Map nama kolom (Mendukung DataFrame asli GSheet)
+    col_epc = 'EPC Name' if 'EPC Name' in df_query.columns else 'epc'
+    col_charging = 'Charging Type' if 'Charging Type' in df_query.columns else 'charging'
+    col_status = 'Project Status' if 'Project Status' in df_query.columns else 'status'
+    col_site = 'Project / Location Name' if 'Project / Location Name' in df_query.columns else 'site'
+
+    target_epc = str(epc).strip().lower() if epc else ""
+    target_charging = str(charging_type).strip().lower() if charging_type else ""
+
+    valid_sites = []
+    for idx, row in df_query.iterrows():
+        status_val = str(row.get(col_status, '')).strip().lower()
+        epc_val = str(row.get(col_epc, '')).strip().lower()
+        charging_val = str(row.get(col_charging, '')).strip().lower()
+        site_name = str(row.get(col_site, '')).strip()
+
+        # Rule 1: Status BUKAN mengandung kata 'Drop' atau 'Cancel'
+        is_active = "drop" not in status_val and "cancel" not in status_val
+        # Rule 2: Filter EPC (Kolom B) & Charging Type (Kolom C)
+        is_match_epc = (epc_val == target_epc)
+        is_match_charging = (charging_val == target_charging)
+        # Rule 3: Filter site yang belum ada di DB Material Out
+        is_not_used = site_name not in used_sites
+
+        if is_active and is_match_epc and is_match_charging and is_not_used:
+            if site_name and site_name not in valid_sites:
+                valid_sites.append(site_name)
+
+    # Mengembalikan SELURUH site unik tanpa batasan 15 item
+    return list(dict.fromkeys(valid_sites))
+
+def load_available_relocation_sites():
+    """
+    Membaca Sheet 'Query' Kolom F (Project / Location Name)
+    dengan mengeliminasi status Drop dan Cancel.
+    """
+    df_query = fetch_raw_query_data()
+    if df_query.empty:
+        return []
+
+    col_status = 'Project Status' if 'Project Status' in df_query.columns else 'status'
+    col_site = 'Project / Location Name' if 'Project / Location Name' in df_query.columns else 'site'
+
+    valid_sites = []
+    for idx, row in df_query.iterrows():
+        status_val = str(row.get(col_status, '')).strip().lower()
+        site_name = str(row.get(col_site, '')).strip()
+        
+        if "drop" not in status_val and "cancel" not in status_val and site_name:
+            if site_name not in valid_sites:
+                valid_sites.append(site_name)
+            
+    return valid_sites
 
 def load_standard_charging_materials(charging_type):
     """Membaca Sheet 'Standart Charging Type'"""
+    if not charging_type:
+        return []
+
     raw_data = [
         {"code": "AC0001", "name": "Clamp Conduit", "uom": "Pcs", "qty_map": {"6S1P": 5, "12S1P": 5}},
         {"code": "AC0002", "name": "Kabel Schoen 16", "uom": "Pcs", "qty_map": {"6S1P": 10, "12S1P": 10}},
@@ -144,9 +235,9 @@ def generate_do_a5_pdf(data):
 
     to_box = [
         [Paragraph("<b>To</b>", body_bold), ""],
-        [Paragraph("Name:", body_style), Paragraph(str(data['to']), body_bold)],
-        [Paragraph("Phone No.:", body_style), Paragraph(str(data['contact']), body_style)],
-        [Paragraph("Address:", body_style), Paragraph(str(data['address']), body_style)]
+        [Paragraph("Name:", body_style), Paragraph(str(data.get('to', '')), body_bold)],
+        [Paragraph("Phone No.:", body_style), Paragraph(str(data.get('contact', '')), body_style)],
+        [Paragraph("Address:", body_style), Paragraph(str(data.get('address', '')), body_style)]
     ]
     to_table = Table(to_box, colWidths=[45, 140])
     to_table.setStyle(TableStyle([
@@ -158,9 +249,9 @@ def generate_do_a5_pdf(data):
 
     meta_box = [
         [Paragraph("<b>DELIVERY ORDER</b>", ParagraphStyle('DO', fontName='Helvetica-Bold', fontSize=8, alignment=1, textColor=colors.HexColor("#1a365d"))), ""],
-        [Paragraph("No. DO:", body_bold), Paragraph(str(data['no_do']), body_bold)],
-        [Paragraph("Date:", body_style), Paragraph(str(data['date']), body_style)],
-        [Paragraph("EPC:", body_style), Paragraph(str(data['epc']), body_style)],
+        [Paragraph("No. DO:", body_bold), Paragraph(str(data.get('no_do', '')), body_bold)],
+        [Paragraph("Date:", body_style), Paragraph(str(data.get('date', '')), body_style)],
+        [Paragraph("EPC:", body_style), Paragraph(str(data.get('epc', '')), body_style)],
         [Paragraph("Charging Type:", body_style), Paragraph(str(data.get('charging_type', '-')), body_style)],
         [Paragraph("Expedition:", body_style), Paragraph(str(data.get('expedition', '-')), body_style)]
     ]
@@ -184,28 +275,29 @@ def generate_do_a5_pdf(data):
         Paragraph("Material Name", header_table_style),
         Paragraph("Qty", header_table_style),
         Paragraph("UoM", header_table_style),
-        Paragraph("Site Allocation (Max. 15)", header_table_style),
+        Paragraph("Site Allocation", header_table_style),
         Paragraph("Remarks", header_table_style)
     ]
     
     mat_rows = [mat_headers]
-    for item in data['materials']:
+    for idx, item in enumerate(data['materials'], start=1):
         code = item.get('Material Code', item.get('code', ''))
         name = item.get('Material Name', item.get('name', ''))
-        site = item.get('Site Allocation', item.get('Site Alocation', ''))
-        uom = item.get('UoM', item.get('uom', 'Pcs'))
+        site = item.get('Site Alocation') or item.get('Site Allocation') or item.get('Remarks') or ''
+        uom = item.get('UoM') or item.get('uom') or 'Pcs'
+        qty = item.get('Qty', 0)
         
         mat_rows.append([
-            Paragraph(str(item['No']), ParagraphStyle('C', alignment=1, fontSize=6)),
+            Paragraph(str(idx), ParagraphStyle('C', alignment=1, fontSize=6)),
             Paragraph(str(code), body_style),
             Paragraph(str(name), body_style),
-            Paragraph(str(item['Qty']), ParagraphStyle('C', alignment=1, fontSize=6)),
+            Paragraph(str(qty), ParagraphStyle('C', alignment=1, fontSize=6)),
             Paragraph(str(uom), ParagraphStyle('C', alignment=1, fontSize=6)),
             Paragraph(str(site), body_style),
             Paragraph(str(item.get('Remarks', '')), body_style)
         ])
 
-    site_allocated_count = data.get('site_count', len([m for m in data['materials'] if m.get('Site Allocation') or m.get('Site Alocation')]))
+    site_allocated_count = data.get('site_count', len(set([m.get('Site Alocation') or m.get('Site Allocation') or m.get('Remarks') for m in data['materials'] if m.get('Site Alocation') or m.get('Site Allocation') or m.get('Remarks')])))
 
     mat_rows.append([
         Paragraph("<b>TOTAL SITE</b>", ParagraphStyle('R', fontName='Helvetica-Bold', fontSize=6.5, alignment=2)),
@@ -309,7 +401,6 @@ def render():
     st.title("🚚 Delivery Order (DO) Generator")
     st.caption("Divisi Supply Chain Management (SCM) - Create, Print, Search & Relocation DO")
 
-    # Inisialisasi State Histori Relokasi jika belum ada
     if "relocation_history" not in st.session_state:
         st.session_state.relocation_history = []
 
@@ -333,49 +424,55 @@ def render():
             no_do_auto = generate_do_number()
             no_do = st.text_input("1. No. DO (Auto)", value=no_do_auto, disabled=True)
             do_date = st.date_input("2. Date", datetime.now())
-            epc = st.selectbox("3. EPC (Query Sheet)", epc_list)
+            epc = st.selectbox("3. EPC (Query Sheet)", epc_list if epc_list else ["Pilih EPC..."], index=None, placeholder="Pilih EPC...")
 
         with col2:
-            charging_type = st.selectbox("4. Charging Type (Master Dropdown)", charging_list)
-            expedition = st.selectbox("5. Expedition (Master Dropdown)", exp_list)
-            to_name = st.text_input("6. To (Recipient Name)", placeholder="Contoh: sasuke")
+            charging_type = st.selectbox("4. Charging Type (Master Dropdown)", charging_list, index=None, placeholder="Pilih Charging Type...")
+            expedition = st.selectbox("5. Expedition (Master Dropdown)", exp_list, index=None, placeholder="Pilih Ekspedisi...")
+            to_name = st.text_input("6. To (Recipient Name)", value="", placeholder="Contoh: Tsubasa Ozora")
 
         with col3:
-            contact = st.text_input("7. Contact (Phone No.)", placeholder="Contoh: 8964254")
-            address = st.text_area("8. Address", placeholder="Contoh: konoha", height=110)
+            contact = st.text_input("7. Contact (Phone No.)", value="", placeholder="Contoh: 081234567890")
+            address = st.text_area("8. Address", value="", placeholder="Contoh: Alamat Tujuan", height=110)
 
         st.divider()
         st.subheader("Filter Site & Kalkulasi Material Automatic")
 
-        available_sites = load_filtered_sites(epc, charging_type)
+        # FILTER SITE REAL DARI SHEET "QUERY" (Menampilkan SEMUA Site hasil kriteria)
+        if epc and charging_type:
+            available_sites = load_filtered_sites(epc, charging_type)
+        else:
+            available_sites = []
+
+        # UI Streamlit Multiselect: Menampilkan SEMUA Opsi Site, tapi Membatasi Pemilihan Maksimal 15 Site
         selected_sites = st.multiselect(
-            "Alokasi Site (Maksimal 15 Site terfilter):",
+            "Alokasi Site (Maksimal 15 Site terpilih):",
             options=available_sites,
-            default=available_sites[:9],
-            max_selections=15
+            default=[],
+            max_selections=15,
+            placeholder="Pilih Alokasi Site..." if (epc and charging_type) else "⚠️ Silakan pilih EPC dan Charging Type terlebih dahulu..."
         )
         
         site_count = len(selected_sites)
-        st.info(f"📊 Total Site Terpilih: **{site_count} Site Allocated**")
+        st.info(f"📊 Total Site Terpilih: **{site_count} Site Allocated** (Maksimal 15 Site)")
 
-        raw_materials = load_standard_charging_materials(charging_type)
+        raw_materials = load_standard_charging_materials(charging_type) if charging_type else []
+        
         table_data = []
         for idx, item in enumerate(raw_materials, start=1):
-            total_qty = item["std_qty"] * site_count
-            allocated_site = selected_sites[idx-1] if idx <= len(selected_sites) else ""
+            total_qty = item["std_qty"] * (site_count if site_count > 0 else 1)
             table_data.append({
                 "No": idx,
                 "Material Code": item["code"],
                 "Material Name": item["name"],
                 "Qty": total_qty,
                 "UoM": item["uom"],
-                "Site Allocation": allocated_site,
                 "Remarks": ""
             })
 
         df_materials = pd.DataFrame(table_data)
 
-        st.subheader("Detail Material & Site Allocation")
+        st.subheader("Detail Material Item (Akan Didistribusikan per Site)")
         edited_df = st.data_editor(
             df_materials,
             num_rows="dynamic",
@@ -384,9 +481,8 @@ def render():
                 "No": st.column_config.NumberColumn(width="small", disabled=True),
                 "Material Code": st.column_config.TextColumn(disabled=True),
                 "Material Name": st.column_config.TextColumn(disabled=True),
-                "Qty": st.column_config.NumberColumn("Qty (Auto calculated)", help="Qty = Std Qty x Total Site"),
+                "Qty": st.column_config.NumberColumn("Total Qty (Auto calculated)", help="Qty = Std Qty x Total Site"),
                 "UoM": st.column_config.TextColumn(disabled=True),
-                "Site Allocation": st.column_config.TextColumn("Site Allocation (Max 15)"),
                 "Remarks": st.column_config.TextColumn("Remarks")
             }
         )
@@ -394,32 +490,50 @@ def render():
         st.divider()
 
         if st.button("🚀 Simpan & Generate Delivery Order", type="primary"):
-            if not to_name or not address:
+            if not epc or not charging_type or not expedition:
+                st.error("EPC, Charging Type, dan Expedition wajib dipilih!")
+            elif not to_name or not address:
                 st.error("Kolom 'To' dan 'Address' wajib diisi!")
+            elif site_count == 0:
+                st.error("Pilih minimal 1 Site Allocation!")
             else:
                 date_str = do_date.strftime("%Y-%m-%d")
-                materials_list = edited_df.to_dict(orient="records")
                 
-                db_rows = []
-                for row in materials_list:
-                    db_rows.append({
-                        "No": row["No"],
-                        "No. DO": no_do,
-                        "Delv. Date": date_str,
-                        "Material Code": row["Material Code"],
-                        "Material Name": row["Material Name"],
-                        "Qty": row["Qty"],
-                        "uom": row["UoM"],
-                        "Site Alocation": row["Site Allocation"],
-                        "Remarks": row.get("Remarks", ""),
-                        "To": to_name,
-                        "Phone No.": contact,
-                        "Address": address,
-                        "EPC": epc
-                    })
+                generated_db_rows = []
+                row_counter = 1
+                
+                # KONVERSI OTOMATIS BERDASARKAN BANYAKNYA SITE & MASUK KE KOLOM A:N SHEET DB MATERIAL OUT
+                for site_name in selected_sites:
+                    for mat_item in raw_materials:
+                        generated_db_rows.append({
+                            # KOLOM A:N (DO BARU)
+                            "No": row_counter,
+                            "No. DO": no_do,
+                            "Delv. Date": date_str,
+                            "Material Code": mat_item["code"],
+                            "Material Name": mat_item["name"],
+                            "Qty": mat_item["std_qty"],
+                            "UoM": mat_item["uom"],
+                            "Charging Type": charging_type,
+                            "Site Alocation": site_name,
+                            "Remarks": site_name,
+                            "To": to_name,
+                            "Phone No.": contact,
+                            "Address": address,
+                            "EPC": epc,
+                            
+                            # KOLOM O:T (DO RELOKASI - DIBIARKAN KOSONG PADA SAAT INITIAL CREATE)
+                            "Date Reloc.": "",
+                            "No. DO Reloc.": "",
+                            "Qty Reloc.": "",
+                            "Site Reloc.": "",
+                            "Mitra Reloc.": "",
+                            "Remarks Reloc.": ""
+                        })
+                        row_counter += 1
 
                 with st.spinner("Menyimpan transaksi ke sheet 'DB Material Out'..."):
-                    save_do_to_db_material_out(db_rows)
+                    save_do_to_db_material_out(generated_db_rows)
 
                 st.session_state.current_do = {
                     "no_do": no_do,
@@ -432,7 +546,7 @@ def render():
                     "address": address,
                     "sites": selected_sites,
                     "site_count": site_count,
-                    "materials": materials_list
+                    "materials": generated_db_rows
                 }
                 
                 st.success(f"✅ Delivery Order {no_do} berhasil disimpan ke sheet 'DB Material Out'!")
@@ -493,19 +607,22 @@ def render():
 
             ecol1, ecol2, ecol3 = st.columns(3)
             with ecol1:
-                e_no_do = st.text_input("No. DO", value=edit_data['no_do'], disabled=True, key="e_no_do")
-                e_date = st.text_input("Delivery Date", value=edit_data['date'], key="e_date")
+                e_no_do = st.text_input("No. DO", value=edit_data.get('no_do', ''), disabled=True, key="e_no_do")
+                e_date = st.text_input("Delivery Date", value=edit_data.get('date', ''), key="e_date")
             with ecol2:
-                e_to = st.text_input("To (Recipient)", value=edit_data['to'], key="e_to")
-                e_contact = st.text_input("Phone No.", value=edit_data['contact'], key="e_contact")
+                e_to = st.text_input("To (Recipient)", value=edit_data.get('to', ''), key="e_to")
+                e_contact = st.text_input("Phone No.", value=edit_data.get('contact', ''), key="e_contact")
             with ecol3:
-                e_epc = st.text_input("EPC", value=edit_data['epc'], key="e_epc")
-                e_address = st.text_area("Address", value=edit_data['address'], key="e_address", height=100)
+                e_epc = st.text_input("EPC", value=edit_data.get('epc', ''), key="e_epc")
+                e_address = st.text_area("Address", value=edit_data.get('address', ''), key="e_address", height=100)
 
-            st.write("**Material Items:**")
+            st.write("**Material Items per Site Allocation:**")
             df_edit_mat = pd.DataFrame(edit_data['materials'])
             
-            cols_to_show = ["No", "Material Code", "Material Name", "Qty", "uom", "Site Allocation", "Remarks"]
+            # Tampilkan Tabel Data (A:T)
+            cols_to_show = ["No", "No. DO", "Delv. Date", "Material Code", "Material Name", "Qty", "UoM", "Charging Type", "Site Alocation", "Remarks", 
+                            "To", "Phone No.", "Address", "EPC", "Date Reloc.", "No. DO Reloc.", "Qty Reloc.", "Site Reloc.", "Mitra Reloc.", "Remarks Reloc."]
+            
             cols_existing = [c for c in cols_to_show if c in df_edit_mat.columns]
             
             edited_mat_df = st.data_editor(
@@ -516,102 +633,142 @@ def render():
             )
 
             # ==================================================================
-            # 🔄 MODUL FITUR RELOKASI SITE MATERIAL
+            # MODUL FITUR RELOKASI SITE MATERIAL (PRESISI DATABASE KOLOM O:T)
             # ==================================================================
             st.markdown("---")
-            st.subheader("🔁 Form Relokasi Material Site")
-            st.info("Gunakan modul ini jika ada material yang salah alokasi dan harus dipindahkan ke site lain tanpa menghilangkan histori.")
+            st.subheader("🔁 Form Eksekusi Relokasi Site Material")
+            st.info("Fitur ini akan memperbarui Kolom O:T pada DO Asal dan otomatis membuat baris DO Relokasi Baru di DB.")
 
-            with st.expander("📌 Klik di sini untuk Melakukan Relokasi Material", expanded=False):
-                # Ambil daftar material yang tersedia
-                mat_options = edited_mat_df["Material Name"].tolist() if "Material Name" in edited_mat_df.columns else []
+            with st.expander("📌 Klik di sini untuk Melakukan Relokasi Site", expanded=True):
                 
-                col_r1, col_r2, col_r3 = st.columns(3)
+                # 1. AMBIL SITE ASAL DARI DO INI
+                raw_sites_in_do = []
+                if "Site Alocation" in edited_mat_df.columns:
+                    raw_sites_in_do.extend(edited_mat_df["Site Alocation"].dropna().astype(str).tolist())
+                if "Site Allocation" in edited_mat_df.columns:
+                    raw_sites_in_do.extend(edited_mat_df["Site Allocation"].dropna().astype(str).tolist())
+                if "Remarks" in edited_mat_df.columns:
+                    raw_sites_in_do.extend(edited_mat_df["Remarks"].dropna().astype(str).tolist())
+
+                current_do_sites = []
+                for s in raw_sites_in_do:
+                    clean_s = s.strip()
+                    if clean_s and clean_s not in current_do_sites and not clean_s.isdigit() and clean_s != "None":
+                        current_do_sites.append(clean_s)
+
+                # 2. AMBIL SITE QUERY & TANGKAP SEMUA SITE YANG SUDAH PERNAH MEMILIKI DO
+                all_query_sites = load_available_relocation_sites()
+                used_sites_set = set(current_do_sites)
+                selectable_new_sites = [s for s in all_query_sites if s not in used_sites_set]
+
+                col_r1, col_r2 = st.columns(2)
                 with col_r1:
-                    target_mat_name = st.selectbox("Pilih Material yang Direlokasi:", options=mat_options, key="reloc_mat")
-                
-                # Cari site asal dari material terpilih
-                current_site_val = ""
-                if target_mat_name and not edited_mat_df.empty:
-                    match_row = edited_mat_df[edited_mat_df["Material Name"] == target_mat_name]
-                    if not match_row.empty:
-                        col_site = "Site Allocation" if "Site Allocation" in match_row.columns else "Site Alocation"
-                        current_site_val = match_row.iloc[0][col_site]
-
+                    selected_site_old = st.selectbox(
+                        "Pilih Site Asal yang Ingin Direlokasi:", 
+                        options=current_do_sites if current_do_sites else ["Tidak Ada Site"], 
+                        key="reloc_old_site"
+                    )
                 with col_r2:
-                    old_site = st.text_input("Site Asal (Old Site)", value=current_site_val, disabled=True, key="reloc_old_site")
-                with col_r3:
-                    new_site = st.text_input("Site Tujuan Baru (New Site)", placeholder="Contoh: Stasiun Kediri", key="reloc_new_site")
+                    selected_site_new = st.selectbox(
+                        "Nama Site Tujuan Baru (New Site):", 
+                        options=selectable_new_sites if selectable_new_sites else ["Tidak ada site baru yang tersedia"], 
+                        key="reloc_new_site"
+                    )
 
-                reloc_reason = st.text_input("Alasan Relokasi / CatatanTambahan:", placeholder="Contoh: Salah kirim tim lapangan / Revisi WO", key="reloc_reason")
+                reloc_mitra = st.text_input("Mitra Relokasi:", placeholder="Contoh: PT Mitra Jaya", key="reloc_mitra")
+                reloc_remarks = st.text_input("Alasan / Catatan Relokasi:", placeholder="Contoh: Perubahan WO Lapangan / Re-alloc Site", key="reloc_reason")
 
                 if st.button("🔀 Eksekusi Relokasi Site", type="secondary"):
-                    if not new_site:
-                        st.error("Site Tujuan Baru wajib diisi!")
-                    elif old_site == new_site:
+                    if selected_site_old == "Tidak Ada Site":
+                        st.error("Site asal tidak ditemukan!")
+                    elif not selected_site_new or selected_site_new == "Tidak ada site baru yang tersedia":
+                        st.error("Silakan pilih Site Tujuan Baru yang valid!")
+                    elif selected_site_old == selected_site_new:
                         st.warning("Site Asal dan Site Tujuan Baru tidak boleh sama!")
                     else:
-                        now_stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        reloc_date = datetime.now().strftime("%Y-%m-%d")
+                        reloc_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
                         
-                        # Update dataframe & tambahkan histori di remarks
-                        col_site_key = "Site Allocation" if "Site Allocation" in edited_mat_df.columns else "Site Alocation"
-                        for idx, row in edited_mat_df.iterrows():
-                            if row["Material Name"] == target_mat_name:
-                                edited_mat_df.at[idx, col_site_key] = new_site
-                                old_rem = str(row.get("Remarks", ""))
-                                new_rem = f"[Relokasi {now_stamp}: dari '{old_site}' ke '{new_site}'. Ket: {reloc_reason}] {old_rem}".strip()
-                                edited_mat_df.at[idx, "Remarks"] = new_rem
+                        try:
+                            new_reloc_do_num = generate_do_number(is_reloc=True)
+                        except TypeError:
+                            new_reloc_do_num = f"0002/CLX/DO-RELOC/VIII/2026"
 
-                        # Simpan ke histori relokasi session
+                        new_reloc_rows_to_save = []
+
+                        # UPDATE KOLOM O:T PADA DO ASAL
+                        for idx, row in edited_mat_df.iterrows():
+                            site_in_row = str(row.get("Site Alocation") or row.get("Site Allocation") or row.get("Remarks") or "").strip()
+                            
+                            if site_in_row == str(selected_site_old).strip():
+                                # ISI PRESISI KOLOM O:T Pada Sheet DB Material Out untuk DO Lama
+                                edited_mat_df.at[idx, "Date Reloc."] = reloc_date          # Kolom O
+                                edited_mat_df.at[idx, "No. DO Reloc."] = new_reloc_do_num # Kolom P
+                                edited_mat_df.at[idx, "Qty Reloc."] = row["Qty"]           # Kolom Q
+                                edited_mat_df.at[idx, "Site Reloc."] = selected_site_new  # Kolom R
+                                edited_mat_df.at[idx, "Mitra Reloc."] = reloc_mitra        # Kolom S
+                                edited_mat_df.at[idx, "Remarks Reloc."] = reloc_remarks    # Kolom T
+
+                                # Buat Row Baru Lengkap (Kolom A:N) untuk DO Relokasi Baru
+                                new_row = row.copy()
+                                new_row["No. DO"] = new_reloc_do_num
+                                new_row["Delv. Date"] = reloc_date
+                                new_row["Material Code"] = row.get("Material Code", "")
+                                new_row["Material Name"] = row.get("Material Name", "")
+                                new_row["Qty"] = row.get("Qty", 0)
+                                new_row["UoM"] = row.get("UoM") or row.get("uom") or "Pcs"
+                                new_row["Charging Type"] = row.get("Charging Type", "")
+                                new_row["Site Alocation"] = selected_site_new
+                                new_row["Remarks"] = selected_site_new
+                                new_row["To"] = e_to
+                                new_row["Phone No."] = e_contact
+                                new_row["Address"] = e_address
+                                new_row["EPC"] = e_epc
+                                
+                                # Clear Kolom O:T untuk Baris DO Relokasi Baru
+                                new_row["Date Reloc."] = ""
+                                new_row["No. DO Reloc."] = ""
+                                new_row["Qty Reloc."] = ""
+                                new_row["Site Reloc."] = ""
+                                new_row["Mitra Reloc."] = ""
+                                new_row["Remarks Reloc."] = ""
+                                
+                                new_reloc_rows_to_save.append(new_row.to_dict())
+
+                        # Simpan pembaruan Kolom O:T DO Asal & Simpan Baris DO Relokasi Baru ke DB
+                        update_do_in_db_material_out(e_no_do, edited_mat_df.to_dict(orient="records"))
+                        save_do_to_db_material_out(new_reloc_rows_to_save)
+
+                        # Simpan Histori Lokal
                         st.session_state.relocation_history.append({
                             "no_do": e_no_do,
-                            "timestamp": now_stamp,
-                            "material": target_mat_name,
-                            "old_site": old_site,
-                            "new_site": new_site,
-                            "reason": reloc_reason
+                            "timestamp": reloc_timestamp,
+                            "old_site": selected_site_old,
+                            "new_site": selected_site_new,
+                            "reloc_do": new_reloc_do_num,
+                            "reason": reloc_remarks
                         })
 
-                        st.success(f"✅ Berhasil merelokasi **{target_mat_name}** dari **{old_site}** ke **{new_site}**!")
+                        st.success(f"✅ Relokasi Berhasil! Kolom O:T DO Asal telah diisi & Terbuat DO Relokasi Baru: **{new_reloc_do_num}**")
                         st.rerun()
 
-            # ==================================================================
-            # 📜 HISTORI RELOKASI MATERIAL
-            # ==================================================================
-            # Filter histori relokasi khusus untuk No DO yang sedang dibuka
+            # ------------------------------------------------------------------
+            # HISTORI RELOKASI MATERIAL
+            # ------------------------------------------------------------------
             do_hist = [h for h in st.session_state.relocation_history if h["no_do"] == e_no_do]
             if do_hist:
                 st.markdown("#### 📜 Audit Trail / Histori Relokasi DO Ini")
                 df_hist = pd.DataFrame(do_hist)
-                st.dataframe(df_hist[["timestamp", "material", "old_site", "new_site", "reason"]], use_container_width=True)
+                st.dataframe(df_hist[["timestamp", "old_site", "new_site", "reloc_do", "reason"]], use_container_width=True)
 
             st.markdown("---")
 
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
-                if st.button("💾 Simpan Perubahan DO & Relokasi ke Database", type="primary"):
+                if st.button("💾 Simpan Perubahan Edit Manual DO", type="primary"):
                     updated_materials = edited_mat_df.to_dict(orient="records")
-                    payload_update = []
-                    
-                    for row in updated_materials:
-                        payload_update.append({
-                            "No": row.get("No"),
-                            "No. DO": e_no_do,
-                            "Delv. Date": e_date,
-                            "Material Code": row.get("Material Code"),
-                            "Material Name": row.get("Material Name"),
-                            "Qty": row.get("Qty"),
-                            "uom": row.get("uom", row.get("UoM")),
-                            "Site Allocation": row.get("Site Allocation", row.get("Site Alocation")),
-                            "Remarks": row.get("Remarks", ""),
-                            "To": e_to,
-                            "Phone No.": e_contact,
-                            "Address": e_address,
-                            "EPC": e_epc
-                        })
-
                     with st.spinner("Memperbarui database Google Sheets..."):
-                        if update_do_in_db_material_out(e_no_do, payload_update):
+                        if update_do_in_db_material_out(e_no_do, updated_materials):
                             st.success(f"Berhasil memperbarui {e_no_do} di database!")
                             st.session_state.current_do = {
                                 "no_do": e_no_do,
@@ -620,19 +777,19 @@ def render():
                                 "to": e_to,
                                 "contact": e_contact,
                                 "address": e_address,
-                                "materials": payload_update
+                                "materials": updated_materials
                             }
                             st.rerun()
 
             with col_btn2:
                 if st.button("🖨️ Set Ke Preview & Cetak PDF Baru"):
                     st.session_state.current_do = {
-                        "no_do": edit_data['no_do'],
-                        "date": edit_data['date'],
-                        "epc": edit_data['epc'],
-                        "to": edit_data['to'],
-                        "contact": edit_data['contact'],
-                        "address": edit_data['address'],
+                        "no_do": edit_data.get('no_do', ''),
+                        "date": edit_data.get('date', ''),
+                        "epc": edit_data.get('epc', ''),
+                        "to": edit_data.get('to', ''),
+                        "contact": edit_data.get('contact', ''),
+                        "address": edit_data.get('address', ''),
                         "materials": edited_mat_df.to_dict(orient="records")
                     }
                     st.info("Data DO ini telah diset untuk preview! Buka tab **🖨️ Preview & PDF Cetak (A5)** untuk mengunduh PDF-nya.")
