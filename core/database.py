@@ -185,6 +185,7 @@ def save_reimbursement_to_sheet(payload):
         
         if rows_to_append:
             worksheet.append_rows(rows_to_append)
+            st.cache_data.clear()  # Clear cache setelah ada penulisan data baru
             return True
         return False
 
@@ -193,6 +194,7 @@ def save_reimbursement_to_sheet(payload):
         return False
 
 
+@st.cache_data(ttl=300)
 def get_all_reimbursements():
     try:
         sh = get_google_sheet_connection()
@@ -289,6 +291,7 @@ def update_reimbursement_status(form_no_target, new_status, approver_role, note=
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)
+            st.cache_data.clear()  # Clear cache setelah update
             return True
         return False
 
@@ -364,6 +367,7 @@ def save_do_to_db_material_out(rows_data):
 
         if records:
             worksheet.append_rows(records)
+            st.cache_data.clear()  # Clear cache setelah data baru ditambahkan
             return True
         return False
 
@@ -372,6 +376,7 @@ def save_do_to_db_material_out(rows_data):
         return False
 
 
+@st.cache_data(ttl=300)
 def get_all_do_numbers():
     """Mengambil list unik seluruh Nomor DO yang sudah tersimpan"""
     try:
@@ -486,6 +491,7 @@ def update_do_in_db_material_out(no_do_target, updated_rows_data):
 
         worksheet.clear()
         worksheet.update('A1', kept_rows)
+        st.cache_data.clear()  # Clear cache setelah update
         return True
 
     except Exception as e:
@@ -494,13 +500,14 @@ def update_do_in_db_material_out(no_do_target, updated_rows_data):
 
 
 # ==============================================================================
-# 5. HELPER QUERY SHEET (KOMPATIBILITAS PRESISI UNTUK DO.PY)
+# 5. HELPER QUERY SHEET (DIOPTIMALKAN DENGAN CACHING UNTUK MENCEGAH ERROR 429)
 # ==============================================================================
 
+@st.cache_data(ttl=600)  # Data di-cache selama 10 menit
 def get_query_sheet_data():
     """
-    Mengambil data Sheet 'Query' secara utuh sebagai DataFrame.
-    Dipanggil langsung oleh fungsi fetch_raw_query_data() di do.py.
+    Mengambil data Sheet 'Query' secara utuh sebagai DataFrame dan di-cache.
+    Dipanggil oleh fetch_raw_query_data() di do.py.
     """
     try:
         sh = get_google_sheet_connection()
@@ -523,11 +530,11 @@ def get_query_sheet_data():
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
 def get_used_sites_from_db_material_out():
     """
     Membaca Sheet 'DB Material Out' untuk mendapatkan daftar site
     yang sudah terpakai (Kolom I / Index 8).
-    Dipanggil oleh load_filtered_sites() di do.py.
     """
     try:
         sh = get_google_sheet_connection()
@@ -539,7 +546,6 @@ def get_used_sites_from_db_material_out():
 
         used_sites = set()
         for row in all_rows[1:]:
-            # Site Allocation berada di Kolom I (Index 8)
             if len(row) > 8 and str(row[8]).strip():
                 used_sites.add(str(row[8]).strip())
 
@@ -551,31 +557,20 @@ def get_used_sites_from_db_material_out():
 
 
 def get_epc_and_charging_dropdown_options():
-    """Mengambil list unik EPC & Charging Type untuk dropdown Form Header"""
+    """Mengambil list unik EPC & Charging Type dari cache DataFrame Query"""
     try:
-        sh = get_google_sheet_connection()
-        
-        try:
-            worksheet = sh.worksheet(SHEET_QUERY)
-        except gspread.exceptions.WorksheetNotFound:
-            st.error(f"❌ Tab Sheet '{SHEET_QUERY}' tidak ditemukan di Google Sheets!")
+        df = get_query_sheet_data()
+        if df.empty:
             return [], []
 
-        all_rows = worksheet.get_all_values()
-        
-        if not all_rows or len(all_rows) < 2:
-            return [], []
+        # Mengambil opsi kolom berdasarkan nama kolom atau index
+        epc_col = df.columns[1] if len(df.columns) > 1 else None
+        charging_col = df.columns[2] if len(df.columns) > 2 else None
 
-        epc_set = set()
-        charging_set = set()
+        epc_list = sorted(list(df[epc_col].dropna().astype(str).str.strip().unique())) if epc_col else []
+        charging_list = sorted(list(df[charging_col].dropna().astype(str).str.strip().unique())) if charging_col else []
 
-        for row in all_rows[1:]:
-            if len(row) > 1 and str(row[1]).strip():
-                epc_set.add(str(row[1]).strip())
-            if len(row) > 2 and str(row[2]).strip():
-                charging_set.add(str(row[2]).strip())
-
-        return sorted(list(epc_set)), sorted(list(charging_set))
+        return [x for x in epc_list if x], [x for x in charging_list if x]
 
     except Exception as e:
         st.error(f"❌ Gagal mengambil opsi EPC & Charging: {e}")
@@ -584,40 +579,32 @@ def get_epc_and_charging_dropdown_options():
 
 def get_sites_by_epc_and_charging(epc_target, charging_type_target):
     """
-    Membaca sheet 'Query' dan mengambil daftar site (Kolom F / Index 5)
-    berdasarkan pencocokan EPC (Kolom B / Idx 1) dan Charging Type (Kolom C / Idx 2).
+    Membaca DataFrame 'Query' yang di-cache dan memfilter daftar site
+    berdasarkan pencocokan EPC dan Charging Type tanpa memanggil Google API lagi.
     """
     try:
-        sh = get_google_sheet_connection()
-        try:
-            worksheet = sh.worksheet(SHEET_QUERY)
-        except gspread.exceptions.WorksheetNotFound:
-            st.error(f"❌ Tab Sheet '{SHEET_QUERY}' tidak ditemukan di Google Sheets!")
+        df = get_query_sheet_data()
+        if df.empty or len(df.columns) <= 5:
             return []
 
-        all_rows = worksheet.get_all_values()
-        if not all_rows or len(all_rows) < 2:
-            return []
-
-        filtered_sites = []
         epc_clean = str(epc_target).strip().lower() if epc_target else ""
         charging_clean = str(charging_type_target).strip().lower() if charging_type_target else ""
 
-        for row in all_rows[1:]:
-            if len(row) > 5:
-                row_epc = str(row[1]).strip().lower()
-                row_charging = str(row[2]).strip().lower()
-                project_status = str(row[3]).strip().lower()
-                site_name = str(row[5]).strip()
+        col_epc = df.columns[1]
+        col_charging = df.columns[2]
+        col_status = df.columns[3]
+        col_site = df.columns[5]
 
-                if "cancel" in project_status or "drop" in project_status:
-                    continue
-
-                if site_name and (row_epc == epc_clean) and (row_charging == charging_clean):
-                    if site_name not in filtered_sites:
-                        filtered_sites.append(site_name)
-
-        return filtered_sites
+        # Filter data tanpa hit Google API
+        mask = (
+            (df[col_epc].astype(str).str.strip().str.lower() == epc_clean) &
+            (df[col_charging].astype(str).str.strip().str.lower() == charging_clean) &
+            (~df[col_status].astype(str).str.strip().str.lower().str.contains("cancel|drop", regex=True, na=False))
+        )
+        
+        filtered_df = df[mask]
+        sites = filtered_df[col_site].dropna().astype(str).str.strip().unique().tolist()
+        return [s for s in sites if s]
 
     except Exception as e:
         st.error(f"❌ Gagal mengambil data site dari Sheet 'Query': {e}")
