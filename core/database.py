@@ -1,12 +1,11 @@
 import os
 import io
 import base64
-import traceback
 import requests
 import gspread
+import pandas as pd
 from datetime import datetime
 import streamlit as st
-from PIL import Image
 
 # Google Service Account API Imports
 from google.oauth2.service_account import Credentials
@@ -17,6 +16,7 @@ from google.oauth2.service_account import Credentials
 SPREADSHEET_ID = "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
 SHEET_REIMBURSEMENT = "DB Reimbursement"
 SHEET_MATERIAL_OUT = "DB Material Out"
+SHEET_QUERY = "Query"
 GOOGLE_DRIVE_ROOT_FOLDER_ID = "1fto5kD7X_pYT21F6Qr1RLfmBSmEb1O3o"
 
 # URL Apps Script Web App untuk Upload Gambar ke Google Drive
@@ -37,7 +37,6 @@ SCOPES = [
 def get_google_sheet_connection():
     """Mengembalikan koneksi gspread Spreadsheet utama menggunakan Service Account Credentials."""
     try:
-        # Mengambil data dictionary dari st.secrets['gcp_service_account']
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
             creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
@@ -70,16 +69,13 @@ def get_roman_month(month_int):
 # ==============================================================================
 
 def upload_image_to_gdrive(file_bytes, file_name, pic_name, date_str):
-    """
-    Mengunggah gambar ke Google Drive melalui HTTP POST ke Apps Script Web App.
-    """
+    """Mengunggah gambar ke Google Drive melalui HTTP POST ke Apps Script Web App."""
     print("🔥 MENGIRIM FILE KE APPS SCRIPT WEB APP")
     try:
         if not file_bytes:
             print("❌ ERROR: file_bytes kosong atau bernilai None!")
             return ""
 
-        # Encode file bytes menjadi base64 agar aman dikirimkan lewat JSON payload
         file_base64 = base64.b64encode(file_bytes).decode('utf-8')
 
         cleaned_file_name = file_name.lower()
@@ -93,23 +89,19 @@ def upload_image_to_gdrive(file_bytes, file_name, pic_name, date_str):
             "dateStr": date_str
         }
 
-        # Kirim HTTP POST ke Google Apps Script Web App
         response = requests.post(APPS_SCRIPT_WEB_APP_URL, json=payload, timeout=30)
-        
-        print("DEBUG RESPONSE JSON:", response.text) # Tambahan debug untuk memastikan respon Apps Script
+        print("DEBUG RESPONSE JSON:", response.text)
         
         if response.status_code == 200:
             res_json = response.json()
-            print(res_json) # Debug print sesuai instruksi
+            print(res_json)
             
             if res_json.get("status") == "success":
                 file_id = res_json.get("fileId", "")
-                
                 if file_id:
                     uploaded_data = f"https://drive.google.com/thumbnail?id={file_id}&sz=w1200"
                     print("URL THUMBNAIL:", uploaded_data)
                     return uploaded_data
-
                 return ""
             else:
                 st.error(f"Gagal di Apps Script: {res_json.get('message')}")
@@ -124,7 +116,7 @@ def upload_image_to_gdrive(file_bytes, file_name, pic_name, date_str):
 
 
 # ==============================================================================
-# 3. HELPER REIMBURSEMENT (GOOGLE SHEETS + DRIVE LINKS PER ITEM)
+# 3. HELPER REIMBURSEMENT
 # ==============================================================================
 
 def generate_reimbursement_no():
@@ -230,8 +222,6 @@ def get_all_reimbursements():
             status_cfo = row[10] if len(row) > 10 and row[10] else "Pending"
 
             raw_evident = row[11] if len(row) > 11 else ""
-            
-            # --- Karena yang disimpan sudah berupa URL thumbnail, sanitasi /file/d/ tidak diperlukan lagi ---
             clean_evident = str(raw_evident).strip()
             if clean_evident in ["0", "0.0", "None", "none"]:
                 clean_evident = ""
@@ -311,16 +301,19 @@ def update_reimbursement_status(form_no_target, new_status, approver_role, note=
 # 4. HELPER DELIVERY ORDER (SCM - DB MATERIAL OUT)
 # ==============================================================================
 
-def generate_do_number():
+def generate_do_number(is_reloc=False):
+    """Membuat Nomor DO Otomatis (Support DO Reguler dan DO Relokasi)"""
     now = datetime.now()
     month_roman = get_roman_month(now.month)
     year_str = now.strftime("%Y")
-    prefix_suffix = f"/CLX/DO/{month_roman}/{year_str}"
+    
+    code_type = "DO-RELOC" if is_reloc else "DO"
+    prefix_suffix = f"/CLX/{code_type}/{month_roman}/{year_str}"
 
     try:
         sh = get_google_sheet_connection()
         worksheet = sh.worksheet(SHEET_MATERIAL_OUT)
-        do_nos = worksheet.col_values(2)
+        do_nos = worksheet.col_values(2)  # Kolom B: No. DO
         
         existing_numbers = []
         for no in do_nos[1:]:
@@ -339,6 +332,7 @@ def generate_do_number():
 
 
 def save_do_to_db_material_out(rows_data):
+    """Menyimpan atau Menambahkan Baris DO Baru ke Sheet DB Material Out (Kolom A:T)"""
     try:
         sh = get_google_sheet_connection()
         worksheet = sh.worksheet(SHEET_MATERIAL_OUT)
@@ -346,23 +340,32 @@ def save_do_to_db_material_out(rows_data):
         records = []
         for row in rows_data:
             records.append([
-                row.get("No"),
-                row.get("No. DO"),
-                row.get("Delv. Date"),
-                row.get("Material Code"),
-                row.get("Material Name"),
-                row.get("Qty"),
-                row.get("uom"),
-                row.get("Site Alocation"),
-                row.get("Remarks"),
-                row.get("To"),
-                row.get("Phone No."),
-                row.get("Address"),
-                row.get("EPC")
+                row.get("No", ""),
+                row.get("No. DO", ""),
+                row.get("Delv. Date", ""),
+                row.get("Material Code", ""),
+                row.get("Material Name", ""),
+                row.get("Qty", 0),
+                row.get("UoM", row.get("uom", "Pcs")),
+                row.get("Charging Type", ""),
+                row.get("Site Alocation", row.get("Site Allocation", "")),
+                row.get("Remarks", ""),
+                row.get("To", ""),
+                row.get("Phone No.", ""),
+                row.get("Address", ""),
+                row.get("EPC", ""),
+                row.get("Date Reloc.", ""),
+                row.get("No. DO Reloc.", ""),
+                row.get("Qty Reloc.", ""),
+                row.get("Site Reloc.", ""),
+                row.get("Mitra Reloc.", ""),
+                row.get("Remarks Reloc.", "")
             ])
 
-        worksheet.append_rows(records)
-        return True
+        if records:
+            worksheet.append_rows(records)
+            return True
+        return False
 
     except Exception as e:
         st.error(f"❌ Gagal menyimpan data DO ke DB Material Out: {e}")
@@ -370,18 +373,20 @@ def save_do_to_db_material_out(rows_data):
 
 
 def get_all_do_numbers():
+    """Mengambil list unik seluruh Nomor DO yang sudah tersimpan"""
     try:
         sh = get_google_sheet_connection()
         worksheet = sh.worksheet(SHEET_MATERIAL_OUT)
         do_nos = worksheet.col_values(2)
         
-        unique_dos = sorted(list(set([no for no in do_nos[1:] if no.strip()])))
+        unique_dos = sorted(list(set([str(no).strip() for no in do_nos[1:] if str(no).strip()])))
         return unique_dos
     except Exception:
         return []
 
 
 def get_do_by_number(no_do_search):
+    """Mencari detail DO berdasarkan Nomor DO (Mendukung Struktur Kolom A:T)"""
     try:
         sh = get_google_sheet_connection()
         worksheet = sh.worksheet(SHEET_MATERIAL_OUT)
@@ -392,21 +397,30 @@ def get_do_by_number(no_do_search):
 
         matching_rows = []
         for row in all_data[1:]:
-            if len(row) >= 13 and row[1] == no_do_search:
+            if len(row) >= 2 and row[1] == no_do_search:
                 matching_rows.append({
-                    "No": row[0],
-                    "No. DO": row[1],
-                    "Delv. Date": row[2],
-                    "Material Code": row[3],
-                    "Material Name": row[4],
-                    "Qty": int(row[5]) if str(row[5]).isdigit() else row[5],
-                    "uom": row[6],
-                    "Site Allocation": row[7],
-                    "Remarks": row[8],
-                    "To": row[9],
-                    "Phone No.": row[10],
-                    "Address": row[11],
-                    "EPC": row[12]
+                    "No": row[0] if len(row) > 0 else "",
+                    "No. DO": row[1] if len(row) > 1 else "",
+                    "Delv. Date": row[2] if len(row) > 2 else "",
+                    "Material Code": row[3] if len(row) > 3 else "",
+                    "Material Name": row[4] if len(row) > 4 else "",
+                    "Qty": int(row[5]) if len(row) > 5 and str(row[5]).isdigit() else (row[5] if len(row) > 5 else 0),
+                    "UoM": row[6] if len(row) > 6 else "Pcs",
+                    "uom": row[6] if len(row) > 6 else "Pcs",
+                    "Charging Type": row[7] if len(row) > 7 else "",
+                    "Site Alocation": row[8] if len(row) > 8 else "",
+                    "Site Allocation": row[8] if len(row) > 8 else "",
+                    "Remarks": row[9] if len(row) > 9 else "",
+                    "To": row[10] if len(row) > 10 else "",
+                    "Phone No.": row[11] if len(row) > 11 else "",
+                    "Address": row[12] if len(row) > 12 else "",
+                    "EPC": row[13] if len(row) > 13 else "",
+                    "Date Reloc.": row[14] if len(row) > 14 else "",
+                    "No. DO Reloc.": row[15] if len(row) > 15 else "",
+                    "Qty Reloc.": row[16] if len(row) > 16 else "",
+                    "Site Reloc.": row[17] if len(row) > 17 else "",
+                    "Mitra Reloc.": row[18] if len(row) > 18 else "",
+                    "Remarks Reloc.": row[19] if len(row) > 19 else ""
                 })
 
         if not matching_rows:
@@ -420,6 +434,7 @@ def get_do_by_number(no_do_search):
             "contact": first["Phone No."],
             "address": first["Address"],
             "epc": first["EPC"],
+            "charging_type": first["Charging Type"],
             "materials": matching_rows
         }
 
@@ -429,6 +444,7 @@ def get_do_by_number(no_do_search):
 
 
 def update_do_in_db_material_out(no_do_target, updated_rows_data):
+    """Memperbarui baris data DO di Sheet DB Material Out (Presisi Kolom A:T)"""
     try:
         sh = get_google_sheet_connection()
         worksheet = sh.worksheet(SHEET_MATERIAL_OUT)
@@ -446,19 +462,26 @@ def update_do_in_db_material_out(no_do_target, updated_rows_data):
 
         for row in updated_rows_data:
             kept_rows.append([
-                row.get("No"),
-                row.get("No. DO"),
-                row.get("Delv. Date"),
-                row.get("Material Code"),
-                row.get("Material Name"),
-                row.get("Qty"),
-                row.get("uom"),
-                row.get("Site Allocation"),
-                row.get("Remarks"),
-                row.get("To"),
-                row.get("Phone No."),
-                row.get("Address"),
-                row.get("EPC")
+                row.get("No", ""),
+                row.get("No. DO", ""),
+                row.get("Delv. Date", ""),
+                row.get("Material Code", ""),
+                row.get("Material Name", ""),
+                row.get("Qty", 0),
+                row.get("UoM", row.get("uom", "Pcs")),
+                row.get("Charging Type", ""),
+                row.get("Site Alocation", row.get("Site Allocation", "")),
+                row.get("Remarks", ""),
+                row.get("To", ""),
+                row.get("Phone No.", ""),
+                row.get("Address", ""),
+                row.get("EPC", ""),
+                row.get("Date Reloc.", ""),
+                row.get("No. DO Reloc.", ""),
+                row.get("Qty Reloc.", ""),
+                row.get("Site Reloc.", ""),
+                row.get("Mitra Reloc.", ""),
+                row.get("Remarks Reloc.", "")
             ])
 
         worksheet.clear()
@@ -468,3 +491,134 @@ def update_do_in_db_material_out(no_do_target, updated_rows_data):
     except Exception as e:
         st.error(f"❌ Gagal memperbarui data DO di Google Sheet: {e}")
         return False
+
+
+# ==============================================================================
+# 5. HELPER QUERY SHEET (KOMPATIBILITAS PRESISI UNTUK DO.PY)
+# ==============================================================================
+
+def get_query_sheet_data():
+    """
+    Mengambil data Sheet 'Query' secara utuh sebagai DataFrame.
+    Dipanggil langsung oleh fungsi fetch_raw_query_data() di do.py.
+    """
+    try:
+        sh = get_google_sheet_connection()
+        worksheet = sh.worksheet(SHEET_QUERY)
+        data = worksheet.get_all_records()
+        
+        if data:
+            return pd.DataFrame(data)
+        
+        all_values = worksheet.get_all_values()
+        if len(all_values) > 1:
+            headers = all_values[0]
+            rows = all_values[1:]
+            return pd.DataFrame(rows, columns=headers)
+
+        return pd.DataFrame()
+
+    except Exception as e:
+        st.warning(f"⚠️ Gagal membaca Sheet '{SHEET_QUERY}': {e}")
+        return pd.DataFrame()
+
+
+def get_used_sites_from_db_material_out():
+    """
+    Membaca Sheet 'DB Material Out' untuk mendapatkan daftar site
+    yang sudah terpakai (Kolom I / Index 8).
+    Dipanggil oleh load_filtered_sites() di do.py.
+    """
+    try:
+        sh = get_google_sheet_connection()
+        worksheet = sh.worksheet(SHEET_MATERIAL_OUT)
+        all_rows = worksheet.get_all_values()
+
+        if not all_rows or len(all_rows) < 2:
+            return []
+
+        used_sites = set()
+        for row in all_rows[1:]:
+            # Site Allocation berada di Kolom I (Index 8)
+            if len(row) > 8 and str(row[8]).strip():
+                used_sites.add(str(row[8]).strip())
+
+        return list(used_sites)
+
+    except Exception as e:
+        st.warning(f"⚠️ Gagal mengambil used sites dari '{SHEET_MATERIAL_OUT}': {e}")
+        return []
+
+
+def get_epc_and_charging_dropdown_options():
+    """Mengambil list unik EPC & Charging Type untuk dropdown Form Header"""
+    try:
+        sh = get_google_sheet_connection()
+        
+        try:
+            worksheet = sh.worksheet(SHEET_QUERY)
+        except gspread.exceptions.WorksheetNotFound:
+            st.error(f"❌ Tab Sheet '{SHEET_QUERY}' tidak ditemukan di Google Sheets!")
+            return [], []
+
+        all_rows = worksheet.get_all_values()
+        
+        if not all_rows or len(all_rows) < 2:
+            return [], []
+
+        epc_set = set()
+        charging_set = set()
+
+        for row in all_rows[1:]:
+            if len(row) > 1 and str(row[1]).strip():
+                epc_set.add(str(row[1]).strip())
+            if len(row) > 2 and str(row[2]).strip():
+                charging_set.add(str(row[2]).strip())
+
+        return sorted(list(epc_set)), sorted(list(charging_set))
+
+    except Exception as e:
+        st.error(f"❌ Gagal mengambil opsi EPC & Charging: {e}")
+        return [], []
+
+
+def get_sites_by_epc_and_charging(epc_target, charging_type_target):
+    """
+    Membaca sheet 'Query' dan mengambil daftar site (Kolom F / Index 5)
+    berdasarkan pencocokan EPC (Kolom B / Idx 1) dan Charging Type (Kolom C / Idx 2).
+    """
+    try:
+        sh = get_google_sheet_connection()
+        try:
+            worksheet = sh.worksheet(SHEET_QUERY)
+        except gspread.exceptions.WorksheetNotFound:
+            st.error(f"❌ Tab Sheet '{SHEET_QUERY}' tidak ditemukan di Google Sheets!")
+            return []
+
+        all_rows = worksheet.get_all_values()
+        if not all_rows or len(all_rows) < 2:
+            return []
+
+        filtered_sites = []
+        epc_clean = str(epc_target).strip().lower() if epc_target else ""
+        charging_clean = str(charging_type_target).strip().lower() if charging_type_target else ""
+
+        for row in all_rows[1:]:
+            if len(row) > 5:
+                row_epc = str(row[1]).strip().lower()
+                row_charging = str(row[2]).strip().lower()
+                project_status = str(row[3]).strip().lower()
+                site_name = str(row[5]).strip()
+
+                if "cancel" in project_status or "drop" in project_status:
+                    continue
+
+                if site_name and (row_epc == epc_clean) and (row_charging == charging_clean):
+                    if site_name not in filtered_sites:
+                        filtered_sites.append(site_name)
+
+        return filtered_sites
+
+    except Exception as e:
+        st.error(f"❌ Gagal mengambil data site dari Sheet 'Query': {e}")
+        return []
