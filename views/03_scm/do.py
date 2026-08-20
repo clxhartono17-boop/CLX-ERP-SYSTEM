@@ -177,6 +177,8 @@ def load_standard_charging_materials(charging_type):
         {"code": "MM0020", "name": "Stick Rod 2m", "uom": "Pcs", "qty_map": {"6S1P": 1, "12S1P": 1, "DC20": 1, "DC30": 1, "DC60": 1}},
         {"code": "MM0021", "name": "Stick Rod 1.5m", "uom": "Pcs", "qty_map": {"6S1P": 1, "12S1P": 1, "DC20": 1, "DC30": 1, "DC60": 1}},
         {"code": "MM0022", "name": "Stick Rod 1m", "uom": "Pcs", "qty_map": {"6S1P": 1, "12S1P": 1, "DC20": 1, "DC30": 1, "DC60": 1}},
+        {"code": "MM0023", "name": "Wheel Stopper", "uom": "Pcs", "qty_map": {"DC20": 2, "DC30": 2, "DC60": 2}},
+        {"code": "MM0024", "name": "Kabel Power NYY 4x35", "uom": "Pcs", "qty_map": {"DC60": 12}},
     ]
 
     result = []
