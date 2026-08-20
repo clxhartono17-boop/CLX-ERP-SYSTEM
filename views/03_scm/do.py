@@ -162,6 +162,7 @@ def load_standard_charging_materials(charging_type):
         {"code": "AC0010", "name": "Sok Konektor Grounding 5/8\"", "uom": "Pcs", "qty_map": {"DC20": 1, "DC30": 1, "DC60": 1}},
         {"code": "MM0001", "name": "APAR 3Kg", "uom": "Pcs", "qty_map": {"DC20": 1, "DC30": 1, "DC60": 1}},
         {"code": "MM0002", "name": "Box APAR", "uom": "Pcs", "qty_map": {"DC20": 1, "DC30": 1, "DC60": 1}},
+        {"code": "MM0003", "name": "Combiner 125A", "uom": "Unit", "qty_map": {"DC60": 1}},
         {"code": "MM0004", "name": "Combiner 63A BSS", "uom": "Pcs", "qty_map": {"12S1P": 1}},
         {"code": "MM0005", "name": "Combiner 40A 3P", "uom": "Pcs", "qty_map": {"DC20": 1}},
         {"code": "MM0006", "name": "Combiner 40A BSS", "uom": "Pcs", "qty_map": {"6S1P": 1}},
