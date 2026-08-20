@@ -85,17 +85,101 @@ DEFAULT_EXPEDITIONS = [
 def initialize_session_state():
 
     defaults = {
+
         "relocation_history": [],
+
         "current_do": None,
+
         "edit_do_data": None,
+
         "do_number_draft": None,
-        "do_number_generated_at": None
+
+        "do_number_generated_at": None,
+
+        # ----------------------------------------------------------------------
+        # SUCCESS NOTIFICATION
+        # ----------------------------------------------------------------------
+        "do_success_notification": None
+
     }
 
     for key, value in defaults.items():
 
         if key not in st.session_state:
+
             st.session_state[key] = value
+
+
+# ==============================================================================
+# SUCCESS NOTIFICATION
+# ==============================================================================
+
+def show_pending_do_notification():
+    """
+    Menampilkan popup/toast setelah DO berhasil disimpan.
+
+    Notification disimpan di session_state sebelum st.rerun().
+    Dengan demikian popup tidak hilang ketika Streamlit melakukan rerun.
+    """
+
+    notification = st.session_state.get(
+        "do_success_notification"
+    )
+
+    if not notification:
+        return
+
+    no_do = notification.get(
+        "no_do",
+        ""
+    )
+
+    site_count = notification.get(
+        "site_count",
+        0
+    )
+
+    material_count = notification.get(
+        "material_count",
+        0
+    )
+
+    # --------------------------------------------------------------------------
+    # TOAST POPUP
+    # --------------------------------------------------------------------------
+
+    st.toast(
+        f"✅ SUKSES! Delivery Order {no_do} berhasil dibuat dan disimpan.",
+        icon="🎉"
+    )
+
+    # --------------------------------------------------------------------------
+    # SUCCESS BOX
+    # --------------------------------------------------------------------------
+
+    st.success(
+        f"""
+        ### ✅ SUKSES — Delivery Order Berhasil Dibuat!
+
+        **Nomor DO:** `{no_do}`
+
+        **Status:** Berhasil dibuat dan disimpan ke **DB Material Out**
+
+        **Site Allocated:** `{site_count} Site`
+
+        **Total Material Row:** `{material_count} Row`
+
+        Silakan buka tab **🖨️ Preview & PDF Cetak (A5)** untuk
+        melihat atau mencetak Delivery Order.
+        """,
+        icon="✅"
+    )
+
+    # --------------------------------------------------------------------------
+    # CLEAR NOTIFICATION
+    # --------------------------------------------------------------------------
+
+    st.session_state.do_success_notification = None
 
 
 # ==============================================================================
@@ -116,10 +200,15 @@ def get_current_do_number():
 
     try:
 
-        number = generate_do_number(is_reloc=False)
+        number = generate_do_number(
+            is_reloc=False
+        )
 
         st.session_state["do_number_draft"] = number
-        st.session_state["do_number_generated_at"] = datetime.now()
+
+        st.session_state["do_number_generated_at"] = (
+            datetime.now()
+        )
 
         return number
 
@@ -139,6 +228,7 @@ def reset_do_number():
     """
 
     st.session_state["do_number_draft"] = None
+
     st.session_state["do_number_generated_at"] = None
 
 
@@ -194,6 +284,7 @@ def fetch_raw_query_data():
 def load_master_dropdown():
 
     charging_types = DEFAULT_CHARGING_TYPES.copy()
+
     expeditions = DEFAULT_EXPEDITIONS.copy()
 
     return charging_types, expeditions
@@ -221,19 +312,29 @@ def detect_query_columns(df):
         for candidate in candidates:
 
             if candidate in columns:
+
                 return candidate
 
         # fallback case-insensitive
+
         lower_map = {
+
             str(c).strip().lower(): c
+
             for c in columns
+
         }
 
         for candidate in candidates:
 
-            key = str(candidate).strip().lower()
+            key = (
+                str(candidate)
+                .strip()
+                .lower()
+            )
 
             if key in lower_map:
+
                 return lower_map[key]
 
         return None
@@ -266,6 +367,7 @@ def detect_query_columns(df):
             "Location",
             "site"
         ])
+
     }
 
 
@@ -282,13 +384,17 @@ def load_epc_list():
     df_query = fetch_raw_query_data_cached()
 
     if df_query.empty:
+
         return []
 
-    columns = detect_query_columns(df_query)
+    columns = detect_query_columns(
+        df_query
+    )
 
     col_epc = columns["epc"]
 
     if not col_epc:
+
         return []
 
     values = (
@@ -299,8 +405,17 @@ def load_epc_list():
     )
 
     values = [
-        x for x in values.unique().tolist()
-        if x and x.lower() not in ["nan", "none"]
+
+        x
+
+        for x in values.unique().tolist()
+
+        if x
+        and x.lower() not in [
+            "nan",
+            "none"
+        ]
+
     ]
 
     return sorted(values)
@@ -318,9 +433,12 @@ def get_used_sites_cached():
 
     try:
 
-        sites = get_used_sites_from_db_material_out()
+        sites = (
+            get_used_sites_from_db_material_out()
+        )
 
         if not sites:
+
             return []
 
         cleaned = []
@@ -329,7 +447,14 @@ def get_used_sites_cached():
 
             value = str(site).strip()
 
-            if value and value.lower() not in ["nan", "none"]:
+            if (
+                value
+                and value.lower() not in [
+                    "nan",
+                    "none"
+                ]
+            ):
+
                 cleaned.append(value)
 
         return sorted(set(cleaned))
@@ -352,14 +477,20 @@ def get_used_sites():
 # FILTER SITE
 # ==============================================================================
 
-def load_filtered_sites(epc, charging_type):
+def load_filtered_sites(
+    epc,
+    charging_type
+):
 
     df_query = fetch_raw_query_data_cached()
 
     if df_query.empty:
+
         return []
 
-    columns = detect_query_columns(df_query)
+    columns = detect_query_columns(
+        df_query
+    )
 
     col_epc = columns["epc"]
     col_charging = columns["charging"]
@@ -382,58 +513,78 @@ def load_filtered_sites(epc, charging_type):
         return []
 
     target_epc = (
+
         str(epc).strip().lower()
+
         if epc
+
         else ""
+
     )
 
     target_charging = (
+
         str(charging_type).strip().lower()
+
         if charging_type
+
         else ""
+
     )
 
     used_sites = set(
+
         x.strip()
+
         for x in get_used_sites()
+
         if str(x).strip()
+
     )
 
     # --------------------------------------------------------------------------
-    # NORMALISASI DATA SEKALI
+    # NORMALISASI DATA
     # --------------------------------------------------------------------------
 
     working_df = df_query.copy()
 
     working_df["_epc_clean"] = (
+
         working_df[col_epc]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.lower()
+
     )
 
     working_df["_charging_clean"] = (
+
         working_df[col_charging]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.lower()
+
     )
 
     working_df["_status_clean"] = (
+
         working_df[col_status]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.lower()
+
     )
 
     working_df["_site_clean"] = (
+
         working_df[col_site]
         .fillna("")
         .astype(str)
         .str.strip()
+
     )
 
     # --------------------------------------------------------------------------
@@ -442,11 +593,17 @@ def load_filtered_sites(epc, charging_type):
 
     mask = (
 
-        (working_df["_epc_clean"] == target_epc)
+        (
+            working_df["_epc_clean"]
+            == target_epc
+        )
 
         &
 
-        (working_df["_charging_clean"] == target_charging)
+        (
+            working_df["_charging_clean"]
+            == target_charging
+        )
 
         &
 
@@ -462,16 +619,21 @@ def load_filtered_sites(epc, charging_type):
         &
 
         (
-            working_df["_site_clean"] != ""
+            working_df["_site_clean"]
+            != ""
         )
 
     )
 
-    filtered = working_df.loc[mask]
+    filtered = working_df.loc[
+        mask
+    ]
 
     sites = []
 
-    for site in filtered["_site_clean"].tolist():
+    for site in filtered[
+        "_site_clean"
+    ].tolist():
 
         if site not in used_sites:
 
@@ -495,11 +657,15 @@ def load_available_relocation_sites():
     df_query = fetch_raw_query_data_cached()
 
     if df_query.empty:
+
         return []
 
-    columns = detect_query_columns(df_query)
+    columns = detect_query_columns(
+        df_query
+    )
 
     col_status = columns["status"]
+
     col_site = columns["site"]
 
     if not col_status or not col_site:
@@ -509,40 +675,54 @@ def load_available_relocation_sites():
     working_df = df_query.copy()
 
     working_df["_status_clean"] = (
+
         working_df[col_status]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.lower()
+
     )
 
     working_df["_site_clean"] = (
+
         working_df[col_site]
         .fillna("")
         .astype(str)
         .str.strip()
+
     )
 
     filtered = working_df[
+
         (
+
             ~working_df["_status_clean"]
             .str.contains(
                 "drop|cancel",
                 regex=True,
                 na=False
             )
+
         )
+
         &
+
         (
-            working_df["_site_clean"] != ""
+            working_df["_site_clean"]
+            != ""
         )
+
     ]
 
     sites = []
 
-    for site in filtered["_site_clean"].tolist():
+    for site in filtered[
+        "_site_clean"
+    ].tolist():
 
         if site not in sites:
+
             sites.append(site)
 
     return sites
@@ -556,9 +736,12 @@ def load_available_relocation_sites():
     ttl=3600,
     show_spinner=False
 )
-def load_standard_charging_materials(charging_type):
+def load_standard_charging_materials(
+    charging_type
+):
 
     if not charging_type:
+
         return []
 
     raw_data = [
@@ -846,6 +1029,7 @@ def load_standard_charging_materials(charging_type):
                 "DC60": 12
             }
         }
+
     ]
 
     result = []
@@ -861,13 +1045,17 @@ def load_standard_charging_materials(charging_type):
 
             result.append({
 
-                "code": item["code"],
+                "code":
+                    item["code"],
 
-                "name": item["name"],
+                "name":
+                    item["name"],
 
-                "std_qty": std_qty,
+                "std_qty":
+                    std_qty,
 
-                "uom": item["uom"]
+                "uom":
+                    item["uom"]
 
             })
 
@@ -896,6 +1084,7 @@ def ensure_relocation_columns(df):
     for col in relocation_columns:
 
         if col not in result.columns:
+
             result[col] = ""
 
     return result
@@ -1368,16 +1557,35 @@ def generate_do_a5_pdf(data):
         )
 
         site = (
+
             item.get("Site Alocation")
-            or item.get("Site Allocation")
-            or item.get("Remarks")
-            or ""
+
+            or
+
+            item.get("Site Allocation")
+
+            or
+
+            item.get("Remarks")
+
+            or
+
+            ""
+
         )
 
         uom = (
+
             item.get("UoM")
-            or item.get("uom")
-            or "Pcs"
+
+            or
+
+            item.get("uom")
+
+            or
+
+            "Pcs"
+
         )
 
         qty = item.get(
@@ -1441,15 +1649,27 @@ def generate_do_a5_pdf(data):
     for material in materials:
 
         site = (
+
             material.get("Site Alocation")
-            or material.get("Site Allocation")
-            or material.get("Remarks")
-            or ""
+
+            or
+
+            material.get("Site Allocation")
+
+            or
+
+            material.get("Remarks")
+
+            or
+
+            ""
+
         )
 
         site = str(site).strip()
 
         if site:
+
             site_values.append(site)
 
     site_allocated_count = data.get(
@@ -1775,6 +1995,18 @@ def apply_page_style():
 
         }
 
+        /* =======================================================================
+           SUCCESS POPUP
+           ======================================================================= */
+
+        div[data-testid="stToast"] {
+
+            font-size: 16px !important;
+
+            font-weight: 700 !important;
+
+        }
+
         </style>
         """,
 
@@ -1793,6 +2025,16 @@ def render():
 
     apply_page_style()
 
+    # --------------------------------------------------------------------------
+    # SHOW SUCCESS NOTIFICATION AFTER RERUN
+    # --------------------------------------------------------------------------
+
+    show_pending_do_notification()
+
+    # --------------------------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------------------------
+
     st.title(
         "🚚 Delivery Order (DO) Generator"
     )
@@ -1802,7 +2044,9 @@ def render():
         "Create, Print, Search & Relocation DO"
     )
 
-    charging_list, exp_list = load_master_dropdown()
+    charging_list, exp_list = (
+        load_master_dropdown()
+    )
 
     # --------------------------------------------------------------------------
     # EPC
@@ -2039,7 +2283,8 @@ def render():
 
             table_data.append({
 
-                "No": idx,
+                "No":
+                    idx,
 
                 "Material Code":
                     item["code"],
@@ -2278,6 +2523,10 @@ def render():
 
                 else:
 
+                    # ----------------------------------------------------------
+                    # CURRENT DO
+                    # ----------------------------------------------------------
+
                     st.session_state.current_do = {
 
                         "no_do":
@@ -2315,24 +2564,59 @@ def render():
 
                     }
 
-                    # Invalidate local cached site list
+                    # ----------------------------------------------------------
+                    # SUCCESS NOTIFICATION
+                    # ----------------------------------------------------------
+                    #
+                    # IMPORTANT:
+                    # Notification disimpan SEBELUM st.rerun().
+                    # Setelah rerun, render() akan membaca notification ini
+                    # dan menampilkan st.toast() + st.success().
+                    # ----------------------------------------------------------
+
+                    st.session_state.do_success_notification = {
+
+                        "no_do":
+                            no_do,
+
+                        "site_count":
+                            site_count,
+
+                        "material_count":
+                            len(generated_db_rows),
+
+                        "timestamp":
+                            datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )
+
+                    }
+
+                    # ----------------------------------------------------------
+                    # INVALIDATE LOCAL CACHED SITE LIST
+                    # ----------------------------------------------------------
+
                     get_used_sites_cached.clear()
 
-                    # Reset Query-related cache
-                    # Hanya dilakukan setelah transaksi berhasil
+                    # ----------------------------------------------------------
+                    # RESET QUERY-RELATED CACHE
+                    # ----------------------------------------------------------
+
                     fetch_raw_query_data_cached.clear()
+
                     load_epc_list.clear()
+
                     load_available_relocation_sites.clear()
+
+                    # ----------------------------------------------------------
+                    # RESET DO NUMBER
+                    # ----------------------------------------------------------
 
                     reset_do_number()
 
-                    st.success(
-
-                        f"✅ Delivery Order "
-                        f"{no_do} berhasil disimpan "
-                        "ke sheet 'DB Material Out'!"
-
-                    )
+                    # ----------------------------------------------------------
+                    # RERUN
+                    # ----------------------------------------------------------
 
                     st.rerun()
 
@@ -2476,7 +2760,9 @@ def render():
 
             if found_data:
 
-                st.session_state.edit_do_data = found_data
+                st.session_state.edit_do_data = (
+                    found_data
+                )
 
                 st.success(
                     f"Data {selected_do_search} ditemukan!"
@@ -2646,7 +2932,9 @@ def render():
 
             cols_existing = [
 
-                c for c in cols_to_show
+                c
+
+                for c in cols_to_show
 
                 if c in df_edit_mat.columns
 
@@ -2762,7 +3050,10 @@ def render():
                         and
 
                         clean_site.lower()
-                        not in ["none", "nan"]
+                        not in [
+                            "none",
+                            "nan"
+                        ]
 
                     ):
 
@@ -2801,10 +3092,15 @@ def render():
                         "Pilih Site Asal yang Ingin Direlokasi:",
 
                         options=(
+
                             current_do_sites
+
                             if current_do_sites
+
                             else
+
                             ["Tidak Ada Site"]
+
                         ),
 
                         key="reloc_old_site"
@@ -2818,10 +3114,17 @@ def render():
                         "Nama Site Tujuan Baru (New Site):",
 
                         options=(
+
                             selectable_new_sites
+
                             if selectable_new_sites
+
                             else
-                            ["Tidak ada site baru yang tersedia"]
+
+                            [
+                                "Tidak ada site baru yang tersedia"
+                            ]
+
                         ),
 
                         key="reloc_new_site"
@@ -2843,8 +3146,10 @@ def render():
                     "Alasan / Catatan Relokasi:",
 
                     placeholder=(
+
                         "Contoh: Perubahan WO Lapangan / "
                         "Re-alloc Site"
+
                     ),
 
                     key="reloc_reason"
@@ -2956,22 +3261,30 @@ def render():
                             site_in_row = (
 
                                 str(
+
                                     row.get(
                                         "Site Alocation",
                                         ""
                                     )
+
                                     or
+
                                     row.get(
                                         "Site Allocation",
                                         ""
                                     )
+
                                     or
+
                                     row.get(
                                         "Remarks",
                                         ""
                                     )
+
                                     or
+
                                     ""
+
                                 )
                                 .strip()
 
@@ -3398,6 +3711,7 @@ def render():
                         .to_dict(
                             orient="records"
                         )
+
                     )
 
                     st.session_state.current_do = {
@@ -3429,6 +3743,7 @@ def render():
                         "site_count":
                             len(
                                 set(
+
                                     str(
                                         x.get(
                                             "Site Alocation",
@@ -3444,6 +3759,7 @@ def render():
                                             ""
                                         )
                                     ).strip()
+
                                 )
                             )
 
