@@ -4,6 +4,7 @@ from datetime import datetime
 import io
 import os
 
+
 # ==============================================================================
 # REPORTLAB
 # ==============================================================================
@@ -96,9 +97,6 @@ def initialize_session_state():
 
         "do_number_generated_at": None,
 
-        # ----------------------------------------------------------------------
-        # SUCCESS NOTIFICATION
-        # ----------------------------------------------------------------------
         "do_success_notification": None
 
     }
@@ -115,12 +113,6 @@ def initialize_session_state():
 # ==============================================================================
 
 def show_pending_do_notification():
-    """
-    Menampilkan popup/toast setelah DO berhasil disimpan.
-
-    Notification disimpan di session_state sebelum st.rerun().
-    Dengan demikian popup tidak hilang ketika Streamlit melakukan rerun.
-    """
 
     notification = st.session_state.get(
         "do_success_notification"
@@ -144,18 +136,10 @@ def show_pending_do_notification():
         0
     )
 
-    # --------------------------------------------------------------------------
-    # TOAST POPUP
-    # --------------------------------------------------------------------------
-
     st.toast(
         f"✅ SUKSES! Delivery Order {no_do} berhasil dibuat dan disimpan.",
         icon="🎉"
     )
-
-    # --------------------------------------------------------------------------
-    # SUCCESS BOX
-    # --------------------------------------------------------------------------
 
     st.success(
         f"""
@@ -175,10 +159,6 @@ def show_pending_do_notification():
         icon="✅"
     )
 
-    # --------------------------------------------------------------------------
-    # CLEAR NOTIFICATION
-    # --------------------------------------------------------------------------
-
     st.session_state.do_success_notification = None
 
 
@@ -187,12 +167,6 @@ def show_pending_do_notification():
 # ==============================================================================
 
 def get_current_do_number():
-    """
-    Generate nomor DO hanya jika belum tersedia.
-
-    Tujuannya agar perubahan widget Streamlit tidak terus-menerus
-    memanggil Google Sheets untuk generate nomor baru.
-    """
 
     if st.session_state.get("do_number_draft"):
 
@@ -223,9 +197,6 @@ def get_current_do_number():
 
 
 def reset_do_number():
-    """
-    Reset nomor DO setelah transaksi berhasil.
-    """
 
     st.session_state["do_number_draft"] = None
 
@@ -241,13 +212,6 @@ def reset_do_number():
     show_spinner=False
 )
 def fetch_raw_query_data_cached():
-    """
-    Membaca Sheet Query melalui database.py.
-
-    Database.py sudah memiliki cache internal.
-    Cache tambahan di sini menjaga agar UI DO tidak memanggil
-    fungsi tersebut berulang kali.
-    """
 
     try:
 
@@ -314,8 +278,6 @@ def detect_query_columns(df):
             if candidate in columns:
 
                 return candidate
-
-        # fallback case-insensitive
 
         lower_map = {
 
@@ -513,83 +475,55 @@ def load_filtered_sites(
         return []
 
     target_epc = (
-
         str(epc).strip().lower()
-
         if epc
-
         else ""
-
     )
 
     target_charging = (
-
         str(charging_type).strip().lower()
-
         if charging_type
-
         else ""
-
     )
 
     used_sites = set(
-
         x.strip()
-
         for x in get_used_sites()
-
         if str(x).strip()
-
     )
-
-    # --------------------------------------------------------------------------
-    # NORMALISASI DATA
-    # --------------------------------------------------------------------------
 
     working_df = df_query.copy()
 
     working_df["_epc_clean"] = (
-
         working_df[col_epc]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.lower()
-
     )
 
     working_df["_charging_clean"] = (
-
         working_df[col_charging]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.lower()
-
     )
 
     working_df["_status_clean"] = (
-
         working_df[col_status]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.lower()
-
     )
 
     working_df["_site_clean"] = (
-
         working_df[col_site]
         .fillna("")
         .astype(str)
         .str.strip()
-
     )
-
-    # --------------------------------------------------------------------------
-    # FILTER
-    # --------------------------------------------------------------------------
 
     mask = (
 
@@ -665,7 +599,6 @@ def load_available_relocation_sites():
     )
 
     col_status = columns["status"]
-
     col_site = columns["site"]
 
     if not col_status or not col_site:
@@ -675,35 +608,29 @@ def load_available_relocation_sites():
     working_df = df_query.copy()
 
     working_df["_status_clean"] = (
-
         working_df[col_status]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.lower()
-
     )
 
     working_df["_site_clean"] = (
-
         working_df[col_site]
         .fillna("")
         .astype(str)
         .str.strip()
-
     )
 
     filtered = working_df[
 
         (
-
             ~working_df["_status_clean"]
             .str.contains(
                 "drop|cancel",
                 regex=True,
                 na=False
             )
-
         )
 
         &
@@ -1088,6 +1015,50 @@ def ensure_relocation_columns(df):
             result[col] = ""
 
     return result
+
+
+# ==============================================================================
+# SAFE QTY
+# ==============================================================================
+
+def safe_qty(value, default=0):
+
+    """
+    Mengubah Qty dari data editor menjadi angka.
+
+    Penting:
+    - 0 tetap dianggap 0
+    - tidak menggunakan `or default`
+      karena 0 adalah nilai valid.
+    """
+
+    if value is None:
+
+        return default
+
+    if isinstance(value, str):
+
+        value = value.strip()
+
+        if value == "":
+
+            return default
+
+        value = value.replace(",", "")
+
+    try:
+
+        number = float(value)
+
+        if number.is_integer():
+
+            return int(number)
+
+        return number
+
+    except (ValueError, TypeError):
+
+        return default
 
 
 # ==============================================================================
@@ -1556,42 +1527,53 @@ def generate_do_a5_pdf(data):
             item.get("name", "")
         )
 
+        # ----------------------------------------------------------------------
+        # IMPORTANT:
+        # Site Allocation hanya mengambil kolom Site Alocation / Site Allocation.
+        # Remarks TIDAK digunakan sebagai fallback.
+        # ----------------------------------------------------------------------
+
         site = (
 
             item.get("Site Alocation")
 
-            or
+            if item.get("Site Alocation") is not None
 
-            item.get("Site Allocation")
-
-            or
-
-            item.get("Remarks")
-
-            or
-
-            ""
+            else item.get("Site Allocation", "")
 
         )
+
+        if site is None:
+
+            site = ""
 
         uom = (
 
             item.get("UoM")
 
-            or
+            if item.get("UoM") is not None
 
-            item.get("uom")
-
-            or
-
-            "Pcs"
+            else item.get("uom", "Pcs")
 
         )
 
-        qty = item.get(
-            "Qty",
-            0
+        if uom is None or str(uom).strip() == "":
+
+            uom = "Pcs"
+
+        qty = safe_qty(
+            item.get("Qty", 0),
+            default=0
         )
+
+        remarks = item.get(
+            "Remarks",
+            ""
+        )
+
+        if remarks is None:
+
+            remarks = ""
 
         mat_rows.append([
 
@@ -1638,11 +1620,15 @@ def generate_do_a5_pdf(data):
             ),
 
             Paragraph(
-                str(item.get("Remarks", "")),
+                str(remarks),
                 body_style
             )
 
         ])
+
+    # --------------------------------------------------------------------------
+    # TOTAL SITE
+    # --------------------------------------------------------------------------
 
     site_values = []
 
@@ -1652,19 +1638,15 @@ def generate_do_a5_pdf(data):
 
             material.get("Site Alocation")
 
-            or
+            if material.get("Site Alocation") is not None
 
-            material.get("Site Allocation")
-
-            or
-
-            material.get("Remarks")
-
-            or
-
-            ""
+            else material.get("Site Allocation", "")
 
         )
+
+        if site is None:
+
+            site = ""
 
         site = str(site).strip()
 
@@ -1995,10 +1977,6 @@ def apply_page_style():
 
         }
 
-        /* =======================================================================
-           SUCCESS POPUP
-           ======================================================================= */
-
         div[data-testid="stToast"] {
 
             font-size: 16px !important;
@@ -2025,15 +2003,11 @@ def render():
 
     apply_page_style()
 
-    # --------------------------------------------------------------------------
-    # SHOW SUCCESS NOTIFICATION AFTER RERUN
-    # --------------------------------------------------------------------------
-
     show_pending_do_notification()
 
-    # --------------------------------------------------------------------------
+    # ==========================================================================
     # HEADER
-    # --------------------------------------------------------------------------
+    # ==========================================================================
 
     st.title(
         "🚚 Delivery Order (DO) Generator"
@@ -2048,15 +2022,11 @@ def render():
         load_master_dropdown()
     )
 
-    # --------------------------------------------------------------------------
-    # EPC
-    # --------------------------------------------------------------------------
-
     epc_list = load_epc_list()
 
-    # --------------------------------------------------------------------------
+    # ==========================================================================
     # TABS
-    # --------------------------------------------------------------------------
+    # ==========================================================================
 
     tab_form, tab_preview, tab_search = st.tabs([
 
@@ -2320,6 +2290,8 @@ def render():
 
             use_container_width=True,
 
+            key="create_do_material_editor",
+
             column_config={
 
                 "No":
@@ -2341,7 +2313,12 @@ def render():
                 "Qty":
                     st.column_config.NumberColumn(
                         "Total Qty (Auto calculated)",
-                        help="Qty = Std Qty x Total Site"
+                        help=(
+                            "Qty awal = Std Qty x Total Site. "
+                            "Qty dapat diedit manual."
+                        ),
+                        min_value=0,
+                        step=1
                     ),
 
                 "UoM":
@@ -2426,13 +2403,84 @@ def render():
 
                 row_counter = 1
 
-                # --------------------------------------------------------------
-                # GENERATE ROW
-                # --------------------------------------------------------------
+                # ==================================================================
+                # IMPORTANT FIX:
+                #
+                # Sebelumnya sistem menggunakan:
+                #
+                #     mat_item["std_qty"]
+                #
+                # sehingga Qty yang diedit user di data_editor diabaikan.
+                #
+                # Sekarang sistem menggunakan edited_df.
+                # ==================================================================
+
+                edited_material_rows = (
+                    edited_df
+                    .to_dict(
+                        orient="records"
+                    )
+                )
+
+                # ------------------------------------------------------------------
+                # GENERATE ROW PER SITE
+                # ------------------------------------------------------------------
 
                 for site_name in selected_sites:
 
-                    for mat_item in raw_materials:
+                    for mat_item in edited_material_rows:
+
+                        material_code = (
+                            mat_item.get(
+                                "Material Code",
+                                ""
+                            )
+                        )
+
+                        material_name = (
+                            mat_item.get(
+                                "Material Name",
+                                ""
+                            )
+                        )
+
+                        qty = safe_qty(
+                            mat_item.get(
+                                "Qty",
+                                0
+                            ),
+                            default=0
+                        )
+
+                        uom = (
+                            mat_item.get(
+                                "UoM",
+                                ""
+                            )
+                        )
+
+                        remarks = (
+                            mat_item.get(
+                                "Remarks",
+                                ""
+                            )
+                        )
+
+                        if remarks is None:
+
+                            remarks = ""
+
+                        # ==========================================================
+                        # FIX #1:
+                        #
+                        # Remarks TIDAK lagi diisi site_name.
+                        #
+                        # Site hanya masuk ke:
+                        #     Site Alocation
+                        #
+                        # Remarks tetap mengambil:
+                        #     mat_item["Remarks"]
+                        # ==========================================================
 
                         generated_db_rows.append({
 
@@ -2446,16 +2494,25 @@ def render():
                                 date_str,
 
                             "Material Code":
-                                mat_item["code"],
+                                material_code,
 
                             "Material Name":
-                                mat_item["name"],
+                                material_name,
+
+                            # ======================================================
+                            # FIX #2:
+                            #
+                            # Qty sekarang berasal dari edited_df.
+                            #
+                            # Jika user mengubah Qty menjadi 0,
+                            # maka database menerima 0.
+                            # ======================================================
 
                             "Qty":
-                                mat_item["std_qty"],
+                                qty,
 
                             "UoM":
-                                mat_item["uom"],
+                                uom,
 
                             "Charging Type":
                                 charging_type,
@@ -2463,8 +2520,12 @@ def render():
                             "Site Alocation":
                                 site_name,
 
+                            # ======================================================
+                            # REMARKS ASLI DARI DATA EDITOR
+                            # ======================================================
+
                             "Remarks":
-                                site_name,
+                                remarks,
 
                             "To":
                                 to_name,
@@ -2500,9 +2561,9 @@ def render():
 
                         row_counter += 1
 
-                # --------------------------------------------------------------
+                # ------------------------------------------------------------------
                 # SAVE
-                # --------------------------------------------------------------
+                # ------------------------------------------------------------------
 
                 with st.spinner(
                     "Menyimpan transaksi ke "
@@ -2523,9 +2584,9 @@ def render():
 
                 else:
 
-                    # ----------------------------------------------------------
+                    # ----------------------------------------------------------------
                     # CURRENT DO
-                    # ----------------------------------------------------------
+                    # ----------------------------------------------------------------
 
                     st.session_state.current_do = {
 
@@ -2564,15 +2625,9 @@ def render():
 
                     }
 
-                    # ----------------------------------------------------------
+                    # ----------------------------------------------------------------
                     # SUCCESS NOTIFICATION
-                    # ----------------------------------------------------------
-                    #
-                    # IMPORTANT:
-                    # Notification disimpan SEBELUM st.rerun().
-                    # Setelah rerun, render() akan membaca notification ini
-                    # dan menampilkan st.toast() + st.success().
-                    # ----------------------------------------------------------
+                    # ----------------------------------------------------------------
 
                     st.session_state.do_success_notification = {
 
@@ -2592,15 +2647,11 @@ def render():
 
                     }
 
-                    # ----------------------------------------------------------
-                    # INVALIDATE LOCAL CACHED SITE LIST
-                    # ----------------------------------------------------------
+                    # ----------------------------------------------------------------
+                    # INVALIDATE CACHE
+                    # ----------------------------------------------------------------
 
                     get_used_sites_cached.clear()
-
-                    # ----------------------------------------------------------
-                    # RESET QUERY-RELATED CACHE
-                    # ----------------------------------------------------------
 
                     fetch_raw_query_data_cached.clear()
 
@@ -2608,15 +2659,11 @@ def render():
 
                     load_available_relocation_sites.clear()
 
-                    # ----------------------------------------------------------
+                    # ----------------------------------------------------------------
                     # RESET DO NUMBER
-                    # ----------------------------------------------------------
+                    # ----------------------------------------------------------------
 
                     reset_do_number()
-
-                    # ----------------------------------------------------------
-                    # RERUN
-                    # ----------------------------------------------------------
 
                     st.rerun()
 
@@ -2729,7 +2776,6 @@ def render():
         with col_s2:
 
             st.write("")
-
             st.write("")
 
             btn_search = st.button(
@@ -2948,7 +2994,28 @@ def render():
 
                 use_container_width=True,
 
-                key="editor_search_do"
+                key="editor_search_do",
+
+                column_config={
+
+                    "Qty":
+                        st.column_config.NumberColumn(
+                            "Qty",
+                            min_value=0,
+                            step=1
+                        ),
+
+                    "Remarks":
+                        st.column_config.TextColumn(
+                            "Remarks"
+                        ),
+
+                    "Site Alocation":
+                        st.column_config.TextColumn(
+                            "Site Allocation"
+                        )
+
+                }
 
             )
 
@@ -2988,6 +3055,14 @@ def render():
 
                 raw_sites_in_do = []
 
+                # ==============================================================
+                # FIX:
+                #
+                # HANYA membaca Site Alocation.
+                #
+                # Jangan membaca Remarks sebagai site.
+                # ==============================================================
+
                 if "Site Alocation" in edited_mat_df.columns:
 
                     raw_sites_in_do.extend(
@@ -3007,19 +3082,6 @@ def render():
 
                         edited_mat_df[
                             "Site Allocation"
-                        ]
-                        .dropna()
-                        .astype(str)
-                        .tolist()
-
-                    )
-
-                if "Remarks" in edited_mat_df.columns:
-
-                    raw_sites_in_do.extend(
-
-                        edited_mat_df[
-                            "Remarks"
                         ]
                         .dropna()
                         .astype(str)
@@ -3258,6 +3320,13 @@ def render():
                             edited_relocation_df.iterrows()
                         ):
 
+                            # ==================================================
+                            # FIX:
+                            #
+                            # Site hanya dari Site Alocation.
+                            # Remarks tidak digunakan.
+                            # ==================================================
+
                             site_in_row = (
 
                                 str(
@@ -3271,13 +3340,6 @@ def render():
 
                                     row.get(
                                         "Site Allocation",
-                                        ""
-                                    )
-
-                                    or
-
-                                    row.get(
-                                        "Remarks",
                                         ""
                                     )
 
@@ -3316,9 +3378,12 @@ def render():
                             edited_relocation_df.at[
                                 idx,
                                 "Qty Reloc."
-                            ] = row.get(
-                                "Qty",
-                                0
+                            ] = safe_qty(
+                                row.get(
+                                    "Qty",
+                                    0
+                                ),
+                                default=0
                             )
 
                             edited_relocation_df.at[
@@ -3364,26 +3429,41 @@ def render():
                                 )
                             )
 
-                            new_row["Qty"] = (
+                            # ==================================================
+                            # Qty tetap mengambil Qty hasil edit.
+                            # Jika 0 -> tetap 0.
+                            # ==================================================
+
+                            new_row["Qty"] = safe_qty(
                                 row.get(
                                     "Qty",
                                     0
-                                )
+                                ),
+                                default=0
                             )
 
                             new_row["UoM"] = (
 
                                 row.get("UoM")
 
-                                or
+                                if row.get("UoM") is not None
 
-                                row.get("uom")
-
-                                or
-
-                                "Pcs"
+                                else row.get(
+                                    "uom",
+                                    "Pcs"
+                                )
 
                             )
+
+                            if (
+                                new_row["UoM"] is None
+                                or
+                                str(
+                                    new_row["UoM"]
+                                ).strip() == ""
+                            ):
+
+                                new_row["UoM"] = "Pcs"
 
                             new_row["Charging Type"] = (
                                 row.get(
@@ -3392,13 +3472,33 @@ def render():
                                 )
                             )
 
+                            # ==================================================
+                            # SITE BARU HANYA MASUK KE SITE ALOCATION
+                            # ==================================================
+
                             new_row["Site Alocation"] = (
                                 selected_site_new
                             )
 
+                            # ==================================================
+                            # FIX:
+                            #
+                            # Remarks tetap Remarks.
+                            #
+                            # Tidak lagi:
+                            # new_row["Remarks"] = selected_site_new
+                            # ==================================================
+
                             new_row["Remarks"] = (
-                                selected_site_new
+                                row.get(
+                                    "Remarks",
+                                    ""
+                                )
                             )
+
+                            if new_row["Remarks"] is None:
+
+                                new_row["Remarks"] = ""
 
                             new_row["To"] = e_to
 
@@ -3629,12 +3729,33 @@ def render():
 
                 ):
 
+                    # ==========================================================
+                    # Pastikan Qty yang diedit benar-benar dikonversi sebagai
+                    # angka dan nilai 0 tidak hilang.
+                    # ==========================================================
+
                     updated_materials = (
                         edited_mat_df
                         .to_dict(
                             orient="records"
                         )
                     )
+
+                    for row in updated_materials:
+
+                        row["Qty"] = safe_qty(
+                            row.get(
+                                "Qty",
+                                0
+                            ),
+                            default=0
+                        )
+
+                        if row.get(
+                            "Remarks"
+                        ) is None:
+
+                            row["Remarks"] = ""
 
                     with st.spinner(
                         "Memperbarui database Google Sheets..."
@@ -3714,6 +3835,67 @@ def render():
 
                     )
 
+                    # ==========================================================
+                    # Normalisasi Qty preview
+                    # ==========================================================
+
+                    for row in preview_materials:
+
+                        row["Qty"] = safe_qty(
+                            row.get(
+                                "Qty",
+                                0
+                            ),
+                            default=0
+                        )
+
+                        if row.get(
+                            "Remarks"
+                        ) is None:
+
+                            row["Remarks"] = ""
+
+                    # ==========================================================
+                    # SITE COUNT:
+                    #
+                    # Hanya dari Site Alocation.
+                    # Tidak lagi dari Remarks.
+                    # ==========================================================
+
+                    preview_sites = set()
+
+                    for x in preview_materials:
+
+                        site_value = (
+
+                            x.get(
+                                "Site Alocation",
+                                ""
+                            )
+
+                            if x.get(
+                                "Site Alocation"
+                            ) is not None
+
+                            else x.get(
+                                "Site Allocation",
+                                ""
+                            )
+
+                        )
+
+                        if site_value:
+
+                            site_value = str(
+                                site_value
+                            ).strip()
+
+                            if site_value:
+
+                                preview_sites.add(
+                                    site_value
+                                )
+
                     st.session_state.current_do = {
 
                         "no_do":
@@ -3728,6 +3910,18 @@ def render():
                         "epc":
                             e_epc,
 
+                        "charging_type":
+                            edit_data.get(
+                                "charging_type",
+                                ""
+                            ),
+
+                        "expedition":
+                            edit_data.get(
+                                "expedition",
+                                ""
+                            ),
+
                         "to":
                             e_to,
 
@@ -3741,27 +3935,7 @@ def render():
                             preview_materials,
 
                         "site_count":
-                            len(
-                                set(
-
-                                    str(
-                                        x.get(
-                                            "Site Alocation",
-                                            ""
-                                        )
-                                    ).strip()
-
-                                    for x in preview_materials
-
-                                    if str(
-                                        x.get(
-                                            "Site Alocation",
-                                            ""
-                                        )
-                                    ).strip()
-
-                                )
-                            )
+                            len(preview_sites)
 
                     }
 
