@@ -42,7 +42,14 @@ try:
         get_do_by_number,
         update_do_in_db_material_out,
         get_used_sites_from_db_material_out,
-        get_query_sheet_data
+        get_query_sheet_data,
+
+        # ----------------------------------------------------------------------
+        # TAMBAHAN:
+        # Untuk membaca Master Item langsung melalui database layer.
+        # ----------------------------------------------------------------------
+        get_sheet_values
+
     )
 
 except ImportError as e:
@@ -78,6 +85,11 @@ DEFAULT_EXPEDITIONS = [
     "TIKI"
 ]
 
+# ------------------------------------------------------------------------------
+# NAMA SHEET MASTER ITEM
+# ------------------------------------------------------------------------------
+MASTER_ITEM_SHEET = "Master Item"
+
 
 # ==============================================================================
 # HELPER SESSION STATE
@@ -86,19 +98,12 @@ DEFAULT_EXPEDITIONS = [
 def initialize_session_state():
 
     defaults = {
-
         "relocation_history": [],
-
         "current_do": None,
-
         "edit_do_data": None,
-
         "do_number_draft": None,
-
         "do_number_generated_at": None,
-
         "do_success_notification": None
-
     }
 
     for key, value in defaults.items():
@@ -106,6 +111,308 @@ def initialize_session_state():
         if key not in st.session_state:
 
             st.session_state[key] = value
+
+
+# ==============================================================================
+# SAFE VALUE
+# ==============================================================================
+
+def safe_text(value, default=""):
+
+    if value is None:
+        return default
+
+    try:
+
+        if pd.isna(value):
+            return default
+
+    except Exception:
+        pass
+
+    value = str(value).strip()
+
+    if not value:
+        return default
+
+    if value.lower() in [
+        "nan",
+        "none",
+        "null"
+    ]:
+        return default
+
+    return value
+
+
+# ==============================================================================
+# UOM HELPER
+# ==============================================================================
+
+def safe_uom(value, default="Pcs"):
+    """
+    Menjaga nilai UoM asli.
+
+    Prioritas:
+    1. Nilai UoM yang diberikan.
+    2. Tidak memaksa menjadi Pcs.
+    3. Default hanya jika benar-benar kosong.
+    """
+
+    if value is None:
+        return default
+
+    if isinstance(value, float) and pd.isna(value):
+        return default
+
+    value = str(value).strip()
+
+    if not value:
+        return default
+
+    if value.lower() in [
+        "nan",
+        "none",
+        "null"
+    ]:
+        return default
+
+    return value
+
+
+def get_uom_from_row(row, default="Pcs"):
+    """
+    Mengambil UoM tanpa memaksa menjadi Pcs.
+
+    Mendukung:
+    - UoM
+    - uom
+    - UOM
+    """
+
+    if row is None:
+        return default
+
+    candidates = [
+        "UoM",
+        "uom",
+        "UOM"
+    ]
+
+    for key in candidates:
+
+        if key in row:
+
+            value = row.get(key)
+
+            if value is not None:
+
+                if not (
+                    isinstance(value, float)
+                    and pd.isna(value)
+                ):
+
+                    value = str(value).strip()
+
+                    if value and value.lower() not in [
+                        "nan",
+                        "none",
+                        "null"
+                    ]:
+
+                        return value
+
+    return default
+
+
+# ==============================================================================
+# MASTER ITEM - UOM
+# ==============================================================================
+
+@st.cache_data(
+    ttl=3600,
+    show_spinner=False
+)
+def load_master_item_uom():
+
+    """
+    Membaca Master Item.
+
+    Struktur yang digunakan:
+        Kolom A = Material Code
+        Kolom B = Material Name
+        Kolom C = Specification
+        Kolom D = UoM
+
+    Return:
+        {
+            "AC0001": "Pcs",
+            "MM0003": "Unit",
+            ...
+        }
+
+    Catatan:
+    Jika struktur header berubah, fungsi juga mencoba mendeteksi
+    berdasarkan nama kolom.
+    """
+
+    try:
+
+        all_values = get_sheet_values(
+            MASTER_ITEM_SHEET
+        )
+
+        if not all_values or len(all_values) < 2:
+
+            return {}
+
+        # ======================================================================
+        # PRIORITAS UTAMA:
+        # Sesuai requirement user:
+        #
+        # A = Material Code
+        # B = Material Name
+        # C = Specification
+        # D = UoM
+        # ======================================================================
+
+        uom_map = {}
+
+        headers = [
+            str(x).strip()
+            for x in all_values[0]
+        ]
+
+        # ----------------------------------------------------------------------
+        # Deteksi kolom berdasarkan header terlebih dahulu.
+        # ----------------------------------------------------------------------
+
+        def find_header(candidates):
+
+            lower_map = {
+                str(header).strip().lower(): index
+                for index, header in enumerate(headers)
+            }
+
+            for candidate in candidates:
+
+                key = (
+                    str(candidate)
+                    .strip()
+                    .lower()
+                )
+
+                if key in lower_map:
+
+                    return lower_map[key]
+
+            return None
+
+        code_col = find_header([
+            "Material Code",
+            "MaterialCode",
+            "Code",
+            "Item Code",
+            "Kode Material",
+            "Kode"
+        ])
+
+        uom_col = find_header([
+            "UoM",
+            "UOM",
+            "uom",
+            "Unit",
+            "Unit of Measure"
+        ])
+
+        # ----------------------------------------------------------------------
+        # FALLBACK:
+        # Sesuai struktur tetap A:D.
+        # ----------------------------------------------------------------------
+
+        if code_col is None:
+
+            code_col = 0
+
+        if uom_col is None:
+
+            uom_col = 3
+
+        # ----------------------------------------------------------------------
+        # Safety:
+        # Jangan menggunakan kolom di luar data.
+        # ----------------------------------------------------------------------
+
+        for row in all_values[1:]:
+
+            if len(row) <= code_col:
+
+                continue
+
+            if len(row) <= uom_col:
+
+                continue
+
+            material_code = safe_text(
+                row[code_col],
+                default=""
+            )
+
+            material_uom = safe_uom(
+                row[uom_col],
+                default=""
+            )
+
+            if not material_code:
+
+                continue
+
+            # --------------------------------------------------------------
+            # Simpan case-insensitive agar AC0001 / ac0001 tetap cocok.
+            # --------------------------------------------------------------
+
+            uom_map[
+                material_code.upper()
+            ] = material_uom
+
+        return uom_map
+
+    except Exception as e:
+
+        st.warning(
+            "⚠️ Gagal membaca UoM dari "
+            f"sheet '{MASTER_ITEM_SHEET}': {e}"
+        )
+
+        return {}
+
+
+def get_master_uom(material_code, default="Pcs"):
+
+    code = safe_text(
+        material_code,
+        default=""
+    )
+
+    if not code:
+
+        return default
+
+    uom_map = load_master_item_uom()
+
+    uom = uom_map.get(
+        code.upper(),
+        ""
+    )
+
+    if uom:
+
+        return safe_uom(
+            uom,
+            default=default
+        )
+
+    return default
 
 
 # ==============================================================================
@@ -280,11 +587,8 @@ def detect_query_columns(df):
                 return candidate
 
         lower_map = {
-
             str(c).strip().lower(): c
-
             for c in columns
-
         }
 
         for candidate in candidates:
@@ -367,17 +671,13 @@ def load_epc_list():
     )
 
     values = [
-
         x
-
         for x in values.unique().tolist()
-
         if x
         and x.lower() not in [
             "nan",
             "none"
         ]
-
     ]
 
     return sorted(values)
@@ -623,7 +923,6 @@ def load_available_relocation_sites():
     )
 
     filtered = working_df[
-
         (
             ~working_df["_status_clean"]
             .str.contains(
@@ -632,14 +931,11 @@ def load_available_relocation_sites():
                 na=False
             )
         )
-
         &
-
         (
             working_df["_site_clean"]
             != ""
         )
-
     ]
 
     sites = []
@@ -676,7 +972,6 @@ def load_standard_charging_materials(
         {
             "code": "AC0001",
             "name": "Clamp Conduit",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 5,
                 "12S1P": 5
@@ -686,7 +981,6 @@ def load_standard_charging_materials(
         {
             "code": "AC0002",
             "name": "Kabel Schoen 16",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 10,
                 "12S1P": 10
@@ -696,7 +990,6 @@ def load_standard_charging_materials(
         {
             "code": "AC0004",
             "name": "Kabel Vynil Biru",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 4,
                 "12S1P": 4
@@ -706,7 +999,6 @@ def load_standard_charging_materials(
         {
             "code": "AC0005",
             "name": "Kabel Vynil Hijau",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 2,
                 "12S1P": 2
@@ -716,7 +1008,6 @@ def load_standard_charging_materials(
         {
             "code": "AC0006",
             "name": "Kabel Vynil Hitam",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 2,
                 "12S1P": 2
@@ -726,7 +1017,6 @@ def load_standard_charging_materials(
         {
             "code": "AC0008",
             "name": "Kabel Vynil Merah",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 4,
                 "12S1P": 4
@@ -736,7 +1026,6 @@ def load_standard_charging_materials(
         {
             "code": "AC0009",
             "name": "Kuku Macan 10",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 1,
                 "12S1P": 1
@@ -746,7 +1035,6 @@ def load_standard_charging_materials(
         {
             "code": "AC0010",
             "name": "Sok Konektor Grounding 5/8\"",
-            "uom": "Pcs",
             "qty_map": {
                 "DC20": 1,
                 "DC30": 1,
@@ -757,7 +1045,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0001",
             "name": "APAR 3Kg",
-            "uom": "Pcs",
             "qty_map": {
                 "DC20": 1,
                 "DC30": 1,
@@ -768,7 +1055,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0002",
             "name": "Box APAR",
-            "uom": "Pcs",
             "qty_map": {
                 "DC20": 1,
                 "DC30": 1,
@@ -779,7 +1065,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0003",
             "name": "Combiner 125A",
-            "uom": "Unit",
             "qty_map": {
                 "DC60": 1
             }
@@ -788,7 +1073,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0004",
             "name": "Combiner 63A BSS",
-            "uom": "Pcs",
             "qty_map": {
                 "12S1P": 1
             }
@@ -797,7 +1081,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0005",
             "name": "Combiner 40A 3P",
-            "uom": "Pcs",
             "qty_map": {
                 "DC20": 1
             }
@@ -806,7 +1089,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0006",
             "name": "Combiner 40A BSS",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 1
             }
@@ -815,7 +1097,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0007",
             "name": "Combiner 63A",
-            "uom": "Pcs",
             "qty_map": {
                 "DC30": 1
             }
@@ -824,7 +1105,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0009",
             "name": "Conduit Anaconda 1\"",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 10,
                 "12S1P": 10
@@ -834,7 +1114,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0011",
             "name": "Kabel Grounding 6",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 5,
                 "12S1P": 5
@@ -844,7 +1123,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0012",
             "name": "Kabel Power NYY 4x10",
-            "uom": "Pcs",
             "qty_map": {
                 "DC20": 12
             }
@@ -853,7 +1131,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0013",
             "name": "Kabel Power NYY 4x16",
-            "uom": "Pcs",
             "qty_map": {
                 "DC30": 12
             }
@@ -862,7 +1139,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0014",
             "name": "Kabel Power NYY 4x25mm",
-            "uom": "Pcs",
             "qty_map": {
                 "DC60": 12
             }
@@ -871,7 +1147,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0016",
             "name": "Kabel Power NYYHY 3x10",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 10
             }
@@ -880,7 +1155,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0017",
             "name": "NYA 10mm",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 5,
                 "12S1P": 5,
@@ -892,7 +1166,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0018",
             "name": "NYA 16mm",
-            "uom": "Pcs",
             "qty_map": {
                 "DC60": 15
             }
@@ -901,7 +1174,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0020",
             "name": "Stick Rod 2m",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 1,
                 "12S1P": 1,
@@ -914,7 +1186,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0021",
             "name": "Stick Rod 1.5m",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 1,
                 "12S1P": 1,
@@ -927,7 +1198,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0022",
             "name": "Stick Rod 1m",
-            "uom": "Pcs",
             "qty_map": {
                 "6S1P": 1,
                 "12S1P": 1,
@@ -940,7 +1210,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0023",
             "name": "Wheel Stopper",
-            "uom": "Pcs",
             "qty_map": {
                 "DC20": 2,
                 "DC30": 2,
@@ -951,7 +1220,6 @@ def load_standard_charging_materials(
         {
             "code": "MM0024",
             "name": "Kabel Power NYY 4x35",
-            "uom": "Pcs",
             "qty_map": {
                 "DC60": 12
             }
@@ -970,6 +1238,16 @@ def load_standard_charging_materials(
 
         if std_qty > 0:
 
+            # ------------------------------------------------------------------
+            # UoM SEKARANG DIAMBIL DARI MASTER ITEM
+            # berdasarkan Material Code.
+            # ------------------------------------------------------------------
+
+            master_uom = get_master_uom(
+                item["code"],
+                default="Pcs"
+            )
+
             result.append({
 
                 "code":
@@ -982,7 +1260,7 @@ def load_standard_charging_materials(
                     std_qty,
 
                 "uom":
-                    item["uom"]
+                    master_uom
 
             })
 
@@ -1022,15 +1300,6 @@ def ensure_relocation_columns(df):
 # ==============================================================================
 
 def safe_qty(value, default=0):
-
-    """
-    Mengubah Qty dari data editor menjadi angka.
-
-    Penting:
-    - 0 tetap dianggap 0
-    - tidak menggunakan `or default`
-      karena 0 adalah nilai valid.
-    """
 
     if value is None:
 
@@ -1096,72 +1365,47 @@ def generate_do_a5_pdf(data):
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
-
         "T",
-
         fontName="Helvetica-Bold",
-
         fontSize=10,
-
         textColor=colors.HexColor("#1a365d")
-
     )
 
     subtitle_style = ParagraphStyle(
-
         "ST",
-
         fontName="Helvetica",
-
         fontSize=6,
-
         textColor=colors.HexColor("#4a5568"),
-
         leading=7
-
     )
 
     body_style = ParagraphStyle(
-
         "B",
-
         fontName="Helvetica",
-
         fontSize=6.5,
-
         leading=8,
-
         textColor=colors.HexColor("#2d3748")
-
     )
 
     body_bold = ParagraphStyle(
-
         "BB",
-
         fontName="Helvetica-Bold",
-
         fontSize=6.5,
-
         leading=8,
-
         textColor=colors.HexColor("#1a365d")
-
     )
 
     header_table_style = ParagraphStyle(
-
         "HT",
-
         fontName="Helvetica-Bold",
-
         fontSize=6.5,
-
         textColor=colors.white,
-
         alignment=1
-
     )
+
+    # --------------------------------------------------------------------------
+    # LOGO
+    # --------------------------------------------------------------------------
 
     logo_path = "assets/logo.png"
 
@@ -1201,24 +1445,18 @@ def generate_do_a5_pdf(data):
     ]
 
     head_table = Table(
-
         [[logo_img, company_info]],
-
         colWidths=[95, 295]
-
     )
 
     head_table.setStyle(
-
         TableStyle([
-
             (
                 "VALIGN",
                 (0, 0),
                 (-1, -1),
                 "MIDDLE"
             ),
-
             (
                 "LINEBELOW",
                 (0, 0),
@@ -1226,16 +1464,13 @@ def generate_do_a5_pdf(data):
                 1,
                 colors.HexColor("#1a365d")
             ),
-
             (
                 "BOTTOMPADDING",
                 (0, 0),
                 (-1, -1),
                 4
             )
-
         ])
-
     )
 
     elements.append(head_table)
@@ -1282,17 +1517,12 @@ def generate_do_a5_pdf(data):
     ]
 
     to_table = Table(
-
         to_box,
-
         colWidths=[45, 140]
-
     )
 
     to_table.setStyle(
-
         TableStyle([
-
             (
                 "BOX",
                 (0, 0),
@@ -1300,30 +1530,25 @@ def generate_do_a5_pdf(data):
                 0.5,
                 colors.HexColor("#cbd5e0")
             ),
-
             (
                 "BACKGROUND",
                 (0, 0),
                 (-1, 0),
                 colors.HexColor("#edf2f7")
             ),
-
             (
                 "TOPPADDING",
                 (0, 0),
                 (-1, -1),
                 2
             ),
-
             (
                 "BOTTOMPADDING",
                 (0, 0),
                 (-1, -1),
                 2
             )
-
         ])
-
     )
 
     # --------------------------------------------------------------------------
@@ -1333,7 +1558,6 @@ def generate_do_a5_pdf(data):
     meta_box = [
 
         [
-
             Paragraph(
                 "<b>DELIVERY ORDER</b>",
                 ParagraphStyle(
@@ -1344,9 +1568,7 @@ def generate_do_a5_pdf(data):
                     textColor=colors.HexColor("#1a365d")
                 )
             ),
-
             ""
-
         ],
 
         [
@@ -1392,23 +1614,17 @@ def generate_do_a5_pdf(data):
     ]
 
     meta_table = Table(
-
         meta_box,
-
         colWidths=[65, 140]
-
     )
 
     meta_table.setStyle(
-
         TableStyle([
-
             (
                 "SPAN",
                 (0, 0),
                 (1, 0)
             ),
-
             (
                 "BOX",
                 (0, 0),
@@ -1416,53 +1632,41 @@ def generate_do_a5_pdf(data):
                 0.5,
                 colors.HexColor("#cbd5e0")
             ),
-
             (
                 "BACKGROUND",
                 (0, 0),
                 (1, 0),
                 colors.HexColor("#e2e8f0")
             ),
-
             (
                 "TOPPADDING",
                 (0, 0),
                 (-1, -1),
                 2
             ),
-
             (
                 "BOTTOMPADDING",
                 (0, 0),
                 (-1, -1),
                 2
             )
-
         ])
-
     )
 
     top_info_table = Table(
-
         [[to_table, meta_table]],
-
         colWidths=[190, 200]
-
     )
 
     top_info_table.setStyle(
-
         TableStyle([
-
             (
                 "VALIGN",
                 (0, 0),
                 (-1, -1),
                 "TOP"
             )
-
         ])
-
     )
 
     elements.append(top_info_table)
@@ -1527,44 +1731,59 @@ def generate_do_a5_pdf(data):
             item.get("name", "")
         )
 
-        # ----------------------------------------------------------------------
-        # IMPORTANT:
-        # Site Allocation hanya mengambil kolom Site Alocation / Site Allocation.
-        # Remarks TIDAK digunakan sebagai fallback.
-        # ----------------------------------------------------------------------
+        # ======================================================================
+        # UOM:
+        # 1. Jika data sudah memiliki UoM -> gunakan.
+        # 2. Jika kosong -> lookup Master Item.
+        # 3. Pcs hanya fallback terakhir.
+        # ======================================================================
 
-        site = (
-
-            item.get("Site Alocation")
-
-            if item.get("Site Alocation") is not None
-
-            else item.get("Site Allocation", "")
-
+        uom = get_uom_from_row(
+            item,
+            default=""
         )
+
+        if not uom:
+
+            uom = get_master_uom(
+                code,
+                default="Pcs"
+            )
+
+        # ----------------------------------------------------------------------
+        # SITE
+        # ----------------------------------------------------------------------
+
+        site = item.get(
+            "Site Alocation"
+        )
+
+        if site is None:
+
+            site = item.get(
+                "Site Allocation",
+                ""
+            )
 
         if site is None:
 
             site = ""
 
-        uom = (
-
-            item.get("UoM")
-
-            if item.get("UoM") is not None
-
-            else item.get("uom", "Pcs")
-
-        )
-
-        if uom is None or str(uom).strip() == "":
-
-            uom = "Pcs"
+        # ----------------------------------------------------------------------
+        # QTY
+        # ----------------------------------------------------------------------
 
         qty = safe_qty(
-            item.get("Qty", 0),
+            item.get(
+                "Qty",
+                0
+            ),
             default=0
         )
+
+        # ----------------------------------------------------------------------
+        # REMARKS
+        # ----------------------------------------------------------------------
 
         remarks = item.get(
             "Remarks",
@@ -1605,6 +1824,10 @@ def generate_do_a5_pdf(data):
                 )
             ),
 
+            # ==================================================================
+            # UOM DARI MASTER ITEM
+            # ==================================================================
+
             Paragraph(
                 str(uom),
                 ParagraphStyle(
@@ -1634,15 +1857,16 @@ def generate_do_a5_pdf(data):
 
     for material in materials:
 
-        site = (
-
-            material.get("Site Alocation")
-
-            if material.get("Site Alocation") is not None
-
-            else material.get("Site Allocation", "")
-
+        site = material.get(
+            "Site Alocation"
         )
+
+        if site is None:
+
+            site = material.get(
+                "Site Allocation",
+                ""
+            )
 
         if site is None:
 
@@ -1690,9 +1914,7 @@ def generate_do_a5_pdf(data):
     ])
 
     materials_table = Table(
-
         mat_rows,
-
         colWidths=[
             18,
             50,
@@ -1702,20 +1924,16 @@ def generate_do_a5_pdf(data):
             120,
             60
         ]
-
     )
 
     materials_table.setStyle(
-
         TableStyle([
-
             (
                 "BACKGROUND",
                 (0, 0),
                 (-1, 0),
                 colors.HexColor("#1a365d")
             ),
-
             (
                 "GRID",
                 (0, 0),
@@ -1723,20 +1941,17 @@ def generate_do_a5_pdf(data):
                 0.5,
                 colors.HexColor("#cbd5e0")
             ),
-
             (
                 "SPAN",
                 (0, -1),
                 (4, -1)
             ),
-
             (
                 "BACKGROUND",
                 (0, -1),
                 (-1, -1),
                 colors.HexColor("#edf2f7")
             ),
-
             (
                 "BOX",
                 (0, -1),
@@ -1744,23 +1959,19 @@ def generate_do_a5_pdf(data):
                 0.5,
                 colors.HexColor("#1a365d")
             ),
-
             (
                 "TOPPADDING",
                 (0, 0),
                 (-1, -1),
                 2
             ),
-
             (
                 "BOTTOMPADDING",
                 (0, 0),
                 (-1, -1),
                 2
             )
-
         ])
-
     )
 
     elements.append(materials_table)
@@ -1774,21 +1985,15 @@ def generate_do_a5_pdf(data):
     # --------------------------------------------------------------------------
 
     sign_title = ParagraphStyle(
-
         "SIGN",
-
         fontName="Helvetica-Bold",
-
         fontSize=6.5,
-
         alignment=1
-
     )
 
     sign_data = [
 
         [
-
             Paragraph(
                 "Prepared By,",
                 sign_title
@@ -1803,7 +2008,6 @@ def generate_do_a5_pdf(data):
                 "Received By,",
                 sign_title
             )
-
         ],
 
         [
@@ -1813,56 +2017,43 @@ def generate_do_a5_pdf(data):
         ],
 
         [
-
             "( ____________________ )",
-
             "( ____________________ )",
-
             "( ____________________ )"
-
         ]
 
     ]
 
     sign_table = Table(
-
         sign_data,
-
         colWidths=[
             130,
             130,
             130
         ]
-
     )
 
     sign_table.setStyle(
-
         TableStyle([
-
             (
                 "ALIGN",
                 (0, 0),
                 (-1, -1),
                 "CENTER"
             ),
-
             (
                 "BOTTOMPADDING",
                 (0, 0),
                 (-1, 0),
                 20
             ),
-
             (
                 "TOPPADDING",
                 (0, 0),
                 (-1, -1),
                 1
             )
-
         ])
-
     )
 
     elements.append(sign_table)
@@ -1875,13 +2066,112 @@ def generate_do_a5_pdf(data):
 
 
 # ==============================================================================
+# SAVE VALIDATION
+# ==============================================================================
+
+def save_do_and_verify(rows_data, no_do):
+
+    """
+    Menyimpan DO menggunakan database layer yang sudah ada.
+
+    Setelah save berhasil, dilakukan fresh READ ke DB Material Out
+    untuk memastikan nomor DO benar-benar sudah tercatat.
+
+    Tidak mengubah mekanisme save di database.py.
+    """
+
+    if not rows_data:
+
+        return False, "Tidak ada data material yang akan disimpan."
+
+    target_do = safe_text(
+        no_do,
+        default=""
+    )
+
+    if not target_do:
+
+        return False, "Nomor DO kosong."
+
+    try:
+
+        # ----------------------------------------------------------------------
+        # STEP 1
+        # Gunakan fungsi existing database.py.
+        # ----------------------------------------------------------------------
+
+        save_result = (
+            save_do_to_db_material_out(
+                rows_data
+            )
+        )
+
+        if not save_result:
+
+            return False, (
+                "Fungsi database mengembalikan status gagal "
+                "saat menyimpan DB Material Out."
+            )
+
+        # ----------------------------------------------------------------------
+        # STEP 2
+        # Fresh READ.
+        #
+        # get_sheet_values() tidak memakai cache data, sehingga kita bisa
+        # memastikan data benar-benar ada di Google Sheets.
+        # ----------------------------------------------------------------------
+
+        verify_values = get_sheet_values(
+            "DB Material Out"
+        )
+
+        if not verify_values or len(verify_values) < 2:
+
+            return False, (
+                "Database tidak mengembalikan data setelah proses save."
+            )
+
+        found = False
+
+        for row in verify_values[1:]:
+
+            if len(row) > 1:
+
+                existing_do = safe_text(
+                    row[1],
+                    default=""
+                )
+
+                if existing_do == target_do:
+
+                    found = True
+
+                    break
+
+        if not found:
+
+            return False, (
+                f"DO {target_do} belum ditemukan pada "
+                "sheet 'DB Material Out' setelah proses penyimpanan."
+            )
+
+        return True, ""
+
+    except Exception as e:
+
+        return False, (
+            "Terjadi error saat menyimpan/verifikasi DO: "
+            f"{type(e).__name__}: {e}"
+        )
+
+
+# ==============================================================================
 # CSS
 # ==============================================================================
 
 def apply_page_style():
 
     st.markdown(
-
         """
         <style>
 
@@ -1895,17 +2185,11 @@ def apply_page_style():
         div[data-testid="stDateInput"] input {
 
             background-color: #FFFFFF !important;
-
             color: #000000 !important;
-
             -webkit-text-fill-color: #000000 !important;
-
             border: 1px solid #94A3B8 !important;
-
             border-radius: 6px !important;
-
             font-weight: 600 !important;
-
             opacity: 1 !important;
 
         }
@@ -1914,7 +2198,6 @@ def apply_page_style():
         div[data-baseweb="menu"] {
 
             background-color: #FFFFFF !important;
-
             color: #000000 !important;
 
         }
@@ -1922,7 +2205,6 @@ def apply_page_style():
         li[role="option"] {
 
             color: #000000 !important;
-
             background-color: #FFFFFF !important;
 
         }
@@ -1938,9 +2220,7 @@ def apply_page_style():
         input::placeholder {
 
             color: #64748B !important;
-
             -webkit-text-fill-color: #64748B !important;
-
             opacity: 1 !important;
 
         }
@@ -1948,7 +2228,6 @@ def apply_page_style():
         span[data-baseweb="tag"] {
 
             background-color: #3B82F6 !important;
-
             color: #FFFFFF !important;
 
         }
@@ -1958,9 +2237,7 @@ def apply_page_style():
         .glideDataEditor {
 
             background-color: #FFFFFF !important;
-
             color: #000000 !important;
-
             border: 1px solid #CBD5E1 !important;
 
         }
@@ -1980,16 +2257,13 @@ def apply_page_style():
         div[data-testid="stToast"] {
 
             font-size: 16px !important;
-
             font-weight: 700 !important;
 
         }
 
         </style>
         """,
-
         unsafe_allow_html=True
-
     )
 
 
@@ -2029,13 +2303,9 @@ def render():
     # ==========================================================================
 
     tab_form, tab_preview, tab_search = st.tabs([
-
         "📝 Form Create DO",
-
         "🖨️ Preview & PDF Cetak (A5)",
-
         "🔍 Search, Edit & Relokasi Site"
-
     ])
 
     # ==========================================================================
@@ -2050,112 +2320,65 @@ def render():
 
         col1, col2, col3 = st.columns(3)
 
-        # ----------------------------------------------------------------------
-        # COLUMN 1
-        # ----------------------------------------------------------------------
-
         with col1:
 
             no_do_auto = get_current_do_number()
 
             no_do = st.text_input(
-
                 "1. No. DO (Auto)",
-
                 value=no_do_auto,
-
                 disabled=True
-
             )
 
             do_date = st.date_input(
-
                 "2. Date",
-
                 datetime.now()
-
             )
 
             epc = st.selectbox(
-
                 "3. EPC (Query Sheet)",
-
                 epc_list
                 if epc_list
                 else ["Pilih EPC..."],
-
                 index=None,
-
                 placeholder="Pilih EPC..."
-
             )
-
-        # ----------------------------------------------------------------------
-        # COLUMN 2
-        # ----------------------------------------------------------------------
 
         with col2:
 
             charging_type = st.selectbox(
-
                 "4. Charging Type (Master Dropdown)",
-
                 charging_list,
-
                 index=None,
-
                 placeholder="Pilih Charging Type..."
-
             )
 
             expedition = st.selectbox(
-
                 "5. Expedition (Master Dropdown)",
-
                 exp_list,
-
                 index=None,
-
                 placeholder="Pilih Ekspedisi..."
-
             )
 
             to_name = st.text_input(
-
                 "6. To (Recipient Name)",
-
                 value="",
-
                 placeholder="Contoh: Tsubasa Ozora"
-
             )
-
-        # ----------------------------------------------------------------------
-        # COLUMN 3
-        # ----------------------------------------------------------------------
 
         with col3:
 
             contact = st.text_input(
-
                 "7. Contact (Phone No.)",
-
                 value="",
-
                 placeholder="Contoh: 081234567890"
-
             )
 
             address = st.text_area(
-
                 "8. Address",
-
                 value="",
-
                 placeholder="Contoh: Alamat Tujuan",
-
                 height=110
-
             )
 
         st.divider()
@@ -2163,10 +2386,6 @@ def render():
         st.subheader(
             "Filter Site & Kalkulasi Material Automatic"
         )
-
-        # ----------------------------------------------------------------------
-        # SITE FILTER
-        # ----------------------------------------------------------------------
 
         if epc and charging_type:
 
@@ -2190,14 +2409,10 @@ def render():
             max_selections=MAX_SITE_SELECTION,
 
             placeholder=(
-
                 "Pilih Alokasi Site..."
-
                 if epc and charging_type
-
                 else
                 "⚠️ Silakan pilih EPC dan Charging Type terlebih dahulu..."
-
             )
 
         )
@@ -2207,16 +2422,14 @@ def render():
         )
 
         st.info(
-
             f"📊 Total Site Terpilih: "
             f"**{site_count} Site Allocated** "
             f"(Maksimal {MAX_SITE_SELECTION} Site)"
-
         )
 
-        # ----------------------------------------------------------------------
+        # ==========================================================================
         # MATERIAL
-        # ----------------------------------------------------------------------
+        # ==========================================================================
 
         raw_materials = (
 
@@ -2251,6 +2464,18 @@ def render():
 
             )
 
+            # ----------------------------------------------------------------------
+            # UOM DARI MASTER ITEM
+            # ----------------------------------------------------------------------
+
+            item_uom = get_master_uom(
+                item["code"],
+                default=item.get(
+                    "uom",
+                    "Pcs"
+                )
+            )
+
             table_data.append({
 
                 "No":
@@ -2266,7 +2491,7 @@ def render():
                     total_qty,
 
                 "UoM":
-                    item["uom"],
+                    item_uom,
 
                 "Remarks":
                     ""
@@ -2323,6 +2548,7 @@ def render():
 
                 "UoM":
                     st.column_config.TextColumn(
+                        "UoM",
                         disabled=True
                     ),
 
@@ -2337,18 +2563,14 @@ def render():
 
         st.divider()
 
-        # ----------------------------------------------------------------------
+        # ==========================================================================
         # SAVE DO
-        # ----------------------------------------------------------------------
+        # ==========================================================================
 
         if st.button(
-
             "🚀 Simpan & Generate Delivery Order",
-
             type="primary",
-
             key="btn_create_do"
-
         ):
 
             if not epc or epc == "Pilih EPC...":
@@ -2403,18 +2625,6 @@ def render():
 
                 row_counter = 1
 
-                # ==================================================================
-                # IMPORTANT FIX:
-                #
-                # Sebelumnya sistem menggunakan:
-                #
-                #     mat_item["std_qty"]
-                #
-                # sehingga Qty yang diedit user di data_editor diabaikan.
-                #
-                # Sekarang sistem menggunakan edited_df.
-                # ==================================================================
-
                 edited_material_rows = (
                     edited_df
                     .to_dict(
@@ -2422,26 +2632,24 @@ def render():
                     )
                 )
 
-                # ------------------------------------------------------------------
-                # GENERATE ROW PER SITE
-                # ------------------------------------------------------------------
-
                 for site_name in selected_sites:
 
                     for mat_item in edited_material_rows:
 
-                        material_code = (
+                        material_code = safe_text(
                             mat_item.get(
                                 "Material Code",
                                 ""
-                            )
+                            ),
+                            default=""
                         )
 
-                        material_name = (
+                        material_name = safe_text(
                             mat_item.get(
                                 "Material Name",
                                 ""
-                            )
+                            ),
+                            default=""
                         )
 
                         qty = safe_qty(
@@ -2452,10 +2660,16 @@ def render():
                             default=0
                         )
 
-                        uom = (
-                            mat_item.get(
-                                "UoM",
-                                ""
+                        # ==========================================================
+                        # UOM:
+                        # SELALU CEK MASTER ITEM BERDASARKAN MATERIAL CODE.
+                        # ==========================================================
+
+                        uom = get_master_uom(
+                            material_code,
+                            default=get_uom_from_row(
+                                mat_item,
+                                default="Pcs"
                             )
                         )
 
@@ -2469,18 +2683,6 @@ def render():
                         if remarks is None:
 
                             remarks = ""
-
-                        # ==========================================================
-                        # FIX #1:
-                        #
-                        # Remarks TIDAK lagi diisi site_name.
-                        #
-                        # Site hanya masuk ke:
-                        #     Site Alocation
-                        #
-                        # Remarks tetap mengambil:
-                        #     mat_item["Remarks"]
-                        # ==========================================================
 
                         generated_db_rows.append({
 
@@ -2499,17 +2701,12 @@ def render():
                             "Material Name":
                                 material_name,
 
-                            # ======================================================
-                            # FIX #2:
-                            #
-                            # Qty sekarang berasal dari edited_df.
-                            #
-                            # Jika user mengubah Qty menjadi 0,
-                            # maka database menerima 0.
-                            # ======================================================
-
                             "Qty":
                                 qty,
+
+                            # ======================================================
+                            # UOM MASTER ITEM
+                            # ======================================================
 
                             "UoM":
                                 uom,
@@ -2519,10 +2716,6 @@ def render():
 
                             "Site Alocation":
                                 site_name,
-
-                            # ======================================================
-                            # REMARKS ASLI DARI DATA EDITOR
-                            # ======================================================
 
                             "Remarks":
                                 remarks,
@@ -2561,32 +2754,30 @@ def render():
 
                         row_counter += 1
 
-                # ------------------------------------------------------------------
-                # SAVE
-                # ------------------------------------------------------------------
+                # ==================================================================
+                # SAVE + VERIFY
+                # ==================================================================
 
                 with st.spinner(
                     "Menyimpan transaksi ke "
                     "sheet 'DB Material Out'..."
                 ):
 
-                    save_result = (
-                        save_do_to_db_material_out(
-                            generated_db_rows
+                    save_ok, save_error = (
+                        save_do_and_verify(
+                            generated_db_rows,
+                            no_do
                         )
                     )
 
-                if not save_result:
+                if not save_ok:
 
                     st.error(
-                        "❌ Gagal menyimpan Delivery Order."
+                        "❌ Delivery Order belum berhasil disimpan.\n\n"
+                        f"{save_error}"
                     )
 
                 else:
-
-                    # ----------------------------------------------------------------
-                    # CURRENT DO
-                    # ----------------------------------------------------------------
 
                     st.session_state.current_do = {
 
@@ -2625,10 +2816,6 @@ def render():
 
                     }
 
-                    # ----------------------------------------------------------------
-                    # SUCCESS NOTIFICATION
-                    # ----------------------------------------------------------------
-
                     st.session_state.do_success_notification = {
 
                         "no_do":
@@ -2647,21 +2834,16 @@ def render():
 
                     }
 
-                    # ----------------------------------------------------------------
-                    # INVALIDATE CACHE
-                    # ----------------------------------------------------------------
+                    # ==================================================================
+                    # CLEAR CACHE
+                    # ==================================================================
 
                     get_used_sites_cached.clear()
-
                     fetch_raw_query_data_cached.clear()
-
                     load_epc_list.clear()
-
                     load_available_relocation_sites.clear()
-
-                    # ----------------------------------------------------------------
-                    # RESET DO NUMBER
-                    # ----------------------------------------------------------------
+                    load_master_item_uom.clear()
+                    load_standard_charging_materials.clear()
 
                     reset_do_number()
 
@@ -2684,27 +2866,64 @@ def render():
         if not REPORTLAB_AVAILABLE:
 
             st.error(
-
                 "Library `reportlab` belum terpasang. "
                 "Jalankan `pip install reportlab`."
-
             )
 
         elif not do_data:
 
             st.warning(
-
                 "Belum ada Delivery Order yang dibuat/dipilih. "
                 "Silakan isi form atau cari DO terlebih dahulu."
-
             )
 
         else:
 
             try:
 
+                # ------------------------------------------------------------------
+                # Refresh UoM dari Master Item sebelum PDF dibuat.
+                # ------------------------------------------------------------------
+
+                pdf_data = dict(do_data)
+
+                pdf_materials = []
+
+                for item in do_data.get(
+                    "materials",
+                    []
+                ):
+
+                    item_copy = dict(item)
+
+                    material_code = (
+                        item_copy.get(
+                            "Material Code",
+                            item_copy.get(
+                                "code",
+                                ""
+                            )
+                        )
+                    )
+
+                    item_copy["UoM"] = get_master_uom(
+                        material_code,
+                        default=get_uom_from_row(
+                            item_copy,
+                            default="Pcs"
+                        )
+                    )
+
+                    pdf_materials.append(
+                        item_copy
+                    )
+
+                pdf_data["materials"] = (
+                    pdf_materials
+                )
+
                 pdf_bytes = generate_do_a5_pdf(
-                    do_data
+                    pdf_data
                 )
 
                 st.download_button(
@@ -2747,15 +2966,9 @@ def render():
         )
 
         st.caption(
-
             "Cari DO berdasarkan Nomor DO untuk mengedit data, "
             "merelokasi site material, atau melihat histori relokasi."
-
         )
-
-        # ----------------------------------------------------------------------
-        # GET DO LIST
-        # ----------------------------------------------------------------------
 
         existing_dos = get_all_do_numbers()
 
@@ -2764,13 +2977,9 @@ def render():
         with col_s1:
 
             selected_do_search = st.selectbox(
-
                 "Pilih Nomor DO yang Tersimpan:",
-
                 options=[""] + existing_dos,
-
                 key="selected_do_search"
-
             )
 
         with col_s2:
@@ -2779,25 +2988,15 @@ def render():
             st.write("")
 
             btn_search = st.button(
-
                 "🔎 Cari DO",
-
                 type="primary",
-
                 key="btn_search_do"
-
             )
-
-        # ----------------------------------------------------------------------
-        # SEARCH
-        # ----------------------------------------------------------------------
 
         if btn_search and selected_do_search:
 
             with st.spinner(
-
                 f"Mencari data {selected_do_search}..."
-
             ):
 
                 found_data = get_do_by_number(
@@ -2805,6 +3004,42 @@ def render():
                 )
 
             if found_data:
+
+                # ------------------------------------------------------------------
+                # Refresh UoM berdasarkan Master Item.
+                # ------------------------------------------------------------------
+
+                found_materials = []
+
+                for item in found_data.get(
+                    "materials",
+                    []
+                ):
+
+                    item_copy = dict(item)
+
+                    material_code = (
+                        item_copy.get(
+                            "Material Code",
+                            ""
+                        )
+                    )
+
+                    item_copy["UoM"] = get_master_uom(
+                        material_code,
+                        default=get_uom_from_row(
+                            item_copy,
+                            default="Pcs"
+                        )
+                    )
+
+                    found_materials.append(
+                        item_copy
+                    )
+
+                found_data["materials"] = (
+                    found_materials
+                )
 
                 st.session_state.edit_do_data = (
                     found_data
@@ -2820,9 +3055,9 @@ def render():
                     "Data DO tidak ditemukan di database."
                 )
 
-        # ----------------------------------------------------------------------
+        # ==========================================================================
         # EDIT FORM
-        # ----------------------------------------------------------------------
+        # ==========================================================================
 
         if (
             "edit_do_data"
@@ -2838,10 +3073,8 @@ def render():
             st.divider()
 
             st.subheader(
-
                 f"Edit Data DO: "
                 f"{edit_data['no_do']}"
-
             )
 
             ecol1, ecol2, ecol3 = st.columns(3)
@@ -2849,89 +3082,63 @@ def render():
             with ecol1:
 
                 e_no_do = st.text_input(
-
                     "No. DO",
-
                     value=edit_data.get(
                         "no_do",
                         ""
                     ),
-
                     disabled=True,
-
                     key="e_no_do"
-
                 )
 
                 e_date = st.text_input(
-
                     "Delivery Date",
-
                     value=edit_data.get(
                         "date",
                         ""
                     ),
-
                     key="e_date"
-
                 )
 
             with ecol2:
 
                 e_to = st.text_input(
-
                     "To (Recipient)",
-
                     value=edit_data.get(
                         "to",
                         ""
                     ),
-
                     key="e_to"
-
                 )
 
                 e_contact = st.text_input(
-
                     "Phone No.",
-
                     value=edit_data.get(
                         "contact",
                         ""
                     ),
-
                     key="e_contact"
-
                 )
 
             with ecol3:
 
                 e_epc = st.text_input(
-
                     "EPC",
-
                     value=edit_data.get(
                         "epc",
                         ""
                     ),
-
                     key="e_epc"
-
                 )
 
                 e_address = st.text_area(
-
                     "Address",
-
                     value=edit_data.get(
                         "address",
                         ""
                     ),
-
                     key="e_address",
-
                     height=100
-
                 )
 
             st.write(
@@ -2939,17 +3146,57 @@ def render():
             )
 
             df_edit_mat = pd.DataFrame(
-
                 edit_data.get(
                     "materials",
                     []
                 )
-
             )
 
             df_edit_mat = ensure_relocation_columns(
                 df_edit_mat
             )
+
+            # ======================================================================
+            # UOM NORMALIZATION
+            # ======================================================================
+
+            if "UoM" not in df_edit_mat.columns:
+
+                df_edit_mat["UoM"] = ""
+
+            # ----------------------------------------------------------------------
+            # MASTER ITEM OVERRIDE
+            # ----------------------------------------------------------------------
+
+            if "Material Code" in df_edit_mat.columns:
+
+                df_edit_mat["UoM"] = (
+                    df_edit_mat.apply(
+                        lambda row: get_master_uom(
+                            row.get(
+                                "Material Code",
+                                ""
+                            ),
+                            default=get_uom_from_row(
+                                row,
+                                default="Pcs"
+                            )
+                        ),
+                        axis=1
+                    )
+                )
+
+            else:
+
+                df_edit_mat["UoM"] = (
+                    df_edit_mat["UoM"]
+                    .apply(
+                        lambda x: safe_uom(
+                            x,
+                            default="Pcs"
+                        )
+                    )
+                )
 
             cols_to_show = [
 
@@ -2977,13 +3224,9 @@ def render():
             ]
 
             cols_existing = [
-
                 c
-
                 for c in cols_to_show
-
                 if c in df_edit_mat.columns
-
             ]
 
             edited_mat_df = st.data_editor(
@@ -3005,6 +3248,12 @@ def render():
                             step=1
                         ),
 
+                    "UoM":
+                        st.column_config.TextColumn(
+                            "UoM",
+                            disabled=True
+                        ),
+
                     "Remarks":
                         st.column_config.TextColumn(
                             "Remarks"
@@ -3023,9 +3272,9 @@ def render():
                 edited_mat_df
             )
 
-            # ==================================================================
+            # ======================================================================
             # RELOCATION
-            # ==================================================================
+            # ======================================================================
 
             st.markdown("---")
 
@@ -3034,59 +3283,38 @@ def render():
             )
 
             st.info(
-
                 "Fitur ini akan memperbarui Kolom O:T "
                 "pada DO Asal dan otomatis membuat "
                 "baris DO Relokasi Baru di DB."
-
             )
 
             with st.expander(
-
                 "📌 Klik di sini untuk Melakukan Relokasi Site",
-
                 expanded=True
-
             ):
 
-                # --------------------------------------------------------------
-                # CURRENT SITE
-                # --------------------------------------------------------------
-
                 raw_sites_in_do = []
-
-                # ==============================================================
-                # FIX:
-                #
-                # HANYA membaca Site Alocation.
-                #
-                # Jangan membaca Remarks sebagai site.
-                # ==============================================================
 
                 if "Site Alocation" in edited_mat_df.columns:
 
                     raw_sites_in_do.extend(
-
                         edited_mat_df[
                             "Site Alocation"
                         ]
                         .dropna()
                         .astype(str)
                         .tolist()
-
                     )
 
                 if "Site Allocation" in edited_mat_df.columns:
 
                     raw_sites_in_do.extend(
-
                         edited_mat_df[
                             "Site Allocation"
                         ]
                         .dropna()
                         .astype(str)
                         .tolist()
-
                     )
 
                 current_do_sites = []
@@ -3098,34 +3326,22 @@ def render():
                     ).strip()
 
                     if (
-
                         clean_site
-
                         and
-
                         clean_site not in current_do_sites
-
                         and
-
                         not clean_site.isdigit()
-
                         and
-
                         clean_site.lower()
                         not in [
                             "none",
                             "nan"
                         ]
-
                     ):
 
                         current_do_sites.append(
                             clean_site
                         )
-
-                # --------------------------------------------------------------
-                # AVAILABLE NEW SITE
-                # --------------------------------------------------------------
 
                 all_query_sites = (
                     load_available_relocation_sites()
@@ -3154,15 +3370,10 @@ def render():
                         "Pilih Site Asal yang Ingin Direlokasi:",
 
                         options=(
-
                             current_do_sites
-
                             if current_do_sites
-
                             else
-
                             ["Tidak Ada Site"]
-
                         ),
 
                         key="reloc_old_site"
@@ -3176,17 +3387,12 @@ def render():
                         "Nama Site Tujuan Baru (New Site):",
 
                         options=(
-
                             selectable_new_sites
-
                             if selectable_new_sites
-
                             else
-
                             [
                                 "Tidak ada site baru yang tersedia"
                             ]
-
                         ),
 
                         key="reloc_new_site"
@@ -3194,42 +3400,28 @@ def render():
                     )
 
                 reloc_mitra = st.text_input(
-
                     "Mitra Relokasi:",
-
                     placeholder="Contoh: PT Mitra Jaya",
-
                     key="reloc_mitra"
-
                 )
 
                 reloc_remarks = st.text_input(
-
                     "Alasan / Catatan Relokasi:",
-
                     placeholder=(
-
                         "Contoh: Perubahan WO Lapangan / "
                         "Re-alloc Site"
-
                     ),
-
                     key="reloc_reason"
-
                 )
 
-                # --------------------------------------------------------------
+                # ==================================================================
                 # EXECUTE RELOCATION
-                # --------------------------------------------------------------
+                # ==================================================================
 
                 if st.button(
-
                     "🔀 Eksekusi Relokasi Site",
-
                     type="secondary",
-
                     key="btn_execute_relocation"
-
                 ):
 
                     if (
@@ -3242,14 +3434,10 @@ def render():
                         )
 
                     elif (
-
                         not selected_site_new
-
                         or
-
                         selected_site_new
                         == "Tidak ada site baru yang tersedia"
-
                     ):
 
                         st.error(
@@ -3257,10 +3445,8 @@ def render():
                         )
 
                     elif (
-
                         selected_site_old
                         == selected_site_new
-
                     ):
 
                         st.warning(
@@ -3277,10 +3463,6 @@ def render():
                         reloc_timestamp = datetime.now().strftime(
                             "%Y-%m-%d %H:%M"
                         )
-
-                        # ------------------------------------------------------
-                        # GENERATE RELOCATION DO
-                        # ------------------------------------------------------
 
                         try:
 
@@ -3310,46 +3492,28 @@ def render():
                             edited_mat_df.copy()
                         )
 
-                        # ------------------------------------------------------
-                        # FIND SELECTED SITE
-                        # ------------------------------------------------------
-
                         relocation_count = 0
 
                         for idx, row in (
                             edited_relocation_df.iterrows()
                         ):
 
-                            # ==================================================
-                            # FIX:
-                            #
-                            # Site hanya dari Site Alocation.
-                            # Remarks tidak digunakan.
-                            # ==================================================
-
                             site_in_row = (
 
                                 str(
-
                                     row.get(
                                         "Site Alocation",
                                         ""
                                     )
-
                                     or
-
                                     row.get(
                                         "Site Allocation",
                                         ""
                                     )
-
                                     or
-
                                     ""
-
                                 )
                                 .strip()
-
                             )
 
                             if (
@@ -3361,9 +3525,9 @@ def render():
 
                                 continue
 
-                            # --------------------------------------------------
+                            # ======================================================
                             # UPDATE O:T
-                            # --------------------------------------------------
+                            # ======================================================
 
                             edited_relocation_df.at[
                                 idx,
@@ -3401,9 +3565,9 @@ def render():
                                 "Remarks Reloc."
                             ] = reloc_remarks
 
-                            # --------------------------------------------------
-                            # CREATE NEW RELOCATION ROW
-                            # --------------------------------------------------
+                            # ======================================================
+                            # NEW RELOCATION ROW
+                            # ======================================================
 
                             new_row = row.copy()
 
@@ -3415,25 +3579,6 @@ def render():
                                 reloc_date
                             )
 
-                            new_row["Material Code"] = (
-                                row.get(
-                                    "Material Code",
-                                    ""
-                                )
-                            )
-
-                            new_row["Material Name"] = (
-                                row.get(
-                                    "Material Name",
-                                    ""
-                                )
-                            )
-
-                            # ==================================================
-                            # Qty tetap mengambil Qty hasil edit.
-                            # Jika 0 -> tetap 0.
-                            # ==================================================
-
                             new_row["Qty"] = safe_qty(
                                 row.get(
                                     "Qty",
@@ -3442,28 +3587,22 @@ def render():
                                 default=0
                             )
 
+                            # ======================================================
+                            # UOM MASTER ITEM
+                            # ======================================================
+
                             new_row["UoM"] = (
-
-                                row.get("UoM")
-
-                                if row.get("UoM") is not None
-
-                                else row.get(
-                                    "uom",
-                                    "Pcs"
+                                get_master_uom(
+                                    row.get(
+                                        "Material Code",
+                                        ""
+                                    ),
+                                    default=get_uom_from_row(
+                                        row,
+                                        default="Pcs"
+                                    )
                                 )
-
                             )
-
-                            if (
-                                new_row["UoM"] is None
-                                or
-                                str(
-                                    new_row["UoM"]
-                                ).strip() == ""
-                            ):
-
-                                new_row["UoM"] = "Pcs"
 
                             new_row["Charging Type"] = (
                                 row.get(
@@ -3472,22 +3611,9 @@ def render():
                                 )
                             )
 
-                            # ==================================================
-                            # SITE BARU HANYA MASUK KE SITE ALOCATION
-                            # ==================================================
-
                             new_row["Site Alocation"] = (
                                 selected_site_new
                             )
-
-                            # ==================================================
-                            # FIX:
-                            #
-                            # Remarks tetap Remarks.
-                            #
-                            # Tidak lagi:
-                            # new_row["Remarks"] = selected_site_new
-                            # ==================================================
 
                             new_row["Remarks"] = (
                                 row.get(
@@ -3512,9 +3638,9 @@ def render():
 
                             new_row["EPC"] = e_epc
 
-                            # --------------------------------------------------
+                            # ======================================================
                             # CLEAR O:T
-                            # --------------------------------------------------
+                            # ======================================================
 
                             new_row["Date Reloc."] = ""
                             new_row["No. DO Reloc."] = ""
@@ -3529,33 +3655,21 @@ def render():
 
                             relocation_count += 1
 
-                        # ------------------------------------------------------
-                        # VALIDATION
-                        # ------------------------------------------------------
-
                         if relocation_count == 0:
 
                             st.error(
-
                                 "❌ Site asal tidak ditemukan "
                                 "pada material DO yang sedang diedit."
-
                             )
 
                         elif not new_reloc_rows_to_save:
 
                             st.error(
-
                                 "❌ Tidak ada material yang dapat "
                                 "dibuat sebagai DO Relokasi."
-
                             )
 
                         else:
-
-                            # --------------------------------------------------
-                            # UPDATE OLD DO
-                            # --------------------------------------------------
 
                             with st.spinner(
                                 "Memperbarui DO asal..."
@@ -3574,19 +3688,13 @@ def render():
                             if not update_result:
 
                                 st.error(
-
                                     "❌ Gagal memperbarui "
                                     "DO asal. "
                                     "DO Relokasi baru "
                                     "tidak dibuat."
-
                                 )
 
                             else:
-
-                                # ----------------------------------------------
-                                # SAVE NEW DO
-                                # ----------------------------------------------
 
                                 with st.spinner(
                                     "Menyimpan DO Relokasi..."
@@ -3601,31 +3709,20 @@ def render():
                                 if not save_reloc_result:
 
                                     st.error(
-
                                         "⚠️ DO asal berhasil diperbarui, "
                                         "tetapi DO Relokasi gagal disimpan.\n\n"
                                         f"Nomor DO Relokasi: "
                                         f"{new_reloc_do_num}"
-
                                     )
 
                                 else:
 
-                                    # ------------------------------------------
-                                    # CACHE INVALIDATION
-                                    # ------------------------------------------
-
                                     get_used_sites_cached.clear()
-
                                     fetch_raw_query_data_cached.clear()
-
                                     load_epc_list.clear()
-
                                     load_available_relocation_sites.clear()
-
-                                    # ------------------------------------------
-                                    # HISTORY
-                                    # ------------------------------------------
+                                    load_master_item_uom.clear()
+                                    load_standard_charging_materials.clear()
 
                                     st.session_state.relocation_history.append({
 
@@ -3650,37 +3747,23 @@ def render():
                                     })
 
                                     st.success(
-
                                         "✅ Relokasi Berhasil!\n\n"
-
                                         f"DO Asal: **{e_no_do}**\n\n"
-
-                                        f"Site Asal: "
-                                        f"**{selected_site_old}**\n\n"
-
-                                        f"Site Baru: "
-                                        f"**{selected_site_new}**\n\n"
-
-                                        f"DO Relokasi: "
-                                        f"**{new_reloc_do_num}**"
-
+                                        f"Site Asal: **{selected_site_old}**\n\n"
+                                        f"Site Baru: **{selected_site_new}**\n\n"
+                                        f"DO Relokasi: **{new_reloc_do_num}**"
                                     )
 
                                     st.rerun()
 
-            # ==================================================================
+            # ======================================================================
             # HISTORY
-            # ==================================================================
+            # ======================================================================
 
             do_hist = [
-
                 h
-
-                for h in
-                st.session_state.relocation_history
-
+                for h in st.session_state.relocation_history
                 if h["no_do"] == e_no_do
-
             ]
 
             if do_hist:
@@ -3694,7 +3777,6 @@ def render():
                 )
 
                 st.dataframe(
-
                     df_hist[
                         [
                             "timestamp",
@@ -3704,35 +3786,24 @@ def render():
                             "reason"
                         ]
                     ],
-
                     use_container_width=True
-
                 )
 
             st.markdown("---")
 
-            # ==================================================================
+            # ======================================================================
             # MANUAL EDIT
-            # ==================================================================
+            # ======================================================================
 
             col_btn1, col_btn2 = st.columns(2)
 
             with col_btn1:
 
                 if st.button(
-
                     "💾 Simpan Perubahan Edit Manual DO",
-
                     type="primary",
-
                     key="btn_save_manual_edit"
-
                 ):
-
-                    # ==========================================================
-                    # Pastikan Qty yang diedit benar-benar dikonversi sebagai
-                    # angka dan nilai 0 tidak hilang.
-                    # ==========================================================
 
                     updated_materials = (
                         edited_mat_df
@@ -3749,6 +3820,21 @@ def render():
                                 0
                             ),
                             default=0
+                        )
+
+                        # ----------------------------------------------------------
+                        # UOM SELALU MASTER ITEM
+                        # ----------------------------------------------------------
+
+                        row["UoM"] = get_master_uom(
+                            row.get(
+                                "Material Code",
+                                ""
+                            ),
+                            default=get_uom_from_row(
+                                row,
+                                default="Pcs"
+                            )
                         )
 
                         if row.get(
@@ -3771,13 +3857,12 @@ def render():
                     if update_result:
 
                         st.success(
-
                             f"Berhasil memperbarui "
                             f"{e_no_do} di database!"
-
                         )
 
                         get_used_sites_cached.clear()
+                        load_master_item_uom.clear()
 
                         st.session_state.current_do = {
 
@@ -3789,6 +3874,18 @@ def render():
 
                             "epc":
                                 e_epc,
+
+                            "charging_type":
+                                edit_data.get(
+                                    "charging_type",
+                                    ""
+                                ),
+
+                            "expedition":
+                                edit_data.get(
+                                    "expedition",
+                                    ""
+                                ),
 
                             "to":
                                 e_to,
@@ -3812,32 +3909,23 @@ def render():
                             "❌ Gagal memperbarui DO."
                         )
 
-            # ==================================================================
+            # ======================================================================
             # PREVIEW
-            # ==================================================================
+            # ======================================================================
 
             with col_btn2:
 
                 if st.button(
-
                     "🖨️ Set Ke Preview & Cetak PDF Baru",
-
                     key="btn_set_preview"
-
                 ):
 
                     preview_materials = (
-
                         edited_mat_df
                         .to_dict(
                             orient="records"
                         )
-
                     )
-
-                    # ==========================================================
-                    # Normalisasi Qty preview
-                    # ==========================================================
 
                     for row in preview_materials:
 
@@ -3849,40 +3937,42 @@ def render():
                             default=0
                         )
 
+                        # ----------------------------------------------------------
+                        # UOM MASTER ITEM
+                        # ----------------------------------------------------------
+
+                        row["UoM"] = get_master_uom(
+                            row.get(
+                                "Material Code",
+                                ""
+                            ),
+                            default=get_uom_from_row(
+                                row,
+                                default="Pcs"
+                            )
+                        )
+
                         if row.get(
                             "Remarks"
                         ) is None:
 
                             row["Remarks"] = ""
 
-                    # ==========================================================
-                    # SITE COUNT:
-                    #
-                    # Hanya dari Site Alocation.
-                    # Tidak lagi dari Remarks.
-                    # ==========================================================
-
                     preview_sites = set()
 
                     for x in preview_materials:
 
-                        site_value = (
+                        site_value = x.get(
+                            "Site Alocation",
+                            ""
+                        )
 
-                            x.get(
-                                "Site Alocation",
-                                ""
-                            )
+                        if site_value is None:
 
-                            if x.get(
-                                "Site Alocation"
-                            ) is not None
-
-                            else x.get(
+                            site_value = x.get(
                                 "Site Allocation",
                                 ""
                             )
-
-                        )
 
                         if site_value:
 
@@ -3940,11 +4030,9 @@ def render():
                     }
 
                     st.success(
-
                         "Data DO telah diset untuk preview. "
                         "Silakan buka tab "
                         "**🖨️ Preview & PDF Cetak (A5)**."
-
                     )
 
 
