@@ -3,20 +3,36 @@
 # ERP DATABASE LAYER - GOOGLE SHEETS
 #
 # VERSION:
-# Rate Limit Protected / Cached / Retry / Backoff
+# DATABASE.PY V2.1
+# Rate Limit Protected / Cached / Retry / Backoff / Multi User Safer
 #
 # FEATURES:
 # 1. Streamlit Resource Cache
 # 2. Streamlit Data Cache
-# 3. Internal Google Sheets Read Rate Limiter
-# 4. Exponential Backoff + Jitter
-# 5. Centralized Safe Google Sheets Read
-# 6. Reduced API Read Requests
-# 7. Reimbursement Database
-# 8. Material Out / Delivery Order Database
-# 9. Query Database
-# 10. Authorization Database
-# 11. Google Drive Image Upload via Apps Script
+# 3. Worksheet Resource Cache
+# 4. Centralized Google Sheets Read Limiter
+# 5. Exponential Backoff + Jitter
+# 6. Centralized Safe Google Sheets Read
+# 7. Domain-Based Cache Invalidation
+# 8. Reduced API Read Requests
+# 9. Reimbursement Database
+# 10. Material Out / Delivery Order Database
+# 11. Query Database
+# 12. Authorization Database
+# 13. Google Drive Image Upload via Apps Script
+# 14. Targeted DO Update - NO worksheet.clear()
+# 15. Central Document Sequence
+# 16. Multi-User Safer Document Number Allocation
+# 17. Internal Row Number Allocation from Google Sheets Append Response
+# 18. Database Health Check
+# 19. Rate Limit Debugging
+# 20. Compatibility Helper: get_sheet_values()
+#
+# IMPORTANT:
+# - Sheet "DB Sequence" akan dibuat otomatis jika belum ada.
+# - Jangan menghapus isi Sheet "DB Sequence" setelah sistem mulai digunakan.
+# - Nomor dokumen yang sudah teralokasi dapat memiliki gap jika user membuat
+#   nomor lalu membatalkan transaksi. Ini NORMAL untuk sistem ERP.
 # ==============================================================================
 
 
@@ -25,11 +41,12 @@
 # ==============================================================================
 
 import os
-import io
+import re
 import time
 import base64
 import random
 import threading
+import uuid
 
 from collections import deque
 from datetime import datetime
@@ -40,26 +57,32 @@ import pandas as pd
 import streamlit as st
 
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import APIError
+from gspread.exceptions import APIError, WorksheetNotFound
 
 
 # ==============================================================================
 # 1. GLOBAL CONFIGURATION
 # ==============================================================================
 
-SPREADSHEET_ID = "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
+SPREADSHEET_ID = (
+    "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
+)
+
 
 # ------------------------------------------------------------------------------
 # DATABASE SHEETS
 # ------------------------------------------------------------------------------
 
 SHEET_REIMBURSEMENT = "DB Reimbursement"
+
 SHEET_MATERIAL_OUT = "DB Material Out"
+
 SHEET_QUERY = "Query"
 
-# Sheet authorization.
-# Jika nama tab kamu berbeda, cukup ubah value ini.
 SHEET_AUTHORIZATION = "Otorisasi"
+
+SHEET_SEQUENCE = "DB Sequence"
+
 
 # ------------------------------------------------------------------------------
 # GOOGLE DRIVE
@@ -68,6 +91,7 @@ SHEET_AUTHORIZATION = "Otorisasi"
 GOOGLE_DRIVE_ROOT_FOLDER_ID = (
     "1fto5kD7X_pYT21F6Qr1RLfmBSmEb1O3o"
 )
+
 
 # ------------------------------------------------------------------------------
 # APPS SCRIPT WEB APP
@@ -78,6 +102,7 @@ APPS_SCRIPT_WEB_APP_URL = (
     "AKfycbwAx3pGoDtMLI7CZV58WoNSeKo2oHx3jCs8IARlAagUvaAVRAWkoLeZ1H_4P0RMpD6p/"
     "exec"
 )
+
 
 # ------------------------------------------------------------------------------
 # GOOGLE API SCOPES
@@ -90,35 +115,44 @@ SCOPES = [
 
 
 # ==============================================================================
-# 2. GOOGLE SHEETS RATE LIMIT PROTECTION
+# 2. RATE LIMIT CONFIGURATION
 # ==============================================================================
-
-# Google limit yang muncul pada error kamu:
-#
-# ReadRequestsPerMinutePerUser = 60
-#
-# Kita sengaja menggunakan 45 request/minute sebagai safety margin.
-# Ini BUKAN menaikkan quota Google.
-# Ini membatasi aplikasi agar tidak menembak API terlalu agresif.
 
 MAX_READ_REQUESTS_PER_MINUTE = 45
 
 RATE_WINDOW_SECONDS = 60
+
+READ_BACKOFF_MAX_SECONDS = 32
+
+
+# ------------------------------------------------------------------------------
+# READ REQUEST TIMESTAMP STORAGE
+# ------------------------------------------------------------------------------
 
 _read_request_times = deque()
 
 _read_lock = threading.Lock()
 
 
+# ------------------------------------------------------------------------------
+# WRITE LOCK
+# ------------------------------------------------------------------------------
+
+_write_lock = threading.Lock()
+
+
+# ==============================================================================
+# 3. RATE LIMITER
+# ==============================================================================
+
 def wait_for_read_slot():
     """
-    Internal rate limiter untuk READ Google Sheets.
+    Central internal READ rate limiter.
 
-    Maksimal:
-        45 READ request / 60 detik
+    Maksimum:
+        45 logical READ request / 60 detik.
 
-    Jika limit internal tercapai, aplikasi akan menunggu
-    sampai slot tersedia.
+    Semua READ yang masuk ke Google Sheets sebaiknya melewati fungsi ini.
     """
 
     while True:
@@ -127,48 +161,61 @@ def wait_for_read_slot():
 
         with _read_lock:
 
-            # Hapus timestamp yang sudah lebih dari 60 detik
             while (
                 _read_request_times
-                and (
-                    now - _read_request_times[0]
+                and
+                (
+                    now
+                    -
+                    _read_request_times[0]
                     >= RATE_WINDOW_SECONDS
                 )
             ):
+
                 _read_request_times.popleft()
 
-            # Masih tersedia slot
-            if len(_read_request_times) < MAX_READ_REQUESTS_PER_MINUTE:
+            if (
+                len(_read_request_times)
+                <
+                MAX_READ_REQUESTS_PER_MINUTE
+            ):
 
                 _read_request_times.append(now)
 
                 return
 
-            # Hitung waktu tunggu
             wait_time = (
                 RATE_WINDOW_SECONDS
-                - (
+                -
+                (
                     now
-                    - _read_request_times[0]
+                    -
+                    _read_request_times[0]
                 )
-                + 0.5
+                +
+                0.5
             )
 
         time.sleep(
-            max(wait_time, 0.5)
+            max(
+                wait_time,
+                0.5
+            )
         )
 
 
 # ==============================================================================
-# 3. RATE LIMIT ERROR DETECTOR
+# 4. RATE LIMIT ERROR DETECTOR
 # ==============================================================================
 
 def is_rate_limit_error(error):
     """
-    Mendeteksi berbagai bentuk error quota/rate limit Google API.
+    Mendeteksi berbagai bentuk error quota/rate limit Google.
     """
 
-    error_text = str(error).upper()
+    error_text = str(
+        error
+    ).upper()
 
     keywords = [
         "429",
@@ -176,7 +223,9 @@ def is_rate_limit_error(error):
         "RATE_LIMIT_EXCEEDED",
         "QUOTA_EXCEEDED",
         "TOO MANY REQUESTS",
-        "READREQUESTSPERMINUTE"
+        "READREQUESTSPERMINUTE",
+        "USER_RATE_LIMIT_EXCEEDED",
+        "PER_USER_RATE_LIMIT"
     ]
 
     return any(
@@ -186,7 +235,7 @@ def is_rate_limit_error(error):
 
 
 # ==============================================================================
-# 4. SAFE GOOGLE SHEETS READ
+# 5. SAFE GOOGLE SHEETS READ
 # ==============================================================================
 
 def safe_sheet_read(
@@ -195,8 +244,6 @@ def safe_sheet_read(
 ):
     """
     Centralized Google Sheets READ handler.
-
-    Semua READ Google Sheets sebaiknya melewati fungsi ini.
 
     Proteksi:
         1. Internal rate limiter
@@ -208,52 +255,30 @@ def safe_sheet_read(
 
     last_error = None
 
-    for attempt in range(max_retries):
+    for attempt in range(
+        max_retries
+    ):
 
         try:
 
-            # --------------------------------------------------------------
-            # STEP 1
-            # Internal Rate Limiter
-            # --------------------------------------------------------------
-
             wait_for_read_slot()
 
-            # --------------------------------------------------------------
-            # STEP 2
-            # Execute API Read
-            # --------------------------------------------------------------
-
-            result = read_function()
-
-            return result
+            return read_function()
 
         except Exception as e:
 
             last_error = e
 
-            # --------------------------------------------------------------
-            # Jika bukan rate limit, jangan retry
-            # --------------------------------------------------------------
-
-            if not is_rate_limit_error(e):
+            if not is_rate_limit_error(
+                e
+            ):
 
                 raise
 
-            # --------------------------------------------------------------
-            # STEP 3
-            # Exponential Backoff
-            # --------------------------------------------------------------
-
             base_delay = min(
                 2 ** attempt,
-                32
+                READ_BACKOFF_MAX_SECONDS
             )
-
-            # --------------------------------------------------------------
-            # STEP 4
-            # Random Jitter
-            # --------------------------------------------------------------
 
             jitter = random.uniform(
                 0.5,
@@ -262,7 +287,8 @@ def safe_sheet_read(
 
             sleep_time = (
                 base_delay
-                * jitter
+                *
+                jitter
             )
 
             print(
@@ -275,12 +301,11 @@ def safe_sheet_read(
                 sleep_time
             )
 
-    # Semua retry gagal
     raise last_error
 
 
 # ==============================================================================
-# 5. GOOGLE SHEET CONNECTION
+# 6. GOOGLE SHEET CONNECTION
 # ==============================================================================
 
 @st.cache_resource(
@@ -289,18 +314,19 @@ def safe_sheet_read(
 def get_google_sheet_connection():
     """
     Membuka koneksi utama Google Spreadsheet.
-
-    Connection di-cache sehingga Streamlit tidak membuat
-    koneksi baru pada setiap rerun.
     """
 
     try:
 
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------------------
         # Streamlit Secrets
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------------------
 
-        if "gcp_service_account" in st.secrets:
+        if (
+            "gcp_service_account"
+            in
+            st.secrets
+        ):
 
             creds_dict = dict(
                 st.secrets[
@@ -316,9 +342,9 @@ def get_google_sheet_connection():
                 )
             )
 
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------------------
         # Local service_account.json
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------------------
 
         elif os.path.exists(
             "service_account.json"
@@ -343,17 +369,17 @@ def get_google_sheet_connection():
 
             st.stop()
 
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------------------
         # Authorize
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------------------
 
         gc = gspread.authorize(
             creds
         )
 
-        # ------------------------------------------------------------------
-        # Open Spreadsheet
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------------------
+        # Open spreadsheet
+        # ----------------------------------------------------------------------
 
         sh = gc.open_by_key(
             SPREADSHEET_ID
@@ -372,15 +398,179 @@ def get_google_sheet_connection():
 
 
 # ==============================================================================
-# 6. GENERAL HELPERS
+# 7. CACHED WORKSHEET ACCESS
 # ==============================================================================
 
-def get_roman_month(month_int):
+@st.cache_resource(
+    show_spinner=False
+)
+def _get_worksheet_cached(
+    sheet_name
+):
     """
-    Mengubah angka bulan menjadi angka Romawi.
+    Mengambil object worksheet dan menyimpannya sebagai resource.
     """
 
+    wait_for_read_slot()
+
+    sh = get_google_sheet_connection()
+
+    return sh.worksheet(
+        sheet_name
+    )
+
+
+def get_worksheet(
+    sheet_name
+):
+    """
+    Public helper untuk mendapatkan worksheet.
+    """
+
+    return _get_worksheet_cached(
+        sheet_name
+    )
+
+
+# ==============================================================================
+# 8. GENERAL SHEET READ COMPATIBILITY HELPERS
+# ==============================================================================
+
+def get_sheet_values(
+    sheet_name,
+    default=None
+):
+    """
+    COMPATIBILITY HELPER.
+
+    Fungsi ini dibuat agar modul lain dapat menggunakan:
+
+        from core.database import get_sheet_values
+
+    tanpa harus mengetahui detail worksheet/cache/rate limiter.
+
+    Return:
+        list[list[str]]
+
+    Contoh:
+
+        values = get_sheet_values("Query")
+
+    Semua READ tetap melewati safe_sheet_read().
+    """
+
+    if default is None:
+        default = []
+
+    try:
+
+        worksheet = get_worksheet(
+            sheet_name
+        )
+
+        def read_values():
+
+            return worksheet.get_all_values()
+
+        values = safe_sheet_read(
+            read_values
+        )
+
+        if values is None:
+            return default
+
+        return values
+
+    except Exception as e:
+
+        if is_rate_limit_error(
+            e
+        ):
+
+            st.warning(
+                f"⚠️ Google Sheets API quota tercapai "
+                f"saat membaca Sheet '{sheet_name}'."
+            )
+
+        else:
+
+            st.warning(
+                f"⚠️ Gagal membaca Sheet '{sheet_name}': {e}"
+            )
+
+        return default
+
+
+def get_sheet_dataframe(
+    sheet_name
+):
+    """
+    Compatibility helper tambahan.
+
+    Membaca worksheet menjadi DataFrame.
+
+    Tidak mengubah fungsi database lama.
+    """
+
+    try:
+
+        values = get_sheet_values(
+            sheet_name
+        )
+
+        if not values or len(values) < 2:
+
+            return pd.DataFrame()
+
+        headers = list(
+            values[0]
+        )
+
+        rows = []
+
+        for row in values[1:]:
+
+            row = list(row)
+
+            if len(row) < len(headers):
+
+                row += (
+                    [""] *
+                    (
+                        len(headers)
+                        -
+                        len(row)
+                    )
+                )
+
+            elif len(row) > len(headers):
+
+                row = row[
+                    :len(headers)
+                ]
+
+            rows.append(row)
+
+        return pd.DataFrame(
+            rows,
+            columns=headers
+        )
+
+    except Exception:
+
+        return pd.DataFrame()
+
+
+# ==============================================================================
+# 9. GENERAL HELPERS
+# ==============================================================================
+
+def get_roman_month(
+    month_int
+):
+
     roman_months = {
+
         1: "I",
         2: "II",
         3: "III",
@@ -393,6 +583,7 @@ def get_roman_month(month_int):
         10: "X",
         11: "XI",
         12: "XII"
+
     }
 
     return roman_months.get(
@@ -401,24 +592,31 @@ def get_roman_month(month_int):
     )
 
 
-def safe_int(value, default=0):
-    """
-    Konversi value menjadi integer secara aman.
-    """
+def safe_int(
+    value,
+    default=0
+):
 
     try:
 
         if value is None:
+
             return default
 
-        text = str(value).strip()
+        text = str(
+            value
+        ).strip()
 
         if not text:
+
             return default
 
         return int(
             float(
-                text.replace(",", "")
+                text.replace(
+                    ",",
+                    ""
+                )
             )
         )
 
@@ -427,40 +625,53 @@ def safe_int(value, default=0):
         return default
 
 
-def safe_float(value, default=0.0):
-    """
-    Konversi value menjadi float secara aman.
-    """
+def safe_float(
+    value,
+    default=0.0
+):
 
     try:
 
         if value is None:
+
             return default
 
         text = (
             str(value)
-            .replace(",", "")
-            .replace("Rp", "")
-            .replace("rp", "")
+            .replace(
+                ",",
+                ""
+            )
+            .replace(
+                "Rp",
+                ""
+            )
+            .replace(
+                "rp",
+                ""
+            )
             .strip()
         )
 
         if not text:
+
             return default
 
-        return float(text)
+        return float(
+            text
+        )
 
     except Exception:
 
         return default
 
 
-def normalize_text(value):
-    """
-    Normalisasi text untuk pencocokan.
-    """
+def normalize_text(
+    value
+):
 
     if value is None:
+
         return ""
 
     return (
@@ -470,25 +681,314 @@ def normalize_text(value):
     )
 
 
-# ==============================================================================
-# 7. CACHE INVALIDATION
-# ==============================================================================
+def _parse_row_number_from_a1(
+    range_text
+):
 
-def clear_database_cache():
-    """
-    Membersihkan cache database setelah INSERT/UPDATE.
+    if not range_text:
 
-    Aman dipanggil setelah write operation.
-    """
+        return None
+
+    match = re.search(
+        r"!?[A-Z]+(\d+)",
+        str(
+            range_text
+        )
+    )
+
+    if not match:
+
+        return None
 
     try:
-        st.cache_data.clear()
+
+        return int(
+            match.group(1)
+        )
+
     except Exception:
+
+        return None
+
+
+def _normalize_20_columns(
+    row
+):
+
+    normalized = list(
+        row[:20]
+    )
+
+    while len(
+        normalized
+    ) < 20:
+
+        normalized.append("")
+
+    return normalized
+
+
+def _build_material_out_row(
+    row
+):
+
+    return [
+
+        row.get(
+            "No",
+            ""
+        ),
+
+        row.get(
+            "No. DO",
+            ""
+        ),
+
+        row.get(
+            "Delv. Date",
+            ""
+        ),
+
+        row.get(
+            "Material Code",
+            ""
+        ),
+
+        row.get(
+            "Material Name",
+            ""
+        ),
+
+        row.get(
+            "Qty",
+            0
+        ),
+
+        row.get(
+            "UoM",
+            row.get(
+                "uom",
+                "Pcs"
+            )
+        ),
+
+        row.get(
+            "Charging Type",
+            ""
+        ),
+
+        row.get(
+            "Site Alocation",
+            row.get(
+                "Site Allocation",
+                ""
+            )
+        ),
+
+        row.get(
+            "Remarks",
+            ""
+        ),
+
+        row.get(
+            "To",
+            ""
+        ),
+
+        row.get(
+            "Phone No.",
+            ""
+        ),
+
+        row.get(
+            "Address",
+            ""
+        ),
+
+        row.get(
+            "EPC",
+            ""
+        ),
+
+        row.get(
+            "Date Reloc.",
+            ""
+        ),
+
+        row.get(
+            "No. DO Reloc.",
+            ""
+        ),
+
+        row.get(
+            "Qty Reloc.",
+            ""
+        ),
+
+        row.get(
+            "Site Reloc.",
+            ""
+        ),
+
+        row.get(
+            "Mitra Reloc.",
+            ""
+        ),
+
+        row.get(
+            "Remarks Reloc.",
+            ""
+        )
+
+    ]
+
+
+# ==============================================================================
+# 10. CACHE INVALIDATION
+# ==============================================================================
+
+def _clear_function_cache(
+    function_name
+):
+
+    try:
+
+        function = globals().get(
+            function_name
+        )
+
+        if (
+            function
+            and
+            hasattr(
+                function,
+                "clear"
+            )
+        ):
+
+            function.clear()
+
+    except Exception:
+
         pass
 
 
+def clear_reimbursement_cache():
+
+    for name in [
+
+        "_get_reimbursement_raw",
+
+        "get_all_reimbursements"
+
+    ]:
+
+        _clear_function_cache(
+            name
+        )
+
+
+def clear_material_out_cache():
+
+    for name in [
+
+        "_get_material_out_raw",
+
+        "get_all_do_numbers",
+
+        "get_do_by_number",
+
+        "get_used_sites_from_db_material_out"
+
+    ]:
+
+        _clear_function_cache(
+            name
+        )
+
+
+def clear_query_cache():
+
+    for name in [
+
+        "get_query_sheet_data",
+
+        "get_epc_and_charging_dropdown_options",
+
+        "get_sites_by_epc_and_charging"
+
+    ]:
+
+        _clear_function_cache(
+            name
+        )
+
+
+def clear_authorization_cache():
+
+    _clear_function_cache(
+        "get_authorization_data"
+    )
+
+
+def clear_sequence_cache():
+
+    _clear_function_cache(
+        "_get_sequence_raw"
+    )
+
+
+def clear_database_cache(
+    domain=None
+):
+
+    domain_clean = normalize_text(
+        domain
+    )
+
+    if domain_clean == "reimbursement":
+
+        clear_reimbursement_cache()
+
+    elif domain_clean in [
+        "material_out",
+        "do",
+        "material"
+    ]:
+
+        clear_material_out_cache()
+
+    elif domain_clean == "query":
+
+        clear_query_cache()
+
+    elif domain_clean in [
+        "authorization",
+        "otorisasi",
+        "auth"
+    ]:
+
+        clear_authorization_cache()
+
+    elif domain_clean == "sequence":
+
+        clear_sequence_cache()
+
+    else:
+
+        clear_reimbursement_cache()
+
+        clear_material_out_cache()
+
+        clear_query_cache()
+
+        clear_authorization_cache()
+
+        clear_sequence_cache()
+
+
 # ==============================================================================
-# 8. GOOGLE DRIVE IMAGE UPLOAD
+# 11. GOOGLE DRIVE IMAGE UPLOAD
 # ==============================================================================
 
 def upload_image_to_gdrive(
@@ -497,9 +997,6 @@ def upload_image_to_gdrive(
     pic_name,
     date_str
 ):
-    """
-    Upload gambar ke Google Drive melalui Apps Script Web App.
-    """
 
     print(
         "🔥 MENGIRIM FILE KE APPS SCRIPT WEB APP"
@@ -515,37 +1012,35 @@ def upload_image_to_gdrive(
 
             return ""
 
-        # ------------------------------------------------------------------
-        # Convert bytes -> Base64
-        # ------------------------------------------------------------------
-
         file_base64 = (
             base64
-            .b64encode(file_bytes)
-            .decode("utf-8")
+            .b64encode(
+                file_bytes
+            )
+            .decode(
+                "utf-8"
+            )
         )
 
-        # ------------------------------------------------------------------
-        # Normalize file name
-        # ------------------------------------------------------------------
-
         cleaned_file_name = (
-            str(file_name)
+            str(
+                file_name
+            )
             .strip()
             .lower()
         )
 
         if not (
-            cleaned_file_name.endswith(".jpg")
+            cleaned_file_name.endswith(
+                ".jpg"
+            )
             or
-            cleaned_file_name.endswith(".jpeg")
+            cleaned_file_name.endswith(
+                ".jpeg"
+            )
         ):
 
             cleaned_file_name += ".jpg"
-
-        # ------------------------------------------------------------------
-        # Payload
-        # ------------------------------------------------------------------
 
         payload = {
 
@@ -560,11 +1055,8 @@ def upload_image_to_gdrive(
 
             "dateStr":
                 date_str
-        }
 
-        # ------------------------------------------------------------------
-        # POST
-        # ------------------------------------------------------------------
+        }
 
         response = requests.post(
             APPS_SCRIPT_WEB_APP_URL,
@@ -602,13 +1094,13 @@ def upload_image_to_gdrive(
             res_json
         )
 
-        # ------------------------------------------------------------------
-        # Success
-        # ------------------------------------------------------------------
-
-        if res_json.get(
-            "status"
-        ) == "success":
+        if (
+            res_json.get(
+                "status"
+            )
+            ==
+            "success"
+        ):
 
             file_id = (
                 res_json.get(
@@ -633,10 +1125,6 @@ def upload_image_to_gdrive(
 
             return ""
 
-        # ------------------------------------------------------------------
-        # Apps Script Error
-        # ------------------------------------------------------------------
-
         st.error(
             "❌ Gagal di Apps Script: "
             f"{res_json.get('message', 'Unknown error')}"
@@ -659,7 +1147,444 @@ def upload_image_to_gdrive(
 
 
 # ==============================================================================
-# 9. REIMBURSEMENT
+# 12. SEQUENCE ENGINE
+# ==============================================================================
+
+def _ensure_sequence_sheet():
+
+    try:
+
+        return get_worksheet(
+            SHEET_SEQUENCE
+        )
+
+    except WorksheetNotFound:
+
+        pass
+
+    sh = get_google_sheet_connection()
+
+    with _write_lock:
+
+        try:
+
+            wait_for_read_slot()
+
+            worksheet = sh.worksheet(
+                SHEET_SEQUENCE
+            )
+
+            return worksheet
+
+        except WorksheetNotFound:
+
+            worksheet = sh.add_worksheet(
+                title=SHEET_SEQUENCE,
+                rows=1000,
+                cols=4
+            )
+
+            worksheet.update(
+                "A1:D1",
+                [[
+                    "Token",
+                    "Prefix",
+                    "Sequence",
+                    "Created At"
+                ]],
+                value_input_option="USER_ENTERED"
+            )
+
+            try:
+
+                _get_worksheet_cached.clear()
+
+            except Exception:
+
+                pass
+
+            return worksheet
+
+
+@st.cache_data(
+    ttl=60,
+    show_spinner=False
+)
+def _get_sequence_raw():
+
+    try:
+
+        def read_sequence():
+
+            worksheet = _ensure_sequence_sheet()
+
+            return worksheet.get_all_values()
+
+        return safe_sheet_read(
+            read_sequence
+        )
+
+    except Exception:
+
+        return []
+
+
+def _get_existing_max_document_number(
+    source_sheet,
+    document_column_index,
+    prefix_suffix
+):
+
+    try:
+
+        worksheet = get_worksheet(
+            source_sheet
+        )
+
+        def read_existing():
+
+            return worksheet.get_all_values()
+
+        all_data = safe_sheet_read(
+            read_existing
+        )
+
+        max_number = 0
+
+        if not all_data:
+
+            return 0
+
+        for row in all_data[1:]:
+
+            if len(row) <= document_column_index:
+
+                continue
+
+            no = str(
+                row[
+                    document_column_index
+                ]
+            ).strip()
+
+            if not no:
+
+                continue
+
+            if prefix_suffix not in no:
+
+                continue
+
+            try:
+
+                first_part = (
+                    no.split(
+                        "/"
+                    )[0]
+                )
+
+                number = int(
+                    first_part
+                )
+
+                if number > max_number:
+
+                    max_number = number
+
+            except Exception:
+
+                continue
+
+        return max_number
+
+    except Exception:
+
+        return 0
+
+
+def _sequence_prefix_has_seed(
+    sequence_rows,
+    prefix_suffix
+):
+
+    if not sequence_rows:
+
+        return False
+
+    target = str(
+        prefix_suffix
+    ).strip()
+
+    for row in sequence_rows[1:]:
+
+        if len(row) < 2:
+
+            continue
+
+        token = str(
+            row[0]
+        ).strip()
+
+        prefix = str(
+            row[1]
+        ).strip()
+
+        if (
+            token == "__SEED__"
+            and
+            prefix == target
+        ):
+
+            return True
+
+    return False
+
+
+def _ensure_sequence_seed(
+    prefix_suffix,
+    source_sheet,
+    document_column_index
+):
+
+    sequence_rows = _get_sequence_raw()
+
+    if _sequence_prefix_has_seed(
+        sequence_rows,
+        prefix_suffix
+    ):
+
+        return
+
+    with _write_lock:
+
+        try:
+
+            _get_sequence_raw.clear()
+
+        except Exception:
+
+            pass
+
+        sequence_rows = _get_sequence_raw()
+
+        if _sequence_prefix_has_seed(
+            sequence_rows,
+            prefix_suffix
+        ):
+
+            return
+
+        max_existing = (
+            _get_existing_max_document_number(
+                source_sheet,
+                document_column_index,
+                prefix_suffix
+            )
+        )
+
+        worksheet = _ensure_sequence_sheet()
+
+        seed_row = [
+
+            "__SEED__",
+
+            prefix_suffix,
+
+            max_existing,
+
+            datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+        ]
+
+        worksheet.append_row(
+            seed_row,
+            value_input_option="USER_ENTERED"
+        )
+
+        try:
+
+            _get_sequence_raw.clear()
+
+        except Exception:
+
+            pass
+
+
+def reserve_document_number(
+    prefix_suffix,
+    source_sheet,
+    document_column_index
+):
+
+    prefix_suffix = str(
+        prefix_suffix
+    ).strip()
+
+    if not prefix_suffix:
+
+        raise ValueError(
+            "prefix_suffix tidak boleh kosong."
+        )
+
+    _ensure_sequence_seed(
+        prefix_suffix,
+        source_sheet,
+        document_column_index
+    )
+
+    worksheet = _ensure_sequence_sheet()
+
+    token = str(
+        uuid.uuid4()
+    )
+
+    created_at = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    formula = (
+        '=IF('
+        'INDEX(B:B,ROW())="",'
+        '"",'
+        'IFERROR('
+        'MAX('
+        'FILTER('
+        '$C$2:INDEX($C:$C,ROW()-1),'
+        '$B$2:INDEX($B:$B,ROW()-1)'
+        '='
+        'INDEX(B:B,ROW())'
+        ')'
+        ')'
+        '+1,'
+        '1'
+        ')'
+        ')'
+    )
+
+    row = [
+
+        token,
+
+        prefix_suffix,
+
+        formula,
+
+        created_at
+
+    ]
+
+    response = worksheet.append_rows(
+
+        [row],
+
+        value_input_option="USER_ENTERED",
+
+        table_range="A1:D1",
+
+        include_values_in_response=True
+
+    )
+
+    sequence_value = None
+
+    try:
+
+        updates = (
+            response.get(
+                "updates",
+                {}
+            )
+        )
+
+        updated_data = (
+            updates.get(
+                "updatedData",
+                {}
+            )
+        )
+
+        values = (
+            updated_data.get(
+                "values",
+                []
+            )
+        )
+
+        if values:
+
+            returned_row = values[0]
+
+            if len(returned_row) >= 3:
+
+                sequence_value = safe_int(
+                    returned_row[2],
+                    0
+                )
+
+    except Exception:
+
+        sequence_value = None
+
+    if (
+        not sequence_value
+        or
+        sequence_value <= 0
+    ):
+
+        updated_range = (
+            response
+            .get(
+                "updates",
+                {}
+            )
+            .get(
+                "updatedRange",
+                ""
+            )
+        )
+
+        row_number = (
+            _parse_row_number_from_a1(
+                updated_range
+            )
+        )
+
+        if row_number:
+
+            def read_sequence_cell():
+
+                return worksheet.acell(
+                    f"C{row_number}"
+                ).value
+
+            sequence_value = safe_int(
+                safe_sheet_read(
+                    read_sequence_cell
+                ),
+                0
+            )
+
+    if (
+        not sequence_value
+        or
+        sequence_value <= 0
+    ):
+
+        raise RuntimeError(
+            "Gagal mendapatkan sequence number "
+            "dari DB Sequence."
+        )
+
+    return (
+        f"{sequence_value:04d}"
+        f"{prefix_suffix}"
+    )
+
+
+# ==============================================================================
+# 13. REIMBURSEMENT
 # ==============================================================================
 
 def generate_reimbursement_no():
@@ -680,58 +1605,14 @@ def generate_reimbursement_no():
 
     try:
 
-        def read_data():
+        return reserve_document_number(
 
-            sh = get_google_sheet_connection()
+            prefix_suffix=prefix_suffix,
 
-            worksheet = sh.worksheet(
-                SHEET_REIMBURSEMENT
-            )
+            source_sheet=SHEET_REIMBURSEMENT,
 
-            return worksheet.get_all_values()
+            document_column_index=2
 
-        all_data = safe_sheet_read(
-            read_data
-        )
-
-        existing_numbers = []
-
-        if len(all_data) > 1:
-
-            for row in all_data[1:]:
-
-                if len(row) <= 2:
-                    continue
-
-                no = str(
-                    row[2]
-                ).strip()
-
-                if prefix_suffix in no:
-
-                    try:
-
-                        num_part = int(
-                            no.split("/")[0]
-                        )
-
-                        existing_numbers.append(
-                            num_part
-                        )
-
-                    except ValueError:
-
-                        continue
-
-        next_num = (
-            max(existing_numbers) + 1
-            if existing_numbers
-            else 1
-        )
-
-        return (
-            f"{next_num:04d}"
-            f"{prefix_suffix}"
         )
 
     except Exception as e:
@@ -740,11 +1621,32 @@ def generate_reimbursement_no():
             f"⚠️ Gagal generate nomor reimbursement: {e}"
         )
 
-        return (
-            f"0001"
-            f"{prefix_suffix}"
-        )
+        try:
 
+            max_existing = (
+                _get_existing_max_document_number(
+                    SHEET_REIMBURSEMENT,
+                    2,
+                    prefix_suffix
+                )
+            )
+
+            return (
+                f"{max_existing + 1:04d}"
+                f"{prefix_suffix}"
+            )
+
+        except Exception:
+
+            return (
+                f"0001"
+                f"{prefix_suffix}"
+            )
+
+
+# ==============================================================================
+# SAVE REIMBURSEMENT
+# ==============================================================================
 
 def save_reimbursement_to_sheet(
     payload
@@ -752,35 +1654,15 @@ def save_reimbursement_to_sheet(
 
     try:
 
-        sh = get_google_sheet_connection()
-
-        worksheet = sh.worksheet(
+        worksheet = get_worksheet(
             SHEET_REIMBURSEMENT
         )
-
-        # --------------------------------------------------------------
-        # Tidak perlu READ get_all_values()
-        #
-        # Sebelumnya:
-        # next_no = len(all_values)
-        #
-        # Sekarang kita gunakan timestamp-based row sequence.
-        # Nomor database internal tidak digunakan sebagai nomor dokumen.
-        # --------------------------------------------------------------
 
         rows_to_append = []
 
         items = payload.get(
             "items",
             []
-        )
-
-        # Ambil row number hanya sekali menggunakan worksheet row_count
-        # Tidak melakukan READ API tambahan.
-
-        next_no = (
-            worksheet.row_count
-            + 1
         )
 
         for item in items:
@@ -794,7 +1676,7 @@ def save_reimbursement_to_sheet(
 
             row = [
 
-                str(next_no),
+                "",
 
                 str(
                     payload.get(
@@ -872,27 +1754,74 @@ def save_reimbursement_to_sheet(
                     if item_evident_link
                     else ""
                 )
+
             ]
 
             rows_to_append.append(
                 row
             )
 
-            next_no += 1
-
         if not rows_to_append:
+
             return False
 
-        # --------------------------------------------------------------
-        # WRITE
-        # --------------------------------------------------------------
+        response = worksheet.append_rows(
 
-        worksheet.append_rows(
             rows_to_append,
-            value_input_option="USER_ENTERED"
+
+            value_input_option="USER_ENTERED",
+
+            table_range="A1:L1"
+
         )
 
-        clear_database_cache()
+        updated_range = (
+            response
+            .get(
+                "updates",
+                {}
+            )
+            .get(
+                "updatedRange",
+                ""
+            )
+        )
+
+        start_row = (
+            _parse_row_number_from_a1(
+                updated_range
+            )
+        )
+
+        if start_row:
+
+            no_values = [
+
+                [start_row + index]
+
+                for index in range(
+                    len(
+                        rows_to_append
+                    )
+                )
+
+            ]
+
+            end_row = (
+                start_row
+                +
+                len(rows_to_append)
+                -
+                1
+            )
+
+            worksheet.update(
+                f"A{start_row}:A{end_row}",
+                no_values,
+                value_input_option="USER_ENTERED"
+            )
+
+        clear_reimbursement_cache()
 
         return True
 
@@ -907,6 +1836,51 @@ def save_reimbursement_to_sheet(
 
 
 # ==============================================================================
+# RAW REIMBURSEMENT DATA
+# ==============================================================================
+
+@st.cache_data(
+    ttl=600,
+    show_spinner=False
+)
+def _get_reimbursement_raw():
+
+    try:
+
+        def read_reimbursement():
+
+            worksheet = get_worksheet(
+                SHEET_REIMBURSEMENT
+            )
+
+            return worksheet.get_all_values()
+
+        return safe_sheet_read(
+            read_reimbursement
+        )
+
+    except Exception as e:
+
+        if is_rate_limit_error(
+            e
+        ):
+
+            st.warning(
+                "⚠️ Google Sheets API quota tercapai "
+                "saat membaca Reimbursement."
+            )
+
+        else:
+
+            st.error(
+                "❌ Gagal membaca DB Reimbursement: "
+                f"{e}"
+            )
+
+        return []
+
+
+# ==============================================================================
 # GET ALL REIMBURSEMENTS
 # ==============================================================================
 
@@ -918,21 +1892,15 @@ def get_all_reimbursements():
 
     try:
 
-        def read_reimbursement():
-
-            sh = get_google_sheet_connection()
-
-            worksheet = sh.worksheet(
-                SHEET_REIMBURSEMENT
-            )
-
-            return worksheet.get_all_values()
-
-        all_data = safe_sheet_read(
-            read_reimbursement
+        all_data = (
+            _get_reimbursement_raw()
         )
 
-        if not all_data or len(all_data) < 2:
+        if (
+            not all_data
+            or
+            len(all_data) < 2
+        ):
 
             return []
 
@@ -941,6 +1909,7 @@ def get_all_reimbursements():
         for row in all_data[1:]:
 
             if len(row) < 8:
+
                 continue
 
             form_no = str(
@@ -948,6 +1917,7 @@ def get_all_reimbursements():
             ).strip()
 
             if not form_no:
+
                 continue
 
             pic = (
@@ -1012,46 +1982,56 @@ def get_all_reimbursements():
             ).strip()
 
             if clean_evident.lower() in [
+
                 "",
+
                 "0",
+
                 "0.0",
+
                 "none",
+
                 "null"
+
             ]:
 
                 clean_evident = ""
 
-            # ----------------------------------------------------------
-            # Overall status
-            # ----------------------------------------------------------
-
             if (
-                status_coo == "Rejected"
+                status_coo
+                ==
+                "Rejected"
                 or
-                status_cfo == "Rejected"
+                status_cfo
+                ==
+                "Rejected"
             ):
 
                 overall_status = "Rejected"
 
             elif (
-                status_coo == "Approved"
+                status_coo
+                ==
+                "Approved"
                 and
-                status_cfo == "Approved"
+                status_cfo
+                ==
+                "Approved"
             ):
 
                 overall_status = "Approved"
 
-            elif status_coo == "Approved":
+            elif (
+                status_coo
+                ==
+                "Approved"
+            ):
 
                 overall_status = "Pending CFO"
 
             else:
 
                 overall_status = "Pending COO"
-
-            # ----------------------------------------------------------
-            # Create parent form
-            # ----------------------------------------------------------
 
             if form_no not in grouped:
 
@@ -1086,11 +2066,8 @@ def get_all_reimbursements():
 
                     "image_links":
                         []
-                }
 
-            # ----------------------------------------------------------
-            # Add item
-            # ----------------------------------------------------------
+                }
 
             grouped[
                 form_no
@@ -1105,7 +2082,9 @@ def get_all_reimbursements():
                         ][
                             "items"
                         ]
-                    ) + 1,
+                    )
+                    +
+                    1,
 
                 "description":
                     desc,
@@ -1121,11 +2100,8 @@ def get_all_reimbursements():
 
                 "evident":
                     clean_evident
-            })
 
-            # ----------------------------------------------------------
-            # Image links
-            # ----------------------------------------------------------
+            })
 
             if (
                 clean_evident
@@ -1150,10 +2126,6 @@ def get_all_reimbursements():
                     clean_evident
                 )
 
-            # ----------------------------------------------------------
-            # Grand total
-            # ----------------------------------------------------------
-
             grouped[
                 form_no
             ][
@@ -1166,19 +2138,10 @@ def get_all_reimbursements():
 
     except Exception as e:
 
-        if is_rate_limit_error(e):
-
-            st.warning(
-                "⚠️ Google Sheets API quota tercapai "
-                "saat membaca Reimbursement."
-            )
-
-        else:
-
-            st.error(
-                "❌ Gagal mengambil data Reimbursement: "
-                f"{e}"
-            )
+        st.error(
+            "❌ Gagal mengambil data Reimbursement: "
+            f"{e}"
+        )
 
         return []
 
@@ -1196,27 +2159,29 @@ def update_reimbursement_status(
 
     try:
 
-        sh = get_google_sheet_connection()
-
-        worksheet = sh.worksheet(
+        worksheet = get_worksheet(
             SHEET_REIMBURSEMENT
         )
 
-        def read_data():
-
-            return worksheet.get_all_values()
-
-        all_rows = safe_sheet_read(
-            read_data
+        all_rows = (
+            _get_reimbursement_raw()
         )
 
-        if not all_rows or len(all_rows) < 2:
+        if (
+            not all_rows
+            or
+            len(all_rows) < 2
+        ):
+
             return False
 
-        # COO = column J = 10
-        # CFO = column K = 11
-
-        if approver_role == "coo":
+        if (
+            normalize_text(
+                approver_role
+            )
+            ==
+            "coo"
+        ):
 
             col_index = 10
 
@@ -1225,9 +2190,15 @@ def update_reimbursement_status(
             col_index = 11
 
         if (
-            "Approved" in str(new_status)
+            "Approved"
+            in
+            str(
+                new_status
+            )
             or
-            new_status == "Pending CFO"
+            new_status
+            ==
+            "Pending CFO"
         ):
 
             status_value = "Approved"
@@ -1246,8 +2217,13 @@ def update_reimbursement_status(
             if (
                 len(row) >= 3
                 and
-                str(row[2]).strip()
-                == str(form_no_target).strip()
+                str(
+                    row[2]
+                ).strip()
+                ==
+                str(
+                    form_no_target
+                ).strip()
             ):
 
                 cells_to_update.append(
@@ -1259,6 +2235,7 @@ def update_reimbursement_status(
                 )
 
         if not cells_to_update:
+
             return False
 
         worksheet.update_cells(
@@ -1266,7 +2243,7 @@ def update_reimbursement_status(
             value_input_option="USER_ENTERED"
         )
 
-        clear_database_cache()
+        clear_reimbursement_cache()
 
         return True
 
@@ -1281,7 +2258,7 @@ def update_reimbursement_status(
 
 
 # ==============================================================================
-# 10. DELIVERY ORDER / MATERIAL OUT
+# 14. DELIVERY ORDER / MATERIAL OUT
 # ==============================================================================
 
 def generate_do_number(
@@ -1301,7 +2278,8 @@ def generate_do_number(
     code_type = (
         "DO-RELOC"
         if is_reloc
-        else "DO"
+        else
+        "DO"
     )
 
     prefix_suffix = (
@@ -1310,58 +2288,14 @@ def generate_do_number(
 
     try:
 
-        def read_data():
+        return reserve_document_number(
 
-            sh = get_google_sheet_connection()
+            prefix_suffix=prefix_suffix,
 
-            worksheet = sh.worksheet(
-                SHEET_MATERIAL_OUT
-            )
+            source_sheet=SHEET_MATERIAL_OUT,
 
-            return worksheet.get_all_values()
+            document_column_index=1
 
-        all_data = safe_sheet_read(
-            read_data
-        )
-
-        existing_numbers = []
-
-        if len(all_data) > 1:
-
-            for row in all_data[1:]:
-
-                if len(row) <= 1:
-                    continue
-
-                no = str(
-                    row[1]
-                ).strip()
-
-                if prefix_suffix in no:
-
-                    try:
-
-                        num_part = int(
-                            no.split("/")[0]
-                        )
-
-                        existing_numbers.append(
-                            num_part
-                        )
-
-                    except ValueError:
-
-                        continue
-
-        next_num = (
-            max(existing_numbers) + 1
-            if existing_numbers
-            else 1
-        )
-
-        return (
-            f"{next_num:04d}"
-            f"{prefix_suffix}"
         )
 
     except Exception as e:
@@ -1370,10 +2304,27 @@ def generate_do_number(
             f"⚠️ Gagal generate nomor DO: {e}"
         )
 
-        return (
-            f"0001"
-            f"{prefix_suffix}"
-        )
+        try:
+
+            max_existing = (
+                _get_existing_max_document_number(
+                    SHEET_MATERIAL_OUT,
+                    1,
+                    prefix_suffix
+                )
+            )
+
+            return (
+                f"{max_existing + 1:04d}"
+                f"{prefix_suffix}"
+            )
+
+        except Exception:
+
+            return (
+                f"0001"
+                f"{prefix_suffix}"
+            )
 
 
 # ==============================================================================
@@ -1386,9 +2337,7 @@ def save_do_to_db_material_out(
 
     try:
 
-        sh = get_google_sheet_connection()
-
-        worksheet = sh.worksheet(
+        worksheet = get_worksheet(
             SHEET_MATERIAL_OUT
         )
 
@@ -1396,124 +2345,27 @@ def save_do_to_db_material_out(
 
         for row in rows_data:
 
-            records.append([
-
-                row.get(
-                    "No",
-                    ""
-                ),
-
-                row.get(
-                    "No. DO",
-                    ""
-                ),
-
-                row.get(
-                    "Delv. Date",
-                    ""
-                ),
-
-                row.get(
-                    "Material Code",
-                    ""
-                ),
-
-                row.get(
-                    "Material Name",
-                    ""
-                ),
-
-                row.get(
-                    "Qty",
-                    0
-                ),
-
-                row.get(
-                    "UoM",
-                    row.get(
-                        "uom",
-                        "Pcs"
-                    )
-                ),
-
-                row.get(
-                    "Charging Type",
-                    ""
-                ),
-
-                row.get(
-                    "Site Alocation",
-                    row.get(
-                        "Site Allocation",
-                        ""
-                    )
-                ),
-
-                row.get(
-                    "Remarks",
-                    ""
-                ),
-
-                row.get(
-                    "To",
-                    ""
-                ),
-
-                row.get(
-                    "Phone No.",
-                    ""
-                ),
-
-                row.get(
-                    "Address",
-                    ""
-                ),
-
-                row.get(
-                    "EPC",
-                    ""
-                ),
-
-                row.get(
-                    "Date Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "No. DO Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "Qty Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "Site Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "Mitra Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "Remarks Reloc.",
-                    ""
+            records.append(
+                _build_material_out_row(
+                    row
                 )
-            ])
+            )
 
         if not records:
+
             return False
 
         worksheet.append_rows(
+
             records,
-            value_input_option="USER_ENTERED"
+
+            value_input_option="USER_ENTERED",
+
+            table_range="A1:T1"
+
         )
 
-        clear_database_cache()
+        clear_material_out_cache()
 
         return True
 
@@ -1521,10 +2373,54 @@ def save_do_to_db_material_out(
 
         st.error(
             "❌ Gagal menyimpan data DO: "
-            f"{e}"
+            f"{type(e).__name__} - {str(e)}"
         )
 
         return False
+
+
+# ==============================================================================
+# RAW MATERIAL OUT DATA
+# ==============================================================================
+
+@st.cache_data(
+    ttl=600,
+    show_spinner=False
+)
+def _get_material_out_raw():
+
+    try:
+
+        def read_material_out():
+
+            worksheet = get_worksheet(
+                SHEET_MATERIAL_OUT
+            )
+
+            return worksheet.get_all_values()
+
+        return safe_sheet_read(
+            read_material_out
+        )
+
+    except Exception as e:
+
+        if is_rate_limit_error(
+            e
+        ):
+
+            st.warning(
+                "⚠️ Google Sheets API quota tercapai "
+                "saat membaca Material Out."
+            )
+
+        else:
+
+            st.warning(
+                f"⚠️ Gagal membaca Material Out: {e}"
+            )
+
+        return []
 
 
 # ==============================================================================
@@ -1539,21 +2435,16 @@ def get_all_do_numbers():
 
     try:
 
-        def read_data():
-
-            sh = get_google_sheet_connection()
-
-            worksheet = sh.worksheet(
-                SHEET_MATERIAL_OUT
-            )
-
-            return worksheet.get_all_values()
-
-        all_data = safe_sheet_read(
-            read_data
+        all_data = (
+            _get_material_out_raw()
         )
 
-        if not all_data or len(all_data) < 2:
+        if (
+            not all_data
+            or
+            len(all_data) < 2
+        ):
+
             return []
 
         unique_dos = set()
@@ -1567,20 +2458,31 @@ def get_all_do_numbers():
                 ).strip()
 
                 if no_do:
+
                     unique_dos.add(
                         no_do
                     )
 
         return sorted(
-            list(unique_dos)
+            list(
+                unique_dos
+            )
         )
 
     except Exception as e:
 
-        if is_rate_limit_error(e):
+        if is_rate_limit_error(
+            e
+        ):
 
             st.warning(
                 "⚠️ Google Sheets API quota tercapai."
+            )
+
+        else:
+
+            st.warning(
+                f"⚠️ Gagal mengambil nomor DO: {e}"
             )
 
         return []
@@ -1600,21 +2502,16 @@ def get_do_by_number(
 
     try:
 
-        def read_data():
-
-            sh = get_google_sheet_connection()
-
-            worksheet = sh.worksheet(
-                SHEET_MATERIAL_OUT
-            )
-
-            return worksheet.get_all_values()
-
-        all_data = safe_sheet_read(
-            read_data
+        all_data = (
+            _get_material_out_raw()
         )
 
-        if not all_data or len(all_data) < 2:
+        if (
+            not all_data
+            or
+            len(all_data) < 2
+        ):
+
             return None
 
         matching_rows = []
@@ -1628,8 +2525,11 @@ def get_do_by_number(
             if (
                 len(row) >= 2
                 and
-                str(row[1]).strip()
-                == target
+                str(
+                    row[1]
+                ).strip()
+                ==
+                target
             ):
 
                 matching_rows.append({
@@ -1745,9 +2645,11 @@ def get_do_by_number(
                         row[19]
                         if len(row) > 19
                         else ""
+
                 })
 
         if not matching_rows:
+
             return None
 
         first = matching_rows[0]
@@ -1755,28 +2657,43 @@ def get_do_by_number(
         return {
 
             "no_do":
-                first["No. DO"],
+                first[
+                    "No. DO"
+                ],
 
             "date":
-                first["Delv. Date"],
+                first[
+                    "Delv. Date"
+                ],
 
             "to":
-                first["To"],
+                first[
+                    "To"
+                ],
 
             "contact":
-                first["Phone No."],
+                first[
+                    "Phone No."
+                ],
 
             "address":
-                first["Address"],
+                first[
+                    "Address"
+                ],
 
             "epc":
-                first["EPC"],
+                first[
+                    "EPC"
+                ],
 
             "charging_type":
-                first["Charging Type"],
+                first[
+                    "Charging Type"
+                ],
 
             "materials":
                 matching_rows
+
         }
 
     except Exception as e:
@@ -1789,7 +2706,7 @@ def get_do_by_number(
 
 
 # ==============================================================================
-# UPDATE DO
+# UPDATE DO - TARGETED UPDATE
 # ==============================================================================
 
 def update_do_in_db_material_out(
@@ -1799,193 +2716,257 @@ def update_do_in_db_material_out(
 
     try:
 
-        sh = get_google_sheet_connection()
-
-        worksheet = sh.worksheet(
+        worksheet = get_worksheet(
             SHEET_MATERIAL_OUT
         )
 
-        # --------------------------------------------------------------
-        # Read existing data
-        # --------------------------------------------------------------
-
-        def read_data():
-
-            return worksheet.get_all_values()
-
-        all_rows = safe_sheet_read(
-            read_data
+        all_rows = (
+            _get_material_out_raw()
         )
 
-        if not all_rows or len(all_rows) < 2:
+        if (
+            not all_rows
+            or
+            len(all_rows) < 2
+        ):
+
             return False
-
-        header = all_rows[0]
-
-        kept_rows = [
-            header
-        ]
 
         target = str(
             no_do_target
         ).strip()
 
-        # --------------------------------------------------------------
-        # Keep all DO except target
-        # --------------------------------------------------------------
+        target_sheet_rows = []
 
-        for row in all_rows[1:]:
+        for python_index, row in enumerate(
+            all_rows[1:],
+            start=1
+        ):
 
             if (
                 len(row) > 1
                 and
-                str(row[1]).strip()
-                != target
+                str(
+                    row[1]
+                ).strip()
+                ==
+                target
             ):
 
-                # Pastikan selalu 20 kolom
-                normalized = (
-                    list(row[:20])
+                target_sheet_rows.append(
+                    python_index + 1
                 )
 
-                while len(
-                    normalized
-                ) < 20:
+        if not target_sheet_rows:
 
-                    normalized.append("")
+            records = []
 
-                kept_rows.append(
-                    normalized
-                )
+            for row in updated_rows_data:
 
-        # --------------------------------------------------------------
-        # Add updated rows
-        # --------------------------------------------------------------
-
-        for row in updated_rows_data:
-
-            kept_rows.append([
-
-                row.get(
-                    "No",
-                    ""
-                ),
-
-                row.get(
-                    "No. DO",
-                    ""
-                ),
-
-                row.get(
-                    "Delv. Date",
-                    ""
-                ),
-
-                row.get(
-                    "Material Code",
-                    ""
-                ),
-
-                row.get(
-                    "Material Name",
-                    ""
-                ),
-
-                row.get(
-                    "Qty",
-                    0
-                ),
-
-                row.get(
-                    "UoM",
-                    row.get(
-                        "uom",
-                        "Pcs"
+                records.append(
+                    _build_material_out_row(
+                        row
                     )
-                ),
-
-                row.get(
-                    "Charging Type",
-                    ""
-                ),
-
-                row.get(
-                    "Site Alocation",
-                    row.get(
-                        "Site Allocation",
-                        ""
-                    )
-                ),
-
-                row.get(
-                    "Remarks",
-                    ""
-                ),
-
-                row.get(
-                    "To",
-                    ""
-                ),
-
-                row.get(
-                    "Phone No.",
-                    ""
-                ),
-
-                row.get(
-                    "Address",
-                    ""
-                ),
-
-                row.get(
-                    "EPC",
-                    ""
-                ),
-
-                row.get(
-                    "Date Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "No. DO Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "Qty Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "Site Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "Mitra Reloc.",
-                    ""
-                ),
-
-                row.get(
-                    "Remarks Reloc.",
-                    ""
                 )
-            ])
 
-        # --------------------------------------------------------------
-        # WRITE
-        # --------------------------------------------------------------
+            if not records:
 
-        worksheet.clear()
+                return False
 
-        worksheet.update(
-            "A1",
-            kept_rows,
-            value_input_option="USER_ENTERED"
+            worksheet.append_rows(
+
+                records,
+
+                value_input_option="USER_ENTERED",
+
+                table_range="A1:T1"
+
+            )
+
+            clear_material_out_cache()
+
+            return True
+
+        new_records = [
+
+            _build_material_out_row(
+                row
+            )
+
+            for row in updated_rows_data
+
+        ]
+
+        old_count = len(
+            target_sheet_rows
         )
 
-        clear_database_cache()
+        new_count = len(
+            new_records
+        )
+
+        common_count = min(
+            old_count,
+            new_count
+        )
+
+        if common_count > 0:
+
+            groups = []
+
+            current_group = [
+                target_sheet_rows[0]
+            ]
+
+            for row_number in target_sheet_rows[1:]:
+
+                if (
+                    row_number
+                    ==
+                    current_group[-1] + 1
+                ):
+
+                    current_group.append(
+                        row_number
+                    )
+
+                else:
+
+                    groups.append(
+                        current_group
+                    )
+
+                    current_group = [
+                        row_number
+                    ]
+
+            groups.append(
+                current_group
+            )
+
+            record_cursor = 0
+
+            for group in groups:
+
+                group_length = min(
+                    len(group),
+                    common_count - record_cursor
+                )
+
+                if group_length <= 0:
+
+                    break
+
+                first_row = group[0]
+
+                last_row = (
+                    first_row
+                    +
+                    group_length
+                    -
+                    1
+                )
+
+                values = new_records[
+                    record_cursor:
+                    record_cursor
+                    +
+                    group_length
+                ]
+
+                worksheet.update(
+
+                    f"A{first_row}:T{last_row}",
+
+                    values,
+
+                    value_input_option="USER_ENTERED"
+
+                )
+
+                record_cursor += (
+                    group_length
+                )
+
+        if new_count > old_count:
+
+            additional_records = (
+                new_records[
+                    old_count:
+                ]
+            )
+
+            worksheet.append_rows(
+
+                additional_records,
+
+                value_input_option="USER_ENTERED",
+
+                table_range="A1:T1"
+
+            )
+
+        elif old_count > new_count:
+
+            rows_to_clear = (
+                target_sheet_rows[
+                    new_count:
+                ]
+            )
+
+            clear_groups = []
+
+            if rows_to_clear:
+
+                current_group = [
+                    rows_to_clear[0]
+                ]
+
+                for row_number in rows_to_clear[1:]:
+
+                    if (
+                        row_number
+                        ==
+                        current_group[-1] + 1
+                    ):
+
+                        current_group.append(
+                            row_number
+                        )
+
+                    else:
+
+                        clear_groups.append(
+                            current_group
+                        )
+
+                        current_group = [
+                            row_number
+                        ]
+
+                clear_groups.append(
+                    current_group
+                )
+
+            clear_ranges = []
+
+            for group in clear_groups:
+
+                first_row = group[0]
+
+                last_row = group[-1]
+
+                clear_ranges.append(
+                    f"A{first_row}:T{last_row}"
+                )
+
+            if clear_ranges:
+
+                worksheet.batch_clear(
+                    clear_ranges
+                )
+
+        clear_material_out_cache()
 
         return True
 
@@ -1993,14 +2974,14 @@ def update_do_in_db_material_out(
 
         st.error(
             "❌ Gagal memperbarui data DO: "
-            f"{e}"
+            f"{type(e).__name__} - {str(e)}"
         )
 
         return False
 
 
 # ==============================================================================
-# 11. QUERY SHEET
+# 15. QUERY SHEET
 # ==============================================================================
 
 @st.cache_data(
@@ -2013,13 +2994,10 @@ def get_query_sheet_data():
 
         def read_query():
 
-            sh = get_google_sheet_connection()
-
-            worksheet = sh.worksheet(
+            worksheet = get_worksheet(
                 SHEET_QUERY
             )
 
-            # SATU READ REQUEST
             return worksheet.get_all_values()
 
         all_values = safe_sheet_read(
@@ -2027,18 +3005,18 @@ def get_query_sheet_data():
         )
 
         if not all_values:
+
             return pd.DataFrame()
 
         if len(all_values) <= 1:
+
             return pd.DataFrame()
 
-        headers = all_values[0]
+        headers = list(
+            all_values[0]
+        )
 
         rows = all_values[1:]
-
-        # --------------------------------------------------------------
-        # Normalize column count
-        # --------------------------------------------------------------
 
         normalized_rows = []
 
@@ -2048,11 +3026,13 @@ def get_query_sheet_data():
 
             if len(row) < len(headers):
 
-                row += [
-                    ""
-                ] * (
-                    len(headers)
-                    - len(row)
+                row += (
+                    [""] *
+                    (
+                        len(headers)
+                        -
+                        len(row)
+                    )
                 )
 
             elif len(row) > len(headers):
@@ -2072,7 +3052,9 @@ def get_query_sheet_data():
 
     except Exception as e:
 
-        if is_rate_limit_error(e):
+        if is_rate_limit_error(
+            e
+        ):
 
             st.warning(
                 "⚠️ Google Sheets API sedang mencapai quota "
@@ -2100,21 +3082,16 @@ def get_used_sites_from_db_material_out():
 
     try:
 
-        def read_material_out():
-
-            sh = get_google_sheet_connection()
-
-            worksheet = sh.worksheet(
-                SHEET_MATERIAL_OUT
-            )
-
-            return worksheet.get_all_values()
-
-        all_rows = safe_sheet_read(
-            read_material_out
+        all_rows = (
+            _get_material_out_raw()
         )
 
-        if not all_rows or len(all_rows) < 2:
+        if (
+            not all_rows
+            or
+            len(all_rows) < 2
+        ):
+
             return []
 
         used_sites = set()
@@ -2134,12 +3111,16 @@ def get_used_sites_from_db_material_out():
                     )
 
         return sorted(
-            list(used_sites)
+            list(
+                used_sites
+            )
         )
 
     except Exception as e:
 
-        if is_rate_limit_error(e):
+        if is_rate_limit_error(
+            e
+        ):
 
             st.warning(
                 "⚠️ Google Sheets API quota tercapai "
@@ -2170,12 +3151,8 @@ def get_epc_and_charging_dropdown_options():
         df = get_query_sheet_data()
 
         if df.empty:
-            return [], []
 
-        # Sesuai struktur Query lama:
-        #
-        # Column B = EPC
-        # Column C = Charging Type
+            return [], []
 
         epc_col = (
             df.columns[1]
@@ -2189,46 +3166,64 @@ def get_epc_and_charging_dropdown_options():
             else None
         )
 
-        if not epc_col:
+        if epc_col is None:
 
             epc_list = []
 
         else:
 
             epc_list = sorted(
+
                 [
+
                     x
-                    for x in
-                    df[
-                        epc_col
-                    ]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                    .unique()
+
+                    for x in (
+
+                        df[
+                            epc_col
+                        ]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .unique()
+
+                    )
+
                     if x
+
                 ]
+
             )
 
-        if not charging_col:
+        if charging_col is None:
 
             charging_list = []
 
         else:
 
             charging_list = sorted(
+
                 [
+
                     x
-                    for x in
-                    df[
-                        charging_col
-                    ]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                    .unique()
+
+                    for x in (
+
+                        df[
+                            charging_col
+                        ]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .unique()
+
+                    )
+
                     if x
+
                 ]
+
             )
 
         return (
@@ -2250,6 +3245,10 @@ def get_epc_and_charging_dropdown_options():
 # GET SITES BY EPC & CHARGING
 # ==============================================================================
 
+@st.cache_data(
+    ttl=1800,
+    show_spinner=False
+)
 def get_sites_by_epc_and_charging(
     epc_target,
     charging_type_target
@@ -2275,15 +3274,6 @@ def get_sites_by_epc_and_charging(
             charging_type_target
         )
 
-        # --------------------------------------------------------------
-        # Struktur Query lama:
-        #
-        # B = EPC
-        # C = Charging Type
-        # D = Status
-        # F = Site
-        # --------------------------------------------------------------
-
         col_epc = df.columns[1]
 
         col_charging = df.columns[2]
@@ -2292,14 +3282,12 @@ def get_sites_by_epc_and_charging(
 
         col_site = df.columns[5]
 
-        # --------------------------------------------------------------
-        # Filter
-        # --------------------------------------------------------------
-
         mask = (
 
             (
-                df[col_epc]
+                df[
+                    col_epc
+                ]
                 .astype(str)
                 .str.strip()
                 .str.lower()
@@ -2310,7 +3298,9 @@ def get_sites_by_epc_and_charging(
             &
 
             (
-                df[col_charging]
+                df[
+                    col_charging
+                ]
                 .astype(str)
                 .str.strip()
                 .str.lower()
@@ -2321,7 +3311,9 @@ def get_sites_by_epc_and_charging(
             &
 
             (
-                ~df[col_status]
+                ~df[
+                    col_status
+                ]
                 .astype(str)
                 .str.strip()
                 .str.lower()
@@ -2331,6 +3323,7 @@ def get_sites_by_epc_and_charging(
                     na=False
                 )
             )
+
         )
 
         filtered_df = df[
@@ -2338,20 +3331,31 @@ def get_sites_by_epc_and_charging(
         ]
 
         sites = (
+
             filtered_df[
                 col_site
             ]
+
             .dropna()
+
             .astype(str)
+
             .str.strip()
+
             .unique()
+
             .tolist()
+
         )
 
         return [
+
             site
+
             for site in sites
+
             if site
+
         ]
 
     except Exception as e:
@@ -2365,7 +3369,7 @@ def get_sites_by_epc_and_charging(
 
 
 # ==============================================================================
-# 12. AUTHORIZATION / OTORISASI
+# 16. AUTHORIZATION / OTORISASI
 # ==============================================================================
 
 @st.cache_data(
@@ -2374,26 +3378,11 @@ def get_sites_by_epc_and_charging(
 )
 def get_authorization_data():
 
-    """
-    Membaca Sheet Otorisasi.
-
-    CACHE:
-        5 menit
-
-    Tujuan:
-        Mencegah login/authentication melakukan READ Google Sheets
-        pada setiap Streamlit rerun.
-
-    Struktur kolom mengikuti header yang ada di Sheet Otorisasi.
-    """
-
     try:
 
         def read_authorization():
 
-            sh = get_google_sheet_connection()
-
-            worksheet = sh.worksheet(
+            worksheet = get_worksheet(
                 SHEET_AUTHORIZATION
             )
 
@@ -2411,7 +3400,9 @@ def get_authorization_data():
 
             return pd.DataFrame()
 
-        headers = all_values[0]
+        headers = list(
+            all_values[0]
+        )
 
         rows = all_values[1:]
 
@@ -2423,11 +3414,13 @@ def get_authorization_data():
 
             if len(row) < len(headers):
 
-                row += [
-                    ""
-                ] * (
-                    len(headers)
-                    - len(row)
+                row += (
+                    [""] *
+                    (
+                        len(headers)
+                        -
+                        len(row)
+                    )
                 )
 
             elif len(row) > len(headers):
@@ -2447,7 +3440,9 @@ def get_authorization_data():
 
     except Exception as e:
 
-        if is_rate_limit_error(e):
+        if is_rate_limit_error(
+            e
+        ):
 
             st.warning(
                 "⚠️ Google Sheets API quota tercapai "
@@ -2466,7 +3461,7 @@ def get_authorization_data():
 
 
 # ==============================================================================
-# OPTIONAL AUTHORIZATION HELPER
+# GET AUTHORIZED USER
 # ==============================================================================
 
 def get_authorized_user(
@@ -2474,47 +3469,46 @@ def get_authorized_user(
     email=None
 ):
 
-    """
-    Helper untuk mencari user dari Sheet Otorisasi.
-
-    Bisa dipanggil berdasarkan username atau email.
-
-    Karena struktur kolom Otorisasi bisa berbeda,
-    fungsi ini mencoba mencari nama kolom umum.
-    """
-
     try:
 
         df = get_authorization_data()
 
         if df.empty:
+
             return None
 
-        # --------------------------------------------------------------
-        # Cari kolom username
-        # --------------------------------------------------------------
-
         username_columns = [
+
             "username",
             "user",
             "userid",
             "user id",
             "login",
             "nik"
+
         ]
 
         email_columns = [
+
             "email",
             "e-mail",
             "email address"
+
         ]
 
         username_col = None
+
         email_col = None
 
         normalized_columns = {
-            normalize_text(col): col
+
+            normalize_text(
+                col
+            ):
+                col
+
             for col in df.columns
+
         }
 
         for candidate in username_columns:
@@ -2541,17 +3535,18 @@ def get_authorized_user(
 
                 break
 
-        # --------------------------------------------------------------
-        # Username search
-        # --------------------------------------------------------------
-
-        if username and username_col:
+        if (
+            username
+            and
+            username_col
+        ):
 
             target = normalize_text(
                 username
             )
 
             result = df[
+
                 df[
                     username_col
                 ]
@@ -2560,23 +3555,30 @@ def get_authorized_user(
                 .str.lower()
                 ==
                 target
+
             ]
 
             if not result.empty:
 
-                return result.iloc[0].to_dict()
+                return (
+                    result.iloc[
+                        0
+                    ]
+                    .to_dict()
+                )
 
-        # --------------------------------------------------------------
-        # Email search
-        # --------------------------------------------------------------
-
-        if email and email_col:
+        if (
+            email
+            and
+            email_col
+        ):
 
             target = normalize_text(
                 email
             )
 
             result = df[
+
                 df[
                     email_col
                 ]
@@ -2585,11 +3587,17 @@ def get_authorized_user(
                 .str.lower()
                 ==
                 target
+
             ]
 
             if not result.empty:
 
-                return result.iloc[0].to_dict()
+                return (
+                    result.iloc[
+                        0
+                    ]
+                    .to_dict()
+                )
 
         return None
 
@@ -2603,16 +3611,10 @@ def get_authorized_user(
 
 
 # ==============================================================================
-# 13. DATABASE HEALTH CHECK
+# 17. DATABASE HEALTH CHECK
 # ==============================================================================
 
 def google_sheet_health_check():
-
-    """
-    Fungsi sederhana untuk mengecek koneksi Google Sheets.
-
-    Hanya melakukan satu READ request.
-    """
 
     try:
 
@@ -2620,8 +3622,6 @@ def google_sheet_health_check():
 
             sh = get_google_sheet_connection()
 
-            # Mengambil worksheet list.
-            # Ini digunakan hanya sebagai test koneksi.
             return sh.worksheets()
 
         worksheets = safe_sheet_read(
@@ -2629,6 +3629,7 @@ def google_sheet_health_check():
         )
 
         return {
+
             "status":
                 "OK",
 
@@ -2636,12 +3637,16 @@ def google_sheet_health_check():
                 "Google Sheets connection OK",
 
             "worksheets":
-                len(worksheets)
+                len(
+                    worksheets
+                )
+
         }
 
     except Exception as e:
 
         return {
+
             "status":
                 "ERROR",
 
@@ -2650,32 +3655,34 @@ def google_sheet_health_check():
 
             "worksheets":
                 0
+
         }
 
 
 # ==============================================================================
-# 14. DEBUG API RATE LIMIT
+# 18. DEBUG API RATE LIMIT
 # ==============================================================================
 
 def get_current_read_usage():
-
-    """
-    Debug helper.
-
-    Mengembalikan jumlah READ request yang tercatat
-    oleh rate limiter internal dalam window 60 detik.
-    """
 
     with _read_lock:
 
         now = time.time()
 
         while (
+
             _read_request_times
+
             and
-            now
-            - _read_request_times[0]
-            >= RATE_WINDOW_SECONDS
+
+            (
+                now
+                -
+                _read_request_times[0]
+            )
+            >=
+            RATE_WINDOW_SECONDS
+
         ):
 
             _read_request_times.popleft()
@@ -2686,5 +3693,115 @@ def get_current_read_usage():
 
 
 # ==============================================================================
-# END OF DATABASE.PY
+# 19. DATABASE CACHE STATUS
+# ==============================================================================
+
+def get_database_cache_status():
+
+    return {
+
+        "read_limit_per_minute":
+            MAX_READ_REQUESTS_PER_MINUTE,
+
+        "rate_window_seconds":
+            RATE_WINDOW_SECONDS,
+
+        "current_read_usage":
+            get_current_read_usage(),
+
+        "cache_domains": [
+
+            "reimbursement",
+            "material_out",
+            "query",
+            "authorization",
+            "sequence"
+
+        ],
+
+        "sequence_sheet":
+            SHEET_SEQUENCE,
+
+        "compatibility_helpers": [
+
+            "get_sheet_values",
+            "get_sheet_dataframe"
+
+        ]
+
+    }
+
+
+# ==============================================================================
+# 20. OPTIONAL DATABASE WARMUP
+# ==============================================================================
+
+def warmup_database(
+    include_reimbursement=False,
+    include_material_out=False,
+    include_query=True,
+    include_authorization=False
+):
+
+    result = {
+
+        "query":
+            False,
+
+        "authorization":
+            False,
+
+        "material_out":
+            False,
+
+        "reimbursement":
+            False
+
+    }
+
+    try:
+
+        if include_query:
+
+            get_query_sheet_data()
+
+            result[
+                "query"
+            ] = True
+
+        if include_authorization:
+
+            get_authorization_data()
+
+            result[
+                "authorization"
+            ] = True
+
+        if include_material_out:
+
+            _get_material_out_raw()
+
+            result[
+                "material_out"
+            ] = True
+
+        if include_reimbursement:
+
+            _get_reimbursement_raw()
+
+            result[
+                "reimbursement"
+            ] = True
+
+    except Exception as e:
+
+        result[
+            "error"
+        ] = str(e)
+
+    return result
+
+
+# ==============================================================================
+# END OF DATABASE.PY V2.1
 # ==============================================================================
