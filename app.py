@@ -625,7 +625,7 @@ if not st.session_state.authenticated:
 
         logo_path = os.path.join(
             "assets",
-            "Logo.png"
+            "CLX.png"
         )
 
         if os.path.exists(
@@ -981,7 +981,7 @@ with st.sidebar:
 
     logo_path = os.path.join(
         "assets",
-        "Logo.png"
+        "CLX.png"
     )
 
     if os.path.exists(
