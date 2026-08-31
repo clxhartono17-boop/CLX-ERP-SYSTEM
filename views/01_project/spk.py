@@ -1,24 +1,5 @@
 ```python
 # ==============================================================================
-# SPK.PY
-# ERP - SURAT PERINTAH KERJA
-#
-# VERSION:
-# SPK.PY V2.2 FINAL - ANTI 429
-#
-# MAJOR IMPROVEMENTS:
-# 1. Cached Google Sheets READ
-# 2. No worksheet.cell() inside loops
-# 3. No worksheet.update_cell() inside loops
-# 4. Batch update for COO APPROVE
-# 5. Batch update for COO REJECT
-# 6. Batch update for TAKE OVER
-# 7. Batch update for Status Approval initialization
-# 8. Cached Query / Master Dropdown / Master SOW
-# 9. Cache invalidation after WRITE
-# 10. DataFrame used as the source for row matching
-# 11. Reduced Google Sheets API traffic
-# 12. Existing business logic preserved
 # ==============================================================================
 
 import datetime
