@@ -3,7 +3,7 @@
 # ERP DATABASE LAYER - GOOGLE SHEETS
 #
 # VERSION:
-# DATABASE.PY V2.1
+# DATABASE.PY V2.2
 # Rate Limit Protected / Cached / Retry / Backoff / Multi User Safer
 #
 # FEATURES:
@@ -27,6 +27,9 @@
 # 18. Database Health Check
 # 19. Rate Limit Debugging
 # 20. Compatibility Helper: get_sheet_values()
+# 21. Global 429 Cooldown
+# 22. Retry-After Detection
+# 23. Multi-Thread Read Protection
 #
 # IMPORTANT:
 # - Sheet "DB Sequence" akan dibuat otomatis jika belum ada.
@@ -118,11 +121,35 @@ SCOPES = [
 # 2. RATE LIMIT CONFIGURATION
 # ==============================================================================
 
-MAX_READ_REQUESTS_PER_MINUTE = 45
+# ------------------------------------------------------------------------------
+# IMPORTANT
+#
+# Google API quota:
+#
+#   Read requests per minute per user = 60
+#
+# Kita sengaja menggunakan limit internal yang lebih rendah agar lebih aman.
+#
+# 20 request/minute dipilih agar masih tersedia ruang untuk:
+# - worksheet discovery
+# - spreadsheet connection
+# - concurrent Streamlit users
+# - request lain yang mungkin terjadi di luar database.py
+# ------------------------------------------------------------------------------
+
+MAX_READ_REQUESTS_PER_MINUTE = 20
 
 RATE_WINDOW_SECONDS = 60
 
-READ_BACKOFF_MAX_SECONDS = 32
+READ_BACKOFF_MAX_SECONDS = 60
+
+# Cooldown global setelah menerima HTTP 429.
+#
+# Ketika satu request terkena quota:
+# seluruh thread akan berhenti sementara sebelum mencoba request berikutnya.
+#
+# Ini sangat penting untuk multi-user Streamlit.
+RATE_LIMIT_COOLDOWN_SECONDS = 10
 
 
 # ------------------------------------------------------------------------------
@@ -132,6 +159,13 @@ READ_BACKOFF_MAX_SECONDS = 32
 _read_request_times = deque()
 
 _read_lock = threading.Lock()
+
+
+# ------------------------------------------------------------------------------
+# GLOBAL RATE LIMIT COOLDOWN
+# ------------------------------------------------------------------------------
+
+_next_allowed_read_time = 0.0
 
 
 # ------------------------------------------------------------------------------
@@ -150,16 +184,25 @@ def wait_for_read_slot():
     Central internal READ rate limiter.
 
     Maksimum:
-        45 logical READ request / 60 detik.
+        20 logical READ request / 60 detik.
+
+    Selain rate window, fungsi ini juga menghormati global cooldown
+    apabila sebelumnya Google mengembalikan HTTP 429.
 
     Semua READ yang masuk ke Google Sheets sebaiknya melewati fungsi ini.
     """
+
+    global _next_allowed_read_time
 
     while True:
 
         now = time.time()
 
         with _read_lock:
+
+            # ------------------------------------------------------------------
+            # REMOVE EXPIRED REQUEST TIMESTAMPS
+            # ------------------------------------------------------------------
 
             while (
                 _read_request_times
@@ -174,7 +217,25 @@ def wait_for_read_slot():
 
                 _read_request_times.popleft()
 
-            if (
+            # ------------------------------------------------------------------
+            # GLOBAL 429 COOLDOWN
+            # ------------------------------------------------------------------
+
+            cooldown_remaining = (
+                _next_allowed_read_time
+                -
+                now
+            )
+
+            if cooldown_remaining > 0:
+
+                wait_time = cooldown_remaining
+
+            # ------------------------------------------------------------------
+            # NORMAL RATE WINDOW
+            # ------------------------------------------------------------------
+
+            elif (
                 len(_read_request_times)
                 <
                 MAX_READ_REQUESTS_PER_MINUTE
@@ -184,17 +245,23 @@ def wait_for_read_slot():
 
                 return
 
-            wait_time = (
-                RATE_WINDOW_SECONDS
-                -
-                (
-                    now
+            # ------------------------------------------------------------------
+            # RATE WINDOW FULL
+            # ------------------------------------------------------------------
+
+            else:
+
+                wait_time = (
+                    RATE_WINDOW_SECONDS
                     -
-                    _read_request_times[0]
+                    (
+                        now
+                        -
+                        _read_request_times[0]
+                    )
+                    +
+                    0.5
                 )
-                +
-                0.5
-            )
 
         time.sleep(
             max(
@@ -225,7 +292,8 @@ def is_rate_limit_error(error):
         "TOO MANY REQUESTS",
         "READREQUESTSPERMINUTE",
         "USER_RATE_LIMIT_EXCEEDED",
-        "PER_USER_RATE_LIMIT"
+        "PER_USER_RATE_LIMIT",
+        "RATE LIMIT"
     ]
 
     return any(
@@ -235,12 +303,121 @@ def is_rate_limit_error(error):
 
 
 # ==============================================================================
+# 4A. RETRY-AFTER DETECTOR
+# ==============================================================================
+
+def _get_retry_after_seconds(
+    error
+):
+    """
+    Mencoba mengambil nilai Retry-After dari response Google.
+
+    Jika tidak tersedia, return 0.
+    """
+
+    try:
+
+        response = getattr(
+            error,
+            "response",
+            None
+        )
+
+        if response is None:
+
+            return 0
+
+        headers = getattr(
+            response,
+            "headers",
+            {}
+        )
+
+        retry_after = headers.get(
+            "Retry-After"
+        )
+
+        if retry_after is None:
+
+            return 0
+
+        return max(
+            float(
+                retry_after
+            ),
+            0
+        )
+
+    except Exception:
+
+        return 0
+
+
+# ==============================================================================
+# 4B. GLOBAL 429 COOLDOWN
+# ==============================================================================
+
+def _activate_rate_limit_cooldown(
+    seconds=None
+):
+    """
+    Mengaktifkan cooldown global setelah menerima 429.
+
+    Semua thread yang menggunakan wait_for_read_slot()
+    akan ikut menunggu cooldown ini.
+    """
+
+    global _next_allowed_read_time
+
+    if seconds is None:
+
+        seconds = (
+            RATE_LIMIT_COOLDOWN_SECONDS
+        )
+
+    try:
+
+        seconds = float(
+            seconds
+        )
+
+    except Exception:
+
+        seconds = (
+            RATE_LIMIT_COOLDOWN_SECONDS
+        )
+
+    seconds = max(
+        seconds,
+        RATE_LIMIT_COOLDOWN_SECONDS
+    )
+
+    with _read_lock:
+
+        cooldown_until = (
+            time.time()
+            +
+            seconds
+        )
+
+        if (
+            cooldown_until
+            >
+            _next_allowed_read_time
+        ):
+
+            _next_allowed_read_time = (
+                cooldown_until
+            )
+
+
+# ==============================================================================
 # 5. SAFE GOOGLE SHEETS READ
 # ==============================================================================
 
 def safe_sheet_read(
     read_function,
-    max_retries=5
+    max_retries=6
 ):
     """
     Centralized Google Sheets READ handler.
@@ -248,9 +425,11 @@ def safe_sheet_read(
     Proteksi:
         1. Internal rate limiter
         2. 429 detection
-        3. Exponential backoff
-        4. Random jitter
-        5. Retry
+        3. Global cooldown
+        4. Exponential backoff
+        5. Random jitter
+        6. Retry-After support
+        7. Multi-thread protection
     """
 
     last_error = None
@@ -261,7 +440,15 @@ def safe_sheet_read(
 
         try:
 
+            # --------------------------------------------------------------
+            # WAIT UNTIL REQUEST IS ALLOWED
+            # --------------------------------------------------------------
+
             wait_for_read_slot()
+
+            # --------------------------------------------------------------
+            # ACTUAL GOOGLE SHEETS READ
+            # --------------------------------------------------------------
 
             return read_function()
 
@@ -269,30 +456,70 @@ def safe_sheet_read(
 
             last_error = e
 
+            # --------------------------------------------------------------
+            # NON RATE-LIMIT ERROR
+            # --------------------------------------------------------------
+
             if not is_rate_limit_error(
                 e
             ):
 
                 raise
 
+            # --------------------------------------------------------------
+            # RETRY-AFTER
+            # --------------------------------------------------------------
+
+            retry_after = (
+                _get_retry_after_seconds(
+                    e
+                )
+            )
+
+            # --------------------------------------------------------------
+            # EXPONENTIAL BACKOFF
+            # --------------------------------------------------------------
+
             base_delay = min(
                 2 ** attempt,
                 READ_BACKOFF_MAX_SECONDS
             )
 
+            # --------------------------------------------------------------
+            # JITTER
+            # --------------------------------------------------------------
+
             jitter = random.uniform(
-                0.5,
-                1.5
+                0.75,
+                1.50
             )
 
-            sleep_time = (
+            calculated_delay = (
                 base_delay
                 *
                 jitter
             )
 
+            # --------------------------------------------------------------
+            # FINAL DELAY
+            # --------------------------------------------------------------
+
+            sleep_time = max(
+                calculated_delay,
+                retry_after,
+                RATE_LIMIT_COOLDOWN_SECONDS
+            )
+
+            # --------------------------------------------------------------
+            # GLOBAL COOLDOWN
+            # --------------------------------------------------------------
+
+            _activate_rate_limit_cooldown(
+                sleep_time
+            )
+
             print(
-                f"⚠️ Google Sheets RATE LIMIT. "
+                f"⚠️ Google Sheets RATE LIMIT / 429. "
                 f"Retry {attempt + 1}/{max_retries} "
                 f"dalam {sleep_time:.1f} detik..."
             )
@@ -300,6 +527,10 @@ def safe_sheet_read(
             time.sleep(
                 sleep_time
             )
+
+    # --------------------------------------------------------------------------
+    # ALL RETRIES FAILED
+    # --------------------------------------------------------------------------
 
     raise last_error
 
@@ -409,9 +640,12 @@ def _get_worksheet_cached(
 ):
     """
     Mengambil object worksheet dan menyimpannya sebagai resource.
-    """
 
-    wait_for_read_slot()
+    CATATAN:
+    sh.worksheet() sendiri merupakan READ request.
+    Karena function ini sudah menggunakan cache_resource,
+    request hanya dilakukan saat worksheet belum tersedia di cache.
+    """
 
     sh = get_google_sheet_connection()
 
@@ -489,7 +723,8 @@ def get_sheet_values(
 
             st.warning(
                 f"⚠️ Google Sheets API quota tercapai "
-                f"saat membaca Sheet '{sheet_name}'."
+                f"saat membaca Sheet '{sheet_name}'. "
+                f"Silakan tunggu beberapa detik."
             )
 
         else:
@@ -549,7 +784,9 @@ def get_sheet_dataframe(
                     :len(headers)
                 ]
 
-            rows.append(row)
+            rows.append(
+                row
+            )
 
         return pd.DataFrame(
             rows,
@@ -1167,8 +1404,6 @@ def _ensure_sequence_sheet():
     with _write_lock:
 
         try:
-
-            wait_for_read_slot()
 
             worksheet = sh.worksheet(
                 SHEET_SEQUENCE
@@ -3447,7 +3682,7 @@ def get_authorization_data():
             st.warning(
                 "⚠️ Google Sheets API quota tercapai "
                 "saat membaca Sheet Otorisasi. "
-                "Silakan tunggu beberapa detik."
+                "Sistem akan mencoba kembali setelah cooldown."
             )
 
         else:
@@ -3693,6 +3928,26 @@ def get_current_read_usage():
 
 
 # ==============================================================================
+# 18A. DEBUG RATE LIMIT COOLDOWN
+# ==============================================================================
+
+def get_rate_limit_cooldown():
+
+    with _read_lock:
+
+        remaining = (
+            _next_allowed_read_time
+            -
+            time.time()
+        )
+
+        return max(
+            remaining,
+            0
+        )
+
+
+# ==============================================================================
 # 19. DATABASE CACHE STATUS
 # ==============================================================================
 
@@ -3708,6 +3963,15 @@ def get_database_cache_status():
 
         "current_read_usage":
             get_current_read_usage(),
+
+        "rate_limit_cooldown_seconds":
+            RATE_LIMIT_COOLDOWN_SECONDS,
+
+        "current_cooldown_remaining":
+            round(
+                get_rate_limit_cooldown(),
+                2
+            ),
 
         "cache_domains": [
 
@@ -3803,5 +4067,5 @@ def warmup_database(
 
 
 # ==============================================================================
-# END OF DATABASE.PY V2.1
+# END OF DATABASE.PY V2.2
 # ==============================================================================
