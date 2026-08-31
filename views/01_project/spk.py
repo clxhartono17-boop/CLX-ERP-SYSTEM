@@ -1,7 +1,7 @@
 import datetime
 import io
 import os
-from typing import Any, Dict, List, Tuple
+from typing import List
 
 import pandas as pd
 import streamlit as st
@@ -41,6 +41,19 @@ STATUS_APPROVED = "Approved by COO"
 STATUS_REJECTED = "Rejected by COO"
 
 CACHE_TTL_SHEET = 120
+
+
+# ==============================================================================
+# MAINTENANCE SOW
+# ==============================================================================
+
+MAINTENANCE_SOW_EVCS = "Maintenance Service EVCS"
+MAINTENANCE_SOW_BSS = "Maintenance Service BSS"
+
+MAINTENANCE_SOW_LIST = [
+    MAINTENANCE_SOW_EVCS,
+    MAINTENANCE_SOW_BSS,
+]
 
 
 # ==============================================================================
@@ -176,10 +189,6 @@ def load_sheet_values_cached(sheet_name: str) -> List[List[str]]:
 def clear_sheet_cache(sheet_name: str = None):
     """
     Clear cache pembacaan sheet.
-
-    Streamlit cache_data tidak selalu mendukung selective
-    invalidation berdasarkan argument secara konsisten,
-    sehingga function cache dibersihkan secara keseluruhan.
     """
 
     try:
@@ -254,9 +263,7 @@ def find_column(
         )
 
         if candidate_norm in normalized_columns:
-            return normalized_columns[
-                candidate_norm
-            ]
+            return normalized_columns[candidate_norm]
 
     # Partial match
     for candidate in candidates:
@@ -367,6 +374,98 @@ def ensure_dataframe_columns(
 
 
 # ==============================================================================
+# MAINTENANCE HELPERS
+# ==============================================================================
+
+def is_maintenance_sow(sow_type):
+    """
+    True jika SOW adalah Maintenance Service EVCS/BSS.
+    """
+
+    sow = safe_str(sow_type).strip().lower()
+
+    return sow in {
+        MAINTENANCE_SOW_EVCS.lower(),
+        MAINTENANCE_SOW_BSS.lower(),
+    }
+
+
+def is_maintenance_evcs(sow_type):
+    return (
+        safe_str(sow_type).strip().lower()
+        == MAINTENANCE_SOW_EVCS.lower()
+    )
+
+
+def is_maintenance_bss(sow_type):
+    return (
+        safe_str(sow_type).strip().lower()
+        == MAINTENANCE_SOW_BSS.lower()
+    )
+
+
+def get_sow_category(sow_type):
+    """
+    Mengembalikan kategori:
+    - MAINTENANCE_EVCS
+    - MAINTENANCE_BSS
+    - SURVEY
+    - CONS
+    """
+
+    sow = safe_str(sow_type).lower()
+
+    if "maintenance service evcs" in sow:
+        return "MAINTENANCE_EVCS"
+
+    if "maintenance service bss" in sow:
+        return "MAINTENANCE_BSS"
+
+    if "survey" in sow:
+        return "SURVEY"
+
+    return "CONS"
+
+
+def get_sow_category_label(sow_type):
+    category = get_sow_category(sow_type)
+
+    if category == "MAINTENANCE_EVCS":
+        return "Maintenance Service EVCS"
+
+    if category == "MAINTENANCE_BSS":
+        return "Maintenance Service BSS"
+
+    if category == "SURVEY":
+        return "Survey"
+
+    return "Construction"
+
+
+def get_wo_column_index(sow_type):
+    """
+    Survey:
+        Query kolom L = index 11
+
+    Construction:
+        Query kolom W = index 22
+
+    Maintenance:
+        Tidak menggunakan WO.
+    """
+
+    category = get_sow_category(sow_type)
+
+    if category == "SURVEY":
+        return 11
+
+    if category == "CONS":
+        return 22
+
+    return None
+
+
+# ==============================================================================
 # BATCH WRITE HELPERS
 # ==============================================================================
 
@@ -472,12 +571,21 @@ def generate_spk_number(
         now.month - 1
     ]
 
-    sow_code = (
-        "SURVEY"
-        if "survey"
-        in str(sow_type).lower()
-        else "CONS"
-    )
+    sow_lower = safe_str(
+        sow_type
+    ).lower()
+
+    if "survey" in sow_lower:
+        sow_code = "SURVEY"
+
+    elif is_maintenance_evcs(sow_type):
+        sow_code = "CONS"
+
+    elif is_maintenance_bss(sow_type):
+        sow_code = "CONS"
+
+    else:
+        sow_code = "CONS"
 
     seq_str = f"{sequence_num:04d}"
 
@@ -700,6 +808,11 @@ def generate_spk_pdf_bytes(
         "-",
     )
 
+    display_wo = safe_str(
+        selected_wo,
+        "-",
+    )
+
     meta_table_data = [
         [
             Paragraph("Proyek:", meta_label),
@@ -715,10 +828,7 @@ def generate_spk_pdf_bytes(
             ),
             Paragraph("No. WO:", meta_label),
             Paragraph(
-                safe_str(
-                    selected_wo,
-                    "-",
-                ),
+                display_wo,
                 meta_val,
             ),
         ],
@@ -771,7 +881,16 @@ def generate_spk_pdf_bytes(
                 meta_label,
             ),
             Paragraph(
-                "Terlampir pada tabel di bawah",
+                (
+                    "Tidak menggunakan Site Selection"
+                    if is_maintenance_sow(
+                        spk_metadata.get(
+                            "sow_type",
+                            "",
+                        )
+                    )
+                    else "Terlampir pada tabel di bawah"
+                ),
                 meta_val,
             ),
             Paragraph("SOW:", meta_label),
@@ -979,49 +1098,57 @@ def generate_spk_pdf_bytes(
     # SITE
     # --------------------------------------------------------------------------
 
-    elements.append(
-        Paragraph(
-            "<b>Detail Site List:</b>",
-            ParagraphStyle(
-                "SubHeader",
-                fontName="Helvetica-Bold",
-                fontSize=9,
-                spaceAfter=4,
-            ),
+    if (
+        not is_maintenance_sow(
+            spk_metadata.get(
+                "sow_type",
+                "",
+            )
         )
-    )
+        and selected_sites is not None
+    ):
 
-    site_headers = [
-        Paragraph("<b>No</b>", cell_head),
-        Paragraph(
-            "<b>Site Name</b>",
-            cell_head,
-        ),
-        Paragraph(
-            "<b>Charging Type</b>",
-            cell_head,
-        ),
-        Paragraph(
-            "<b>WO Number</b>",
-            cell_head,
-        ),
-        Paragraph(
-            "<b>Province</b>",
-            cell_head,
-        ),
-        Paragraph(
-            "<b>PIC + Contact</b>",
-            cell_head,
-        ),
-        Paragraph(
-            "<b>Gmaps</b>",
-            cell_head,
-        ),
-    ]
+        elements.append(
+            Paragraph(
+                "<b>Detail Site List:</b>",
+                ParagraphStyle(
+                    "SubHeader",
+                    fontName="Helvetica-Bold",
+                    fontSize=9,
+                    spaceAfter=4,
+                ),
+            )
+        )
 
-    site_rows = [site_headers]
+        site_headers = [
+            Paragraph("<b>No</b>", cell_head),
+            Paragraph(
+                "<b>Site Name</b>",
+                cell_head,
+            ),
+            Paragraph(
+                "<b>Charging Type</b>",
+                cell_head,
+            ),
+            Paragraph(
+                "<b>WO Number</b>",
+                cell_head,
+            ),
+            Paragraph(
+                "<b>Province</b>",
+                cell_head,
+            ),
+            Paragraph(
+                "<b>PIC + Contact</b>",
+                cell_head,
+            ),
+            Paragraph(
+                "<b>Gmaps</b>",
+                cell_head,
+            ),
+        ]
 
-    if selected_sites is not None:
+        site_rows = [site_headers]
 
         for idx, (_, row) in enumerate(
             selected_sites.iterrows(),
@@ -1094,61 +1221,61 @@ def generate_spk_pdf_bytes(
                 ]
             )
 
-    col_widths = [
-        0.3 * inch,
-        1.6 * inch,
-        1.0 * inch,
-        1.3 * inch,
-        0.9 * inch,
-        1.1 * inch,
-        1.1 * inch,
-    ]
+        col_widths = [
+            0.3 * inch,
+            1.6 * inch,
+            1.0 * inch,
+            1.3 * inch,
+            0.9 * inch,
+            1.1 * inch,
+            1.1 * inch,
+        ]
 
-    t_site = Table(
-        site_rows,
-        colWidths=col_widths,
-    )
-
-    t_site.setStyle(
-        TableStyle(
-            [
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor("#1B365D"),
-                ),
-                (
-                    "VALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "TOP",
-                ),
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.4,
-                    colors.HexColor("#BDC3C7"),
-                ),
-                (
-                    "TOPPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    2,
-                ),
-                (
-                    "BOTTOMPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    2,
-                ),
-            ]
+        t_site = Table(
+            site_rows,
+            colWidths=col_widths,
         )
-    )
 
-    elements.append(t_site)
-    elements.append(Spacer(1, 15))
+        t_site.setStyle(
+            TableStyle(
+                [
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (-1, 0),
+                        colors.HexColor("#1B365D"),
+                    ),
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "TOP",
+                    ),
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.4,
+                        colors.HexColor("#BDC3C7"),
+                    ),
+                    (
+                        "TOPPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        2,
+                    ),
+                    (
+                        "BOTTOMPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        2,
+                    ),
+                ]
+            )
+        )
+
+        elements.append(t_site)
+        elements.append(Spacer(1, 15))
 
     # --------------------------------------------------------------------------
     # SIGNATURE
@@ -1562,7 +1689,17 @@ def show_spk_page():
                         "Survey BSS",
                         "Instalasi BSS",
                         "Instalasi EVC",
+                        MAINTENANCE_SOW_EVCS,
+                        MAINTENANCE_SOW_BSS,
                     ]
+
+                # Pastikan Maintenance selalu tersedia
+                for maintenance_sow in MAINTENANCE_SOW_LIST:
+
+                    if maintenance_sow not in sow_dropdown_list:
+                        sow_dropdown_list.append(
+                            maintenance_sow
+                        )
 
                 col1, col2, col3 = st.columns(3)
 
@@ -1578,77 +1715,43 @@ def show_spk_page():
                         key="sow_type_select",
                     )
 
+                    sow_category = get_sow_category(
+                        selected_sow_type
+                    )
+
                     is_survey = (
-                        "survey"
-                        in safe_str(
+                        sow_category == "SURVEY"
+                    )
+
+                    is_maintenance = (
+                        sow_category
+                        in [
+                            "MAINTENANCE_EVCS",
+                            "MAINTENANCE_BSS",
+                        ]
+                    )
+
+                    # ----------------------------------------------------------
+                    # PEKERJAAN
+                    # ----------------------------------------------------------
+
+                    if is_maintenance:
+
+                        auto_pekerjaan = (
                             selected_sow_type
-                        ).lower()
-                    )
-
-                    auto_pekerjaan = (
-                        "Survey Location"
-                        if is_survey
-                        else "Construction"
-                    )
-
-                    target_wo_col_idx = (
-                        11
-                        if is_survey
-                        else 22
-                    )
-
-                    if (
-                        df_query.shape[1]
-                        > target_wo_col_idx
-                    ):
-
-                        raw_wos = (
-                            pd.Series(
-                                df_query.iloc[
-                                    :,
-                                    target_wo_col_idx,
-                                ].values.ravel()
-                            )
-                            .dropna()
-                            .unique()
                         )
 
-                        wo_list = [
-                            safe_str(wo)
-                            for wo in raw_wos
-                            if safe_str(wo)
-                            and safe_str(wo).lower()
-                            != "nan"
-                        ]
+                    elif is_survey:
+
+                        auto_pekerjaan = (
+                            "Survey Location"
+                        )
 
                     else:
 
-                        wo_list = []
-
-                    wo_label = (
-                        f"Pilih Nomor WO "
-                        f"({'Kolom L - Survey' if is_survey else 'Kolom W - Cons'})"
-                    )
-
-                    selected_wo = st.selectbox(
-                        wo_label,
-                        options=(
-                            wo_list
-                            if wo_list
-                            else [
-                                "- Tidak ada WO -"
-                            ]
-                        ),
-                        key=(
-                            f"wo_select_"
-                            f"{selected_sow_type}"
-                        ),
-                    )
-
-                    proyek_input = st.text_input(
-                        "Proyek",
-                        value="V-Green",
-                    )
+                        auto_pekerjaan = (
+                            "Construction"
+                        )
 
                     pekerjaan_input = st.text_input(
                         "Pekerjaan",
@@ -1657,6 +1760,104 @@ def show_spk_page():
                             f"pekerjaan_input_"
                             f"{selected_sow_type}"
                         ),
+                    )
+
+                    # ----------------------------------------------------------
+                    # WO
+                    # ----------------------------------------------------------
+
+                    target_wo_col_idx = (
+                        get_wo_column_index(
+                            selected_sow_type
+                        )
+                    )
+
+                    # ==========================================================
+                    # MAINTENANCE
+                    # ==========================================================
+
+                    if is_maintenance:
+
+                        st.info(
+                            "🔧 **Maintenance Service** dipilih. "
+                            "Nomor WO bersifat opsional dan dapat dikosongkan."
+                        )
+
+                        selected_wo = ""
+
+                        st.text_input(
+                            "Pilih Nomor WO",
+                            value="",
+                            disabled=True,
+                            placeholder="Tidak diperlukan untuk Maintenance",
+                            key=(
+                                f"maintenance_wo_display_"
+                                f"{selected_sow_type}"
+                            ),
+                        )
+
+                    # ==========================================================
+                    # SURVEY / CONS
+                    # ==========================================================
+
+                    else:
+
+                        if (
+                            target_wo_col_idx is not None
+                            and df_query.shape[1]
+                            > target_wo_col_idx
+                        ):
+
+                            raw_wos = (
+                                pd.Series(
+                                    df_query.iloc[
+                                        :,
+                                        target_wo_col_idx,
+                                    ].values.ravel()
+                                )
+                                .dropna()
+                                .unique()
+                            )
+
+                            wo_list = [
+                                safe_str(wo)
+                                for wo in raw_wos
+                                if safe_str(wo)
+                                and safe_str(wo).lower()
+                                != "nan"
+                            ]
+
+                        else:
+
+                            wo_list = []
+
+                        wo_label = (
+                            f"Pilih Nomor WO "
+                            f"({'Kolom L - Survey' if is_survey else 'Kolom W - Cons'})"
+                        )
+
+                        selected_wo = st.selectbox(
+                            wo_label,
+                            options=(
+                                wo_list
+                                if wo_list
+                                else [
+                                    "- Tidak ada WO -"
+                                ]
+                            ),
+                            key=(
+                                f"wo_select_"
+                                f"{selected_sow_type}"
+                            ),
+                        )
+
+                    # ----------------------------------------------------------
+                    # PROYEK
+                    # ----------------------------------------------------------
+
+                    proyek_input = st.text_input(
+                        "Proyek",
+                        value="V-Green",
                     )
 
                 # --------------------------------------------------------------
@@ -1708,9 +1909,14 @@ def show_spk_page():
                                 m
                             )
 
-                    mitra_list_clean.append(
-                        "IN HOUSE"
-                    )
+                    if "IN HOUSE" not in [
+                        safe_str(x).upper()
+                        for x in mitra_list_clean
+                    ]:
+
+                        mitra_list_clean.append(
+                            "IN HOUSE"
+                        )
 
                     selected_pic = st.selectbox(
                         "Penanggung Jawab (Mitra)",
@@ -1830,12 +2036,34 @@ def show_spk_page():
                         "(0818-0690-9317)"
                     )
 
-                # --------------------------------------------------------------
+                    # ==========================================================
+                    # MAINTENANCE INFORMATION
+                    # ==========================================================
+
+                    if is_maintenance:
+
+                        st.info(
+                            f"🔧 **{selected_sow_type}**\n\n"
+                            "• No. WO: **Tidak wajib**\n"
+                            "• Site Selection: **Tidak digunakan**\n"
+                            "• SPK akan dibuat sebagai Maintenance Service."
+                        )
+
+                # ----------------------------------------------------------------
                 # FILTER SITE
-                # --------------------------------------------------------------
+                # ----------------------------------------------------------------
+
+                filtered_df = pd.DataFrame()
+                edited_df = pd.DataFrame()
+                selected_sites = pd.DataFrame()
+
+                # ==============================================================
+                # NORMAL SURVEY / CONS
+                # ==============================================================
 
                 if (
-                    selected_wo
+                    not is_maintenance
+                    and selected_wo
                     and selected_wo
                     != "- Tidak ada WO -"
                 ):
@@ -1883,31 +2111,176 @@ def show_spk_page():
                         else "-"
                     )
 
+                    # ----------------------------------------------------------
+                    # SOW INFORMATION
+                    # ----------------------------------------------------------
+
+                    filtered_df["col_sow"] = (
+                        selected_sow_type
+                    )
+
                     st.markdown("---")
 
                     st.markdown(
                         f"### 📍 Daftar Site untuk WO: "
-                        f"`{selected_wo}` "
-                        f"(Sheet Query)"
+                        f"`{selected_wo}` (Sheet Query)"
                     )
 
-                    if "Pilih" not in filtered_df.columns:
+                    # ----------------------------------------------------------
+                    # DISPLAY COLUMN SESUAI SOW
+                    # ----------------------------------------------------------
 
-                        filtered_df.insert(
-                            0,
-                            "Pilih",
-                            True,
-                        )
+                    display_columns = [
+                        "Pilih",
+                        "col_site",
+                        "col_charge",
+                        "col_province",
+                        "col_pic",
+                        "col_gmaps",
+                        "col_sow",
+                    ]
 
-                    edited_df = st.data_editor(
-                        filtered_df,
+                    display_column_names = {
+                        "Pilih": "Pilih",
+                        "col_site": "Site Name",
+                        "col_charge": "Charging Type",
+                        "col_province": "Province",
+                        "col_pic": "PIC + Contact",
+                        "col_gmaps": "Gmaps",
+                        "col_sow": "SOW",
+                    }
+
+                    site_editor_df = pd.DataFrame()
+
+                    for source_col in display_columns:
+
+                        if source_col == "Pilih":
+
+                            site_editor_df[
+                                "Pilih"
+                            ] = True
+
+                        elif source_col in filtered_df.columns:
+
+                            site_editor_df[
+                                display_column_names[
+                                    source_col
+                                ]
+                            ] = filtered_df[
+                                source_col
+                            ].values
+
+                    edited_display_df = st.data_editor(
+                        site_editor_df,
                         use_container_width=True,
                         hide_index=True,
                         key=(
                             f"site_editor_"
-                            f"{selected_wo}"
+                            f"{selected_wo}_"
+                            f"{selected_sow_type}"
                         ),
+                        column_config={
+                            "Pilih": st.column_config.CheckboxColumn(
+                                "Pilih",
+                                default=True,
+                            ),
+                            "Site Name": st.column_config.TextColumn(
+                                "Site Name",
+                                disabled=True,
+                            ),
+                            "Charging Type": st.column_config.TextColumn(
+                                "Charging Type",
+                                disabled=True,
+                            ),
+                            "Province": st.column_config.TextColumn(
+                                "Province",
+                                disabled=True,
+                            ),
+                            "PIC + Contact": st.column_config.TextColumn(
+                                "PIC + Contact",
+                                disabled=True,
+                            ),
+                            "Gmaps": st.column_config.TextColumn(
+                                "Gmaps",
+                                disabled=True,
+                            ),
+                            "SOW": st.column_config.TextColumn(
+                                "SOW",
+                                disabled=True,
+                            ),
+                        },
                     )
+
+                    # ----------------------------------------------------------
+                    # MAP BACK TO ORIGINAL DATAFRAME
+                    # ----------------------------------------------------------
+
+                    selected_mask = (
+                        edited_display_df[
+                            "Pilih"
+                        ]
+                        == True
+                    )
+
+                    selected_row_indices = (
+                        edited_display_df.index[
+                            selected_mask
+                        ]
+                        .tolist()
+                    )
+
+                    if selected_row_indices:
+
+                        selected_sites = (
+                            filtered_df.iloc[
+                                selected_row_indices
+                            ]
+                            .copy()
+                        )
+
+                    else:
+
+                        selected_sites = (
+                            pd.DataFrame()
+                        )
+
+                # ==============================================================
+                # MAINTENANCE
+                # ==============================================================
+
+                elif is_maintenance:
+
+                    # Maintenance tidak menggunakan site selection.
+                    selected_sites = pd.DataFrame()
+
+                    st.markdown("---")
+
+                    st.success(
+                        f"🔧 **{selected_sow_type}** dipilih.\n\n"
+                        "Nomor WO dapat dikosongkan dan "
+                        "tidak ada pemilihan site."
+                    )
+
+                # ----------------------------------------------------------------
+                # GENERATE BUTTON
+                # ----------------------------------------------------------------
+
+                can_generate = False
+
+                if is_maintenance:
+
+                    can_generate = True
+
+                elif (
+                    selected_wo
+                    and selected_wo
+                    != "- Tidak ada WO -"
+                    and not selected_sites.empty
+                ):
+
+                    can_generate = True
+
+                if can_generate:
 
                     st.markdown("---")
 
@@ -1968,226 +2341,270 @@ def show_spk_page():
                             st.stop()
 
                         # ======================================================
-                        # SELECTED SITES
+                        # VALIDATE NORMAL SITE
                         # ======================================================
 
-                        if "Pilih" in edited_df.columns:
-
-                            selected_sites = (
-                                edited_df[
-                                    edited_df[
-                                        "Pilih"
-                                    ] == True
-                                ]
-                                .copy()
-                            )
-
-                        else:
-
-                            selected_sites = (
-                                pd.DataFrame()
-                            )
-
-                        if selected_sites.empty:
+                        if (
+                            not is_maintenance
+                            and selected_sites.empty
+                        ):
 
                             st.error(
                                 "❌ Silakan centang minimal "
                                 "satu site terlebih dahulu."
                             )
 
+                            st.stop()
+
+                        # ======================================================
+                        # MAINTENANCE
+                        # ======================================================
+
+                        if is_maintenance:
+
+                            # --------------------------------------------------
+                            # WO HARUS KOSONG
+                            # --------------------------------------------------
+
+                            selected_wo_for_save = ""
+
+                            # --------------------------------------------------
+                            # LOCATION
+                            # --------------------------------------------------
+
+                            auto_lokasi = "-"
+
+                            # --------------------------------------------------
+                            # TARGET DATABASE
+                            # --------------------------------------------------
+
+                            target_db_name = SHEET_CONS
+
+                        # ======================================================
+                        # NORMAL SURVEY / CONS
+                        # ======================================================
+
                         else:
 
-                            with st.spinner(
-                                "Memproses dokumen PDF SPK "
-                                "& memperbarui Database..."
+                            selected_wo_for_save = (
+                                safe_str(
+                                    selected_wo
+                                )
+                            )
+
+                            provinces = (
+                                selected_sites[
+                                    "col_province"
+                                ]
+                                .dropna()
+                                .astype(str)
+                                .str.strip()
+                                .tolist()
+                            )
+
+                            unique_provinces = sorted(
+                                {
+                                    p
+                                    for p in provinces
+                                    if p and p != "-"
+                                }
+                            )
+
+                            auto_lokasi = (
+                                ", ".join(
+                                    unique_provinces
+                                )
+                                if unique_provinces
+                                else "Jawa Tengah"
+                            )
+
+                            target_db_name = (
+                                SHEET_SURVEY
+                                if is_survey
+                                else SHEET_CONS
+                            )
+
+                        with st.spinner(
+                            "Memproses dokumen PDF SPK "
+                            "& memperbarui Database..."
+                        ):
+
+                            # --------------------------------------------------
+                            # MATCH SOW
+                            # --------------------------------------------------
+
+                            matched_sow_df = (
+                                pd.DataFrame()
+                            )
+
+                            if (
+                                not df_master_sow.empty
                             ):
 
-                                # --------------------------------------------------
-                                # MATCH SOW
-                                # --------------------------------------------------
+                                kode_col = (
+                                    df_master_sow.columns[
+                                        0
+                                    ]
+                                )
 
                                 matched_sow_df = (
-                                    pd.DataFrame()
-                                )
-
-                                if (
-                                    not df_master_sow.empty
-                                ):
-
-                                    kode_col = (
-                                        df_master_sow.columns[
-                                            0
-                                        ]
-                                    )
-
-                                    matched_sow_df = (
+                                    df_master_sow[
                                         df_master_sow[
-                                            df_master_sow[
-                                                kode_col
-                                            ]
-                                            .astype(str)
-                                            .str.strip()
-                                            .str.lower()
-                                            ==
-                                            safe_str(
-                                                selected_sow_type
-                                            ).lower()
+                                            kode_col
                                         ]
-                                    )
-
-                                # --------------------------------------------------
-                                # LOCATION
-                                # --------------------------------------------------
-
-                                provinces = (
-                                    selected_sites[
-                                        "col_province"
+                                        .astype(str)
+                                        .str.strip()
+                                        .str.lower()
+                                        ==
+                                        safe_str(
+                                            selected_sow_type
+                                        ).lower()
                                     ]
-                                    .dropna()
-                                    .astype(str)
-                                    .str.strip()
-                                    .tolist()
                                 )
 
-                                # FIX:
-                                # Hindari nested sorted/list/set/list-comprehension
-                                # yang sebelumnya berpotensi menyebabkan syntax
-                                # error saat proses editing file.
+                            # --------------------------------------------------
+                            # TARGET SHEET
+                            # --------------------------------------------------
 
-                                unique_provinces = sorted(
-                                    {
-                                        p
-                                        for p in provinces
-                                        if p and p != "-"
-                                    }
+                            target_sheet = (
+                                ensure_spk_sheet(
+                                    sh,
+                                    target_db_name,
                                 )
+                            )
 
-                                auto_lokasi = (
-                                    ", ".join(
-                                        unique_provinces
-                                    )
-                                    if unique_provinces
-                                    else "Jawa Tengah"
+                            # --------------------------------------------------
+                            # READ EXISTING DATA
+                            # --------------------------------------------------
+
+                            existing_rows = (
+                                load_sheet_values_cached(
+                                    target_db_name
                                 )
+                            )
 
-                                # --------------------------------------------------
-                                # TARGET SHEET
-                                # --------------------------------------------------
+                            if (
+                                not existing_rows
+                                or len(existing_rows) <= 1
+                            ):
 
-                                target_db_name = (
-                                    SHEET_SURVEY
-                                    if is_survey
-                                    else SHEET_CONS
-                                )
+                                existing_rows = [
+                                    DEFAULT_SPK_HEADERS
+                                ]
 
-                                target_sheet = (
-                                    ensure_spk_sheet(
-                                        sh,
-                                        target_db_name,
-                                    )
-                                )
-
-                                # --------------------------------------------------
-                                # READ EXISTING DATA
-                                # --------------------------------------------------
-
-                                existing_rows = (
-                                    load_sheet_values_cached(
-                                        target_db_name
-                                    )
-                                )
-
-                                if (
-                                    not existing_rows
-                                    or len(existing_rows) <= 1
-                                ):
-
-                                    existing_rows = [
+                                target_sheet.update(
+                                    "A1:N1",
+                                    [
                                         DEFAULT_SPK_HEADERS
-                                    ]
-
-                                    target_sheet.update(
-                                        "A1:N1",
-                                        [
-                                            DEFAULT_SPK_HEADERS
-                                        ],
-                                        value_input_option=(
-                                            "USER_ENTERED"
-                                        ),
-                                    )
-
-                                    clear_sheet_cache(
-                                        target_db_name
-                                    )
-
-                                # --------------------------------------------------
-                                # SEQUENCE
-                                # --------------------------------------------------
-
-                                seq_number = (
-                                    get_next_spk_sequence_from_rows(
-                                        existing_rows
-                                    )
+                                    ],
+                                    value_input_option=(
+                                        "USER_ENTERED"
+                                    ),
                                 )
 
-                                no_spk = (
-                                    generate_spk_number(
+                                clear_sheet_cache(
+                                    target_db_name
+                                )
+
+                            # --------------------------------------------------
+                            # SEQUENCE
+                            # --------------------------------------------------
+
+                            seq_number = (
+                                get_next_spk_sequence_from_rows(
+                                    existing_rows
+                                )
+                            )
+
+                            no_spk = (
+                                generate_spk_number(
+                                    selected_sow_type,
+                                    sequence_num=seq_number,
+                                )
+                            )
+
+                            # --------------------------------------------------
+                            # METADATA
+                            # --------------------------------------------------
+
+                            spk_metadata = {
+                                "no_spk": no_spk,
+                                "proyek": proyek_input,
+                                "pekerjaan": pekerjaan_input,
+                                "lokasi": auto_lokasi,
+                                "pic_name": final_pic_name,
+                                "pic_phone": pic_phone,
+                                "sow_type": selected_sow_type,
+                            }
+
+                            # --------------------------------------------------
+                            # PDF
+                            # --------------------------------------------------
+
+                            (
+                                no_spk,
+                                pdf_bytes,
+                            ) = (
+                                generate_spk_pdf_bytes(
+                                    selected_wo_for_save,
+                                    selected_sites,
+                                    spk_metadata,
+                                    matched_sow_df,
+                                )
+                            )
+
+                            safe_filename = (
+                                f"SPK_"
+                                f"{no_spk.replace('/', '_')}"
+                                f".pdf"
+                            )
+
+                            now = datetime.datetime.now()
+
+                            current_date_str = (
+                                now.strftime(
+                                    "%d/%m/%Y"
+                                )
+                            )
+
+                            current_time_str = (
+                                now.strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+                            )
+
+                            new_rows = []
+
+                            # ==================================================
+                            # MAINTENANCE ROW
+                            # ==================================================
+
+                            if is_maintenance:
+
+                                new_rows.append(
+                                    [
+                                        current_date_str,
+                                        no_spk,
+                                        "",
+                                        pekerjaan_input,
+                                        "PT CLX",
+                                        "",
+                                        "",
                                         selected_sow_type,
-                                        sequence_num=seq_number,
-                                    )
+                                        current_time_str,
+                                        final_pic_name,
+                                        "",
+                                        "",
+                                        "",
+                                        STATUS_PENDING,
+                                    ]
                                 )
 
-                                # --------------------------------------------------
-                                # METADATA
-                                # --------------------------------------------------
+                            # ==================================================
+                            # NORMAL SITE ROWS
+                            # ==================================================
 
-                                spk_metadata = {
-                                    "no_spk": no_spk,
-                                    "proyek": proyek_input,
-                                    "pekerjaan": pekerjaan_input,
-                                    "lokasi": auto_lokasi,
-                                    "pic_name": final_pic_name,
-                                    "pic_phone": pic_phone,
-                                    "sow_type": selected_sow_type,
-                                }
-
-                                # --------------------------------------------------
-                                # PDF
-                                # --------------------------------------------------
-
-                                (
-                                    no_spk,
-                                    pdf_bytes,
-                                ) = (
-                                    generate_spk_pdf_bytes(
-                                        selected_wo,
-                                        selected_sites,
-                                        spk_metadata,
-                                        matched_sow_df,
-                                    )
-                                )
-
-                                safe_filename = (
-                                    f"SPK_"
-                                    f"{no_spk.replace('/', '_')}"
-                                    f".pdf"
-                                )
-
-                                now = datetime.datetime.now()
-
-                                current_date_str = (
-                                    now.strftime(
-                                        "%d/%m/%Y"
-                                    )
-                                )
-
-                                current_time_str = (
-                                    now.strftime(
-                                        "%Y-%m-%d %H:%M:%S"
-                                    )
-                                )
-
-                                new_rows = []
+                            else:
 
                                 for _, row in (
                                     selected_sites.iterrows()
@@ -2213,9 +2630,7 @@ def show_spk_page():
                                         [
                                             current_date_str,
                                             no_spk,
-                                            safe_str(
-                                                selected_wo
-                                            ),
+                                            selected_wo_for_save,
                                             pekerjaan_input,
                                             "PT CLX",
                                             site_name_val,
@@ -2230,22 +2645,45 @@ def show_spk_page():
                                         ]
                                     )
 
-                                # --------------------------------------------------
-                                # APPEND ROWS
-                                # --------------------------------------------------
+                            # --------------------------------------------------
+                            # APPEND ROWS
+                            # --------------------------------------------------
 
-                                if new_rows:
+                            if new_rows:
 
-                                    target_sheet.append_rows(
-                                        new_rows,
-                                        value_input_option=(
-                                            "USER_ENTERED"
-                                        ),
-                                    )
+                                target_sheet.append_rows(
+                                    new_rows,
+                                    value_input_option=(
+                                        "USER_ENTERED"
+                                    ),
+                                )
 
-                                    clear_sheet_cache(
-                                        target_db_name
-                                    )
+                                clear_sheet_cache(
+                                    target_db_name
+                                )
+
+                            # --------------------------------------------------
+                            # SUCCESS
+                            # --------------------------------------------------
+
+                            if is_maintenance:
+
+                                st.success(
+                                    f"✅ SPK `{no_spk}` "
+                                    f"untuk **{selected_sow_type}** "
+                                    "berhasil dibuat & dikirim "
+                                    "ke COO Dashboard untuk Approval!"
+                                )
+
+                                st.info(
+                                    "🔧 **Maintenance Information**\n\n"
+                                    "• No. WO: **kosong**\n"
+                                    f"• SOW: **{selected_sow_type}**\n"
+                                    f"• Pekerjaan: **{pekerjaan_input}**\n"
+                                    f"• PIC: **{final_pic_name}**"
+                                )
+
+                            else:
 
                                 st.success(
                                     f"✅ SPK `{no_spk}` "
@@ -2253,31 +2691,31 @@ def show_spk_page():
                                     "ke COO Dashboard untuk Approval!"
                                 )
 
-                                if (
-                                    safe_str(
-                                        selected_pic
-                                    ).upper()
-                                    == "IN HOUSE"
-                                ):
+                            if (
+                                safe_str(
+                                    selected_pic
+                                ).upper()
+                                == "IN HOUSE"
+                            ):
 
-                                    st.info(
-                                        f"🏢 **IN HOUSE**\n\n"
-                                        f"Nama Penanggung Jawab: "
-                                        f"**{final_pic_name}**\n\n"
-                                        f"Nilai yang disimpan ke "
-                                        f"kolom **J (Mitra)**: "
-                                        f"**{final_pic_name}**"
-                                    )
-
-                                st.download_button(
-                                    label=(
-                                        "📥 Download File PDF SPK (Draft)"
-                                    ),
-                                    data=pdf_bytes,
-                                    file_name=safe_filename,
-                                    mime="application/pdf",
-                                    type="primary",
+                                st.info(
+                                    f"🏢 **IN HOUSE**\n\n"
+                                    f"Nama Penanggung Jawab: "
+                                    f"**{final_pic_name}**\n\n"
+                                    f"Nilai yang disimpan ke "
+                                    f"kolom **J (Mitra)**: "
+                                    f"**{final_pic_name}**"
                                 )
+
+                            st.download_button(
+                                label=(
+                                    "📥 Download File PDF SPK (Draft)"
+                                ),
+                                data=pdf_bytes,
+                                file_name=safe_filename,
+                                mime="application/pdf",
+                                type="primary",
+                            )
 
         except Exception as e:
 
@@ -2632,7 +3070,8 @@ def show_spk_page():
 
                                     if (
                                         current_site
-                                        == safe_str(
+                                        ==
+                                        safe_str(
                                             selected_site_to
                                         )
                                     ):
