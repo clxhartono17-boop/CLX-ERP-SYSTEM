@@ -1,6 +1,31 @@
+```python
+# ==============================================================================
+# SPK.PY
+# ERP - SURAT PERINTAH KERJA
+#
+# VERSION:
+# SPK.PY V2.2 FINAL - ANTI 429
+#
+# MAJOR IMPROVEMENTS:
+# 1. Cached Google Sheets READ
+# 2. No worksheet.cell() inside loops
+# 3. No worksheet.update_cell() inside loops
+# 4. Batch update for COO APPROVE
+# 5. Batch update for COO REJECT
+# 6. Batch update for TAKE OVER
+# 7. Batch update for Status Approval initialization
+# 8. Cached Query / Master Dropdown / Master SOW
+# 9. Cache invalidation after WRITE
+# 10. DataFrame used as the source for row matching
+# 11. Reduced Google Sheets API traffic
+# 12. Existing business logic preserved
+# ==============================================================================
+
 import datetime
 import io
 import os
+import string
+
 import pandas as pd
 import streamlit as st
 
@@ -26,8 +51,12 @@ from core.database import get_google_sheet_connection
 # CONFIGURATION
 # ==============================================================================
 
-# PIN Rahasia untuk Login COO
 COO_PIN_SECRET = "1234"
+
+# TTL cache.
+# Tujuannya supaya perubahan widget / rerun Streamlit tidak selalu
+# menyebabkan READ baru ke Google Sheets.
+SHEET_CACHE_TTL = 120
 
 
 # ==============================================================================
@@ -36,14 +65,12 @@ COO_PIN_SECRET = "1234"
 
 PASTEL_ORANGE_CSS = """
 <style>
-    /* 1. Paksa warna utama aplikasi ke mode terang */
     .stApp,
     [data-testid="stAppViewContainer"] {
         background-color: #FAFAFA !important;
         color: #2D3748 !important;
     }
 
-    /* 2. Fix Dropdown / Selectbox */
     div[data-baseweb="select"] > div,
     div[data-baseweb="select"] > div * {
         background-color: #FFE5D9 !important;
@@ -72,7 +99,6 @@ PASTEL_ORANGE_CSS = """
         color: #9C4221 !important;
     }
 
-    /* 3. Text Input */
     div[data-baseweb="input"] > div,
     div[data-baseweb="input"] input {
         background-color: #FFFFFF !important;
@@ -80,7 +106,6 @@ PASTEL_ORANGE_CSS = """
         border-color: #FFCAD4 !important;
     }
 
-    /* 4. Highlight Kode WO */
     code {
         background-color: #FFE5D9 !important;
         color: #C05621 !important;
@@ -90,7 +115,6 @@ PASTEL_ORANGE_CSS = """
         border-radius: 6px !important;
     }
 
-    /* 5. FIX TABEL */
     div[data-testid="stDataEditor"],
     div[data-testid="stDataEditor"] > div,
     .dgb-grid,
@@ -98,7 +122,6 @@ PASTEL_ORANGE_CSS = """
         background-color: #FFFFFF !important;
     }
 
-    /* 6. Highlight IN HOUSE */
     div[data-testid="stAlert"] {
         border-radius: 8px !important;
     }
@@ -107,23 +130,67 @@ PASTEL_ORANGE_CSS = """
 
 
 # ==============================================================================
-# HELPER - HEADER / COLUMN
+# HELPER - GOOGLE SHEETS CACHE
+# ==============================================================================
+
+@st.cache_data(
+    ttl=SHEET_CACHE_TTL,
+    show_spinner=False,
+)
+def get_cached_sheet_values(sheet_name):
+    """
+    Membaca seluruh isi worksheet dan menyimpannya di Streamlit cache.
+
+    PENTING:
+    Fungsi ini adalah salah satu titik utama pencegahan 429.
+
+    Selama TTL masih aktif:
+        get_all_values() TIDAK dipanggil ulang.
+
+    Parameter hanya sheet_name sehingga cache tidak bergantung
+    pada object worksheet / connection.
+    """
+
+    sh = get_google_sheet_connection()
+
+    if not sh:
+        return []
+
+    worksheet = sh.worksheet(sheet_name)
+
+    return worksheet.get_all_values()
+
+
+def clear_spk_sheet_cache():
+    """
+    Clear cache READ milik halaman SPK.
+
+    Dipanggil setelah WRITE agar data baru dapat terbaca
+    tanpa harus menunggu TTL.
+    """
+
+    try:
+        get_cached_sheet_values.clear()
+    except Exception:
+        pass
+
+
+# ==============================================================================
+# HELPER - SAFE STRING / HEADER
 # ==============================================================================
 
 def normalize_header(value):
     """
-    Membersihkan nama header:
-    - convert ke string
-    - strip spasi
-    - menghilangkan spasi ganda
+    Membersihkan nama header.
     """
 
     if value is None:
         return ""
 
-    text = str(value).replace("\n", " ").replace("\r", " ").strip()
+    text = str(value).replace("\n", " ")
+    text = text.replace("\r", " ")
+    text = text.strip()
 
-    # Bersihkan multiple spaces
     text = " ".join(text.split())
 
     return text
@@ -151,10 +218,7 @@ def find_column(df, candidates, fallback=None):
     """
     Mencari nama kolom secara fleksibel.
 
-    Contoh:
-    candidates = ["Date SPK", "Tanggal SPK", "Date"]
-
-    Sistem akan mencoba exact match terlebih dahulu,
+    Exact match terlebih dahulu,
     kemudian partial match.
     """
 
@@ -194,13 +258,253 @@ def find_column(df, candidates, fallback=None):
     return fallback
 
 
-def ensure_status_column(sheet, df):
+# ==============================================================================
+# HELPER - DATAFRAME FROM SHEET VALUES
+# ==============================================================================
+
+def dataframe_from_sheet_values(sheet_values):
+    """
+    Mengubah hasil get_all_values() menjadi DataFrame secara aman.
+    """
+
+    if not sheet_values:
+        return pd.DataFrame()
+
+    if len(sheet_values) <= 1:
+        return pd.DataFrame()
+
+    headers = [
+        normalize_header(h)
+        for h in sheet_values[0]
+    ]
+
+    max_cols = max(
+        len(headers),
+        max(
+            [
+                len(row)
+                for row in sheet_values[1:]
+            ],
+            default=0,
+        ),
+    )
+
+    while len(headers) < max_cols:
+        headers.append(
+            f"Column_{len(headers) + 1}"
+        )
+
+    normalized_data = []
+
+    for row in sheet_values[1:]:
+
+        row_copy = list(row)
+
+        while len(row_copy) < max_cols:
+            row_copy.append("")
+
+        normalized_data.append(
+            row_copy[:max_cols]
+        )
+
+    df = pd.DataFrame(
+        normalized_data,
+        columns=headers,
+    )
+
+    return normalize_dataframe_headers(df)
+
+
+# ==============================================================================
+# HELPER - A1 COLUMN
+# ==============================================================================
+
+def column_number_to_letter(column_number):
+    """
+    Convert nomor kolom 1-based menjadi huruf Excel/A1.
+
+    Contoh:
+        1  -> A
+        2  -> B
+        26 -> Z
+        27 -> AA
+        28 -> AB
+    """
+
+    if column_number < 1:
+        raise ValueError(
+            "column_number harus >= 1"
+        )
+
+    result = ""
+
+    while column_number > 0:
+
+        column_number, remainder = divmod(
+            column_number - 1,
+            26,
+        )
+
+        result = (
+            chr(65 + remainder)
+            + result
+        )
+
+    return result
+
+
+def make_a1_cell(row_number, column_number):
+    """
+    Membuat alamat A1.
+
+    Contoh:
+        row=2, col=14 -> N2
+    """
+
+    return (
+        f"{column_number_to_letter(column_number)}"
+        f"{row_number}"
+    )
+
+
+# ==============================================================================
+# HELPER - BATCH UPDATE
+# ==============================================================================
+
+def batch_update_cells(
+    worksheet,
+    updates,
+):
+    """
+    Melakukan banyak update cell dalam SATU API request.
+
+    updates:
+        [
+            {
+                "row": 2,
+                "col": 14,
+                "value": "Approved by COO"
+            },
+            ...
+        ]
+
+    Tujuan utama:
+        menggantikan banyak update_cell()
+        dengan satu batch request.
+    """
+
+    if not updates:
+        return 0
+
+    batch_data = []
+
+    for item in updates:
+
+        row_number = int(
+            item["row"]
+        )
+
+        column_number = int(
+            item["col"]
+        )
+
+        value = item.get(
+            "value",
+            "",
+        )
+
+        a1_address = make_a1_cell(
+            row_number,
+            column_number,
+        )
+
+        batch_data.append(
+            {
+                "range": a1_address,
+                "values": [
+                    [value]
+                ],
+            }
+        )
+
+    # Satu WRITE request ke Google Sheets.
+    worksheet.batch_update(
+        batch_data
+    )
+
+    return len(batch_data)
+
+
+# ==============================================================================
+# HELPER - BATCH APPEND / UPDATE HEADER
+# ==============================================================================
+
+def ensure_sheet_header(
+    worksheet,
+    headers,
+):
+    """
+    Memastikan header sheet tersedia.
+
+    Hanya melakukan WRITE jika diperlukan.
+    """
+
+    headers = [
+        normalize_header(h)
+        for h in headers
+    ]
+
+    try:
+        current_values = (
+            worksheet.get_all_values()
+        )
+    except Exception:
+        current_values = []
+
+    if not current_values:
+
+        worksheet.update(
+            "1:1",
+            [headers],
+        )
+
+        return headers
+
+    current_headers = [
+        normalize_header(h)
+        for h in current_values[0]
+    ]
+
+    if current_headers != headers:
+
+        worksheet.update(
+            "1:1",
+            [headers],
+        )
+
+        return headers
+
+    return current_headers
+
+
+# ==============================================================================
+# HELPER - STATUS APPROVAL
+# ==============================================================================
+
+def ensure_status_column(
+    sheet,
+    df,
+    raw_rows=None,
+):
     """
     Memastikan kolom Status Approval tersedia.
 
-    Jika belum ada:
-    - tambahkan ke Google Sheet
-    - update DataFrame
+    IMPORTANT:
+    Tidak lagi menggunakan update_cell() satu per satu.
+
+    Jika kolom belum ada:
+        1x update header
+        1x batch_update seluruh status lama
     """
 
     df = normalize_dataframe_headers(df)
@@ -218,48 +522,90 @@ def ensure_status_column(sheet, df):
     if status_col:
         return df, status_col
 
-    # Kolom belum ada
     status_col = "Status Approval"
 
     try:
 
-        # Ambil header aktual dari sheet
-        headers = sheet.row_values(1)
+        # --------------------------------------------------------------
+        # Ambil header dari DataFrame yang SUDAH ada di memory.
+        # Tidak melakukan row_values() lagi.
+        # --------------------------------------------------------------
 
-        headers = [
-            normalize_header(h)
-            for h in headers
-        ]
+        headers = list(
+            df.columns
+        )
 
-        # Tambahkan header baru
-        headers.append(status_col)
+        # Jika DataFrame kosong tetapi raw_rows tersedia,
+        # gunakan header dari raw_rows.
+        if (
+            not headers
+            and raw_rows
+            and len(raw_rows) > 0
+        ):
 
-        # Update row header
+            headers = [
+                normalize_header(h)
+                for h in raw_rows[0]
+            ]
+
+        # Tambahkan header baru.
+        headers.append(
+            status_col
+        )
+
+        # --------------------------------------------------------------
+        # WRITE HEADER
+        # --------------------------------------------------------------
+
         sheet.update(
             "1:1",
             [headers],
         )
 
-        # Tambahkan default value untuk data lama
-        if len(df) > 0:
+        # --------------------------------------------------------------
+        # BATCH STATUS DATA
+        # --------------------------------------------------------------
 
-            status_values = [
-                "Pending COO Approval"
-                for _ in range(len(df))
-            ]
+        if raw_rows:
 
-            for idx, value in enumerate(
-                status_values,
-                start=2
+            data_row_count = max(
+                0,
+                len(raw_rows) - 1,
+            )
+
+        else:
+
+            data_row_count = len(df)
+
+        if data_row_count > 0:
+
+            status_column_index = len(
+                headers
+            )
+
+            status_updates = []
+
+            for excel_row_idx in range(
+                2,
+                data_row_count + 2,
             ):
 
-                sheet.update_cell(
-                    idx,
-                    len(headers),
-                    value,
+                status_updates.append(
+                    {
+                        "row": excel_row_idx,
+                        "col": status_column_index,
+                        "value": "Pending COO Approval",
+                    }
                 )
 
-        df[status_col] = "Pending COO Approval"
+            batch_update_cells(
+                sheet,
+                status_updates,
+            )
+
+        df[status_col] = (
+            "Pending COO Approval"
+        )
 
     except Exception as e:
 
@@ -268,13 +614,15 @@ def ensure_status_column(sheet, df):
             f"ditambahkan ke Google Sheet: {e}"
         )
 
-        df[status_col] = "Pending COO Approval"
+        df[status_col] = (
+            "Pending COO Approval"
+        )
 
     return df, status_col
 
 
 # ==============================================================================
-# HELPER - PENANGGUNG JAWAB
+# HELPER - PIC
 # ==============================================================================
 
 def resolve_pic_name(
@@ -282,13 +630,7 @@ def resolve_pic_name(
     manual_pic_name="",
 ):
     """
-    Menentukan nama Penanggung Jawab yang benar.
-
-    Jika dropdown memilih IN HOUSE:
-        gunakan nama manual.
-
-    Jika bukan IN HOUSE:
-        gunakan nama dari dropdown.
+    Menentukan nama Penanggung Jawab.
     """
 
     selected_pic = (
@@ -310,7 +652,7 @@ def resolve_pic_name(
 
 
 # ==============================================================================
-# 1. HELPER: GENERATE NOMOR SPK
+# HELPER - GENERATE NOMOR SPK
 # ==============================================================================
 
 def generate_spk_number(
@@ -318,7 +660,7 @@ def generate_spk_number(
     sequence_num=1,
 ):
     """
-    Menghasilkan Nomor SPK:
+    Format:
     0001/CLX/SPK/CONS/VII/2026
     """
 
@@ -350,7 +692,9 @@ def generate_spk_number(
         else "CONS"
     )
 
-    seq_str = f"{sequence_num:04d}"
+    seq_str = (
+        f"{sequence_num:04d}"
+    )
 
     return (
         f"{seq_str}/CLX/SPK/"
@@ -359,7 +703,29 @@ def generate_spk_number(
 
 
 # ==============================================================================
-# 2. GENERATE PDF SPK
+# HELPER - DEFAULT SPK HEADERS
+# ==============================================================================
+
+DEFAULT_SPK_HEADERS = [
+    "Date SPK",
+    "No. SPK",
+    "No. WO",
+    "Pekerjaan",
+    "EPC",
+    "Site Name",
+    "Charger Type",
+    "WO Release",
+    "WO End",
+    "Mitra",
+    "Date SPK (Take Over)",
+    "No. SPK (Take Over)",
+    "Mitra (Take Over)",
+    "Status Approval",
+]
+
+
+# ==============================================================================
+# GENERATE PDF SPK
 # ==============================================================================
 
 def generate_spk_pdf_bytes(
@@ -566,7 +932,7 @@ def generate_spk_pdf_bytes(
     pic_name = (
         spk_metadata.get(
             "pic_name",
-            "-"
+            "-",
         )
         or "-"
     )
@@ -574,7 +940,7 @@ def generate_spk_pdf_bytes(
     pic_phone = (
         spk_metadata.get(
             "pic_phone",
-            "-"
+            "-",
         )
         or "-"
     )
@@ -752,9 +1118,14 @@ def generate_spk_pdf_bytes(
         ),
     ]
 
-    sow_rows = [sow_headers]
+    sow_rows = [
+        sow_headers
+    ]
 
-    if not matched_sow_df.empty:
+    if (
+        matched_sow_df is not None
+        and not matched_sow_df.empty
+    ):
 
         for idx, (_, r) in enumerate(
             matched_sow_df.iterrows(),
@@ -906,70 +1277,77 @@ def generate_spk_pdf_bytes(
         ),
     ]
 
-    site_rows = [site_headers]
+    site_rows = [
+        site_headers
+    ]
 
-    for idx, (_, row) in enumerate(
-        selected_sites.iterrows(),
-        1,
+    if (
+        selected_sites is not None
+        and not selected_sites.empty
     ):
 
-        site_rows.append(
-            [
-                Paragraph(
-                    str(idx),
-                    cell_body,
-                ),
-                Paragraph(
-                    str(
-                        row.get(
-                            "col_site",
-                            "-",
-                        )
+        for idx, (_, row) in enumerate(
+            selected_sites.iterrows(),
+            1,
+        ):
+
+            site_rows.append(
+                [
+                    Paragraph(
+                        str(idx),
+                        cell_body,
                     ),
-                    cell_body,
-                ),
-                Paragraph(
-                    str(
-                        row.get(
-                            "col_charge",
-                            "-",
-                        )
+                    Paragraph(
+                        str(
+                            row.get(
+                                "col_site",
+                                "-",
+                            )
+                        ),
+                        cell_body,
                     ),
-                    cell_body,
-                ),
-                Paragraph(
-                    str(selected_wo),
-                    cell_body,
-                ),
-                Paragraph(
-                    str(
-                        row.get(
-                            "col_province",
-                            "-",
-                        )
+                    Paragraph(
+                        str(
+                            row.get(
+                                "col_charge",
+                                "-",
+                            )
+                        ),
+                        cell_body,
                     ),
-                    cell_body,
-                ),
-                Paragraph(
-                    str(
-                        row.get(
-                            "col_pic",
-                            "-",
-                        )
+                    Paragraph(
+                        str(selected_wo),
+                        cell_body,
                     ),
-                    cell_body,
-                ),
-                Paragraph(
-                    str(
-                        row.get(
-                            "col_gmaps",
-                            "-",
-                        )
+                    Paragraph(
+                        str(
+                            row.get(
+                                "col_province",
+                                "-",
+                            )
+                        ),
+                        cell_body,
                     ),
-                    cell_body,
-                ),
-            ]
-        )
+                    Paragraph(
+                        str(
+                            row.get(
+                                "col_pic",
+                                "-",
+                            )
+                        ),
+                        cell_body,
+                    ),
+                    Paragraph(
+                        str(
+                            row.get(
+                                "col_gmaps",
+                                "-",
+                            )
+                        ),
+                        cell_body,
+                    ),
+                ]
+            )
 
     col_widths = [
         0.3 * inch,
@@ -1131,6 +1509,10 @@ def show_spk_page():
         unsafe_allow_html=True,
     )
 
+    # ==========================================================================
+    # CONNECTION
+    # ==========================================================================
+
     sh = get_google_sheet_connection()
 
     if not sh:
@@ -1175,97 +1557,95 @@ def show_spk_page():
 
         try:
 
-            query_sheet = sh.worksheet("Query")
+            # ==================================================================
+            # QUERY - CACHED
+            # ==================================================================
 
             query_rows = (
-                query_sheet.get_all_values()
+                get_cached_sheet_values(
+                    "Query"
+                )
             )
 
-            # ------------------------------------------------------------------
-            # MASTER DROPDOWN
-            # ------------------------------------------------------------------
+            # ==================================================================
+            # MASTER DROPDOWN - CACHED
+            # ==================================================================
 
             try:
 
-                dropdown_sheet = sh.worksheet(
-                    "Master Dropdown"
-                )
-
                 dropdown_data = (
-                    dropdown_sheet.get_all_values()
-                )
-
-                df_dropdown = (
-                    pd.DataFrame(
-                        dropdown_data[1:],
-                        columns=dropdown_data[0],
-                    )
-                    if len(dropdown_data) > 1
-                    else pd.DataFrame()
-                )
-
-                df_dropdown = (
-                    df_dropdown.loc[
-                        :,
-                        ~df_dropdown.columns.duplicated(),
-                    ]
-                    .copy()
-                )
-
-                df_dropdown = (
-                    normalize_dataframe_headers(
-                        df_dropdown
+                    get_cached_sheet_values(
+                        "Master Dropdown"
                     )
                 )
+
+                df_dropdown = (
+                    dataframe_from_sheet_values(
+                        dropdown_data
+                    )
+                )
+
+                if not df_dropdown.empty:
+
+                    df_dropdown = (
+                        df_dropdown.loc[
+                            :,
+                            ~df_dropdown.columns.duplicated(),
+                        ]
+                        .copy()
+                    )
+
+                    df_dropdown = (
+                        normalize_dataframe_headers(
+                            df_dropdown
+                        )
+                    )
 
             except Exception:
 
                 df_dropdown = pd.DataFrame()
 
-            # ------------------------------------------------------------------
-            # MASTER SOW
-            # ------------------------------------------------------------------
+            # ==================================================================
+            # MASTER SOW - CACHED
+            # ==================================================================
 
             try:
 
-                sow_sheet = sh.worksheet(
-                    "Master SOW"
-                )
-
                 sow_data = (
-                    sow_sheet.get_all_values()
-                )
-
-                df_master_sow = (
-                    pd.DataFrame(
-                        sow_data[1:],
-                        columns=sow_data[0],
-                    )
-                    if len(sow_data) > 1
-                    else pd.DataFrame()
-                )
-
-                df_master_sow = (
-                    df_master_sow.loc[
-                        :,
-                        ~df_master_sow.columns.duplicated(),
-                    ]
-                    .copy()
-                )
-
-                df_master_sow = (
-                    normalize_dataframe_headers(
-                        df_master_sow
+                    get_cached_sheet_values(
+                        "Master SOW"
                     )
                 )
+
+                df_master_sow = (
+                    dataframe_from_sheet_values(
+                        sow_data
+                    )
+                )
+
+                if not df_master_sow.empty:
+
+                    df_master_sow = (
+                        df_master_sow.loc[
+                            :,
+                            ~df_master_sow.columns.duplicated(),
+                        ]
+                        .copy()
+                    )
+
+                    df_master_sow = (
+                        normalize_dataframe_headers(
+                            df_master_sow
+                        )
+                    )
 
             except Exception:
 
                 df_master_sow = pd.DataFrame()
 
-            # ------------------------------------------------------------------
-            # QUERY
-            # ------------------------------------------------------------------
+            # ==================================================================
+            # QUERY DATAFRAME
+            # ==================================================================
 
             if (
                 not query_rows
@@ -1278,19 +1658,15 @@ def show_spk_page():
 
             else:
 
-                header = [
-                    normalize_header(h)
-                    for h in query_rows[0]
-                ]
-
-                df_query = pd.DataFrame(
-                    query_rows[1:],
-                    columns=header,
+                df_query = (
+                    dataframe_from_sheet_values(
+                        query_rows
+                    )
                 )
 
-                # --------------------------------------------------------------
+                # ==============================================================
                 # SOW DROPDOWN
-                # --------------------------------------------------------------
+                # ==============================================================
 
                 sow_dropdown_list = []
 
@@ -1332,9 +1708,9 @@ def show_spk_page():
                     st.columns(3)
                 )
 
-                # --------------------------------------------------------------
+                # ==============================================================
                 # COLUMN 1
-                # --------------------------------------------------------------
+                # ==============================================================
 
                 with col1:
 
@@ -1438,15 +1814,11 @@ def show_spk_page():
                         )
                     )
 
-                # --------------------------------------------------------------
+                # ==============================================================
                 # COLUMN 2
-                # --------------------------------------------------------------
+                # ==============================================================
 
                 with col2:
-
-                    # ==========================================================
-                    # MASTER MITRA
-                    # ==========================================================
 
                     if (
                         not df_dropdown.empty
@@ -1478,12 +1850,6 @@ def show_spk_page():
                         if str(m).strip() != ""
                     ]
 
-                    # ==========================================================
-                    # TAMBAHKAN IN HOUSE
-                    # ==========================================================
-
-                    # Hindari duplicate jika "IN HOUSE"
-                    # sudah ada di Master Dropdown.
                     mitra_list_clean = []
 
                     for m in mitra_list:
@@ -1492,36 +1858,31 @@ def show_spk_page():
                             str(m).strip().upper()
                             != "IN HOUSE"
                         ):
-                            mitra_list_clean.append(m)
 
-                    # IN HOUSE selalu tersedia
-                    # sebagai pilihan terakhir.
+                            mitra_list_clean.append(
+                                m
+                            )
+
                     mitra_list_clean.append(
                         "IN HOUSE"
                     )
 
-                    # ==========================================================
-                    # SELECTBOX MITRA
-                    # ==========================================================
-
                     selected_pic = (
                         st.selectbox(
                             "Penanggung Jawab (Mitra)",
-                            options=mitra_list_clean
-                            if mitra_list_clean
-                            else [
-                                "IN HOUSE"
-                            ],
+                            options=(
+                                mitra_list_clean
+                                if mitra_list_clean
+                                else [
+                                    "IN HOUSE"
+                                ]
+                            ),
                             key=(
                                 f"selected_pic_"
                                 f"{selected_sow_type}"
                             ),
                         )
                     )
-
-                    # ==========================================================
-                    # JIKA IN HOUSE
-                    # ==========================================================
 
                     manual_pic_name = ""
 
@@ -1551,25 +1912,15 @@ def show_spk_page():
                             )
                         )
 
-                    # ==========================================================
-                    # TENTUKAN PIC FINAL
-                    # ==========================================================
-
                     final_pic_name = resolve_pic_name(
                         selected_pic=selected_pic,
                         manual_pic_name=manual_pic_name,
                     )
 
-                    # ==========================================================
-                    # NOMOR TELEPON
-                    # ==========================================================
-
                     default_phone = (
                         "0851-8259-6296"
                     )
 
-                    # Hanya auto-fill nomor telepon
-                    # jika memilih mitra biasa.
                     if (
                         str(
                             selected_pic
@@ -1608,8 +1959,6 @@ def show_spk_page():
                                 ]
                             ).strip()
 
-                    # Untuk IN HOUSE, nomor telepon
-                    # tetap bisa diisi manual.
                     pic_phone = (
                         st.text_input(
                             "No. Telepon Penanggung Jawab",
@@ -1621,9 +1970,9 @@ def show_spk_page():
                         )
                     )
 
-                # --------------------------------------------------------------
+                # ==============================================================
                 # COLUMN 3
-                # --------------------------------------------------------------
+                # ==============================================================
 
                 with col3:
 
@@ -1641,9 +1990,9 @@ def show_spk_page():
                         "(0818-0690-9317)"
                     )
 
-                # --------------------------------------------------------------
+                # ==============================================================
                 # FILTER SITE
-                # --------------------------------------------------------------
+                # ==============================================================
 
                 if (
                     selected_wo
@@ -1742,18 +2091,18 @@ def show_spk_page():
 
                     st.markdown("---")
 
-                    # ----------------------------------------------------------
+                    # ==========================================================
                     # GENERATE SPK
-                    # ----------------------------------------------------------
+                    # ==========================================================
 
                     if st.button(
                         "🚀 Generate SPK & Save to Database Sheet",
                         type="primary",
                     ):
 
-                        # ======================================================
-                        # VALIDASI PIC IN HOUSE
-                        # ======================================================
+                        # ------------------------------------------------------
+                        # VALIDASI PIC
+                        # ------------------------------------------------------
 
                         if (
                             str(
@@ -1792,9 +2141,9 @@ def show_spk_page():
                                 ).strip()
                             )
 
-                        # ======================================================
-                        # VALIDASI NOMOR TELEPON
-                        # ======================================================
+                        # ------------------------------------------------------
+                        # VALIDASI PHONE
+                        # ------------------------------------------------------
 
                         if (
                             not pic_phone
@@ -1835,9 +2184,9 @@ def show_spk_page():
                                 "& memperbarui Database..."
                             ):
 
-                                # --------------------------------------------------
+                                # ==================================================
                                 # MATCH MASTER SOW
-                                # --------------------------------------------------
+                                # ==================================================
 
                                 matched_sow_df = (
                                     pd.DataFrame()
@@ -1870,9 +2219,9 @@ def show_spk_page():
                                         ]
                                     )
 
-                                # --------------------------------------------------
+                                # ==================================================
                                 # LOKASI
-                                # --------------------------------------------------
+                                # ==================================================
 
                                 provinces = (
                                     selected_sites[
@@ -1901,7 +2250,6 @@ def show_spk_page():
                                             )
                                         )
                                     )
-                                )
 
                                 auto_lokasi = (
                                     ", ".join(
@@ -1911,9 +2259,9 @@ def show_spk_page():
                                     else "Jawa Tengah"
                                 )
 
-                                # --------------------------------------------------
+                                # ==================================================
                                 # TARGET DB
-                                # --------------------------------------------------
+                                # ==================================================
 
                                 target_db_name = (
                                     "DB SPK Survey"
@@ -1939,78 +2287,65 @@ def show_spk_page():
                                         )
                                     )
 
-                                    target_sheet.append_row(
+                                    target_sheet.update(
+                                        "1:1",
                                         [
-                                            "Date SPK",
-                                            "No. SPK",
-                                            "No. WO",
-                                            "Pekerjaan",
-                                            "EPC",
-                                            "Site Name",
-                                            "Charger Type",
-                                            "WO Release",
-                                            "WO End",
-                                            "Mitra",
-                                            "Date SPK (Take Over)",
-                                            "No. SPK (Take Over)",
-                                            "Mitra (Take Over)",
-                                            "Status Approval",
-                                        ]
+                                            DEFAULT_SPK_HEADERS
+                                        ],
                                     )
 
-                                # --------------------------------------------------
-                                # NORMALIZE EXISTING HEADER
-                                # --------------------------------------------------
+                                # ==================================================
+                                # READ EXISTING DATA - CACHED
+                                #
+                                # Hanya satu read untuk sequence.
+                                # ==================================================
 
                                 existing_rows = (
-                                    target_sheet.get_all_values()
+                                    get_cached_sheet_values(
+                                        target_db_name
+                                    )
                                 )
 
                                 if not existing_rows:
 
-                                    target_sheet.append_row(
+                                    target_sheet.update(
+                                        "1:1",
                                         [
-                                            "Date SPK",
-                                            "No. SPK",
-                                            "No. WO",
-                                            "Pekerjaan",
-                                            "EPC",
-                                            "Site Name",
-                                            "Charger Type",
-                                            "WO Release",
-                                            "WO End",
-                                            "Mitra",
-                                            "Date SPK (Take Over)",
-                                            "No. SPK (Take Over)",
-                                            "Mitra (Take Over)",
-                                            "Status Approval",
-                                        ]
+                                            DEFAULT_SPK_HEADERS
+                                        ],
                                     )
 
-                                    existing_rows = (
-                                        target_sheet.get_all_values()
-                                    )
+                                    existing_rows = [
+                                        DEFAULT_SPK_HEADERS
+                                    ]
 
-                                # --------------------------------------------------
+                                # ==================================================
                                 # GENERATE SEQUENCE
-                                # --------------------------------------------------
+                                # ==================================================
 
                                 spk_ids = []
 
-                                for row in existing_rows[1:]:
+                                if (
+                                    existing_rows
+                                    and len(existing_rows) > 1
+                                ):
 
-                                    if (
-                                        len(row) > 1
-                                        and str(
-                                            row[1]
-                                        ).strip()
+                                    for row in (
+                                        existing_rows[1:]
                                     ):
 
-                                        spk_ids.append(
-                                            str(
+                                        if (
+                                            len(row) > 1
+                                            and str(
                                                 row[1]
                                             ).strip()
-                                        )
+                                        ):
+
+                                            spk_ids.append(
+                                                str(
+                                                    row[1]
+                                                ).strip()
+                                            )
 
                                 unique_spk_count = len(
                                     set(spk_ids)
@@ -2028,30 +2363,23 @@ def show_spk_page():
                                     )
                                 )
 
-                                # --------------------------------------------------
+                                # ==================================================
                                 # METADATA
-                                # --------------------------------------------------
+                                # ==================================================
 
                                 spk_metadata = {
                                     "no_spk": no_spk,
                                     "proyek": proyek_input,
                                     "pekerjaan": pekerjaan_input,
                                     "lokasi": auto_lokasi,
-
-                                    # ==================================================
-                                    # PENTING:
-                                    # Untuk IN HOUSE, nilai yang digunakan
-                                    # adalah nama manual.
-                                    # ==================================================
                                     "pic_name": final_pic_name,
-
                                     "pic_phone": pic_phone,
                                     "sow_type": selected_sow_type,
                                 }
 
-                                # --------------------------------------------------
+                                # ==================================================
                                 # PDF
-                                # --------------------------------------------------
+                                # ==================================================
 
                                 (
                                     no_spk,
@@ -2087,9 +2415,9 @@ def show_spk_page():
 
                                 new_rows = []
 
-                                # --------------------------------------------------
-                                # SAVE ROW
-                                # --------------------------------------------------
+                                # ==================================================
+                                # BUILD ROWS
+                                # ==================================================
 
                                 for _, row in (
                                     selected_sites.iterrows()
@@ -2109,16 +2437,6 @@ def show_spk_page():
                                         )
                                     )
 
-                                    # ==================================================
-                                    # KOLOM J = MITRA
-                                    #
-                                    # Jika mitra biasa:
-                                    #     nama mitra
-                                    #
-                                    # Jika IN HOUSE:
-                                    #     nama manual
-                                    # ==================================================
-
                                     mitra_value_for_db = (
                                         final_pic_name
                                     )
@@ -2136,12 +2454,7 @@ def show_spk_page():
                                             charger_type_val,
                                             selected_sow_type,
                                             current_time_str,
-
-                                            # ==============================
-                                            # KOLOM J
-                                            # ==============================
                                             mitra_value_for_db,
-
                                             "",
                                             "",
                                             "",
@@ -2149,21 +2462,25 @@ def show_spk_page():
                                         ]
                                     )
 
+                                # ==================================================
+                                # SAVE
+                                # ==================================================
+
                                 if new_rows:
 
                                     target_sheet.append_rows(
                                         new_rows
                                     )
 
+                                    # Setelah WRITE:
+                                    # cache sheet harus dihapus.
+                                    clear_spk_sheet_cache()
+
                                 st.success(
                                     f"✅ SPK `{no_spk}` "
                                     "berhasil dibuat & dikirim "
                                     "ke COO Dashboard untuk Approval!"
                                 )
-
-                                # ==================================================
-                                # INFO PIC
-                                # ==================================================
 
                                 if (
                                     str(
@@ -2224,15 +2541,34 @@ def show_spk_page():
                     "DB SPK Survey",
                 ],
                 horizontal=True,
+                key="takeover_db_choice",
             )
 
-            target_sheet_to = sh.worksheet(
-                db_target_type
-            )
+            # ==================================================================
+            # TAKE OVER DATABASE - CACHED
+            # ==================================================================
 
             to_rows = (
-                target_sheet_to.get_all_values()
+                get_cached_sheet_values(
+                    db_target_type
+                )
             )
+
+            try:
+
+                target_sheet_to = (
+                    sh.worksheet(
+                        db_target_type
+                    )
+                )
+
+            except Exception:
+
+                st.error(
+                    f"❌ Sheet `{db_target_type}` tidak ditemukan."
+                )
+
+                st.stop()
 
             if len(to_rows) <= 1:
 
@@ -2243,25 +2579,15 @@ def show_spk_page():
 
             else:
 
-                headers = [
-                    normalize_header(h)
-                    for h in to_rows[0]
-                ]
-
-                df_to = pd.DataFrame(
-                    to_rows[1:],
-                    columns=headers,
-                )
-
                 df_to = (
-                    normalize_dataframe_headers(
-                        df_to
+                    dataframe_from_sheet_values(
+                        to_rows
                     )
                 )
 
-                # --------------------------------------------------------------
+                # ==============================================================
                 # FIND COLUMNS
-                # --------------------------------------------------------------
+                # ==============================================================
 
                 col_site_name = find_column(
                     df_to,
@@ -2327,6 +2653,7 @@ def show_spk_page():
                                     "- Tidak Ada Site -"
                                 ]
                             ),
+                            key="takeover_site_select",
                         )
                     )
 
@@ -2392,45 +2719,55 @@ def show_spk_page():
                         st.columns(2)
                     )
 
+                    # ==========================================================
+                    # MASTER MITRA - CACHED
+                    # ==========================================================
+
                     try:
 
-                        dropdown_sheet = (
-                            sh.worksheet(
+                        dropdown_data = (
+                            get_cached_sheet_values(
                                 "Master Dropdown"
                             )
                         )
 
-                        dropdown_data = (
-                            dropdown_sheet.get_all_values()
-                        )
-
                         df_dropdown = (
-                            pd.DataFrame(
-                                dropdown_data[1:],
-                                columns=dropdown_data[0],
-                            )
-                            if len(dropdown_data) > 1
-                            else pd.DataFrame()
-                        )
-
-                        df_dropdown = (
-                            normalize_dataframe_headers(
-                                df_dropdown
+                            dataframe_from_sheet_values(
+                                dropdown_data
                             )
                         )
 
-                        mitra_col = (
-                            df_dropdown.columns[0]
-                        )
+                        if not df_dropdown.empty:
 
-                        new_mitra_list = (
-                            df_dropdown[
-                                mitra_col
-                            ]
-                            .dropna()
-                            .unique()
-                            .tolist()
-                        )
+                            df_dropdown = (
+                                normalize_dataframe_headers(
+                                    df_dropdown
+                                )
+                            )
+
+                        if (
+                            not df_dropdown.empty
+                            and len(
+                                df_dropdown.columns
+                            ) > 0
+                        ):
+
+                            mitra_col = (
+                                df_dropdown.columns[0]
+                            )
+
+                            new_mitra_list = (
+                                df_dropdown[
+                                    mitra_col
+                                ]
+                                .dropna()
+                                .unique()
+                                .tolist()
+                            )
+
+                        else:
+
+                            new_mitra_list = []
 
                     except Exception:
 
@@ -2448,6 +2785,7 @@ def show_spk_page():
                                         "Mitra Baru"
                                     ]
                                 ),
+                                key="takeover_new_mitra",
                             )
                         )
 
@@ -2471,11 +2809,17 @@ def show_spk_page():
                             "Tanggal Take Over (Otomatis)",
                             value=today_date_str,
                             disabled=True,
+                            key="takeover_date",
                         )
+
+                    # ==========================================================
+                    # TAKE OVER BUTTON
+                    # ==========================================================
 
                     if st.button(
                         "🔥 Proses & Simpan Take Over Site",
                         type="primary",
+                        key="takeover_process_button",
                     ):
 
                         with st.spinner(
@@ -2483,22 +2827,33 @@ def show_spk_page():
                             "& memperbarui sheet..."
                         ):
 
+                            # ==================================================
+                            # GENERATE SEQUENCE
+                            #
+                            # Menggunakan data yang SUDAH di-read.
+                            # Tidak melakukan read ulang.
+                            # ==================================================
+
                             spk_ids = []
 
-                            for row in to_rows[1:]:
+                            if len(to_rows) > 1:
 
-                                if (
-                                    len(row) > 1
-                                    and str(
-                                        row[1]
-                                    ).strip()
+                                for row in (
+                                    to_rows[1:]
                                 ):
 
-                                    spk_ids.append(
-                                        str(
+                                    if (
+                                        len(row) > 1
+                                        and str(
                                             row[1]
                                         ).strip()
-                                    )
+                                    ):
+
+                                        spk_ids.append(
+                                            str(
+                                                row[1]
+                                            ).strip()
+                                        )
 
                             seq_number = (
                                 len(
@@ -2516,60 +2871,79 @@ def show_spk_page():
                                 )
                             )
 
-                            # --------------------------------------------------
-                            # UPDATE TAKE OVER
-                            # --------------------------------------------------
+                            # ==================================================
+                            # TENTUKAN ROW YANG AKAN DIUPDATE
+                            #
+                            # DataFrame index 0 = Excel row 2.
+                            # ==================================================
 
-                            site_col_idx = (
-                                list(
-                                    df_to.columns
-                                ).index(
-                                    col_site_name
-                                )
-                                + 1
-                            )
-
-                            for idx, row in enumerate(
-                                to_rows[1:],
-                                start=2,
-                            ):
-
-                                if (
-                                    len(row)
-                                    >= site_col_idx
-                                    and str(
-                                        row[
-                                            site_col_idx
-                                            - 1
-                                        ]
-                                    ).strip()
-                                    == str(
+                            matching_indexes = (
+                                df_to.index[
+                                    df_to[
+                                        col_site_name
+                                    ]
+                                    .astype(str)
+                                    .str.strip()
+                                    ==
+                                    str(
                                         selected_site_to
                                     ).strip()
-                                ):
+                                ]
+                                .tolist()
+                            )
 
-                                    # K = Date Take Over
-                                    target_sheet_to.update_cell(
-                                        idx,
-                                        11,
-                                        today_date_str,
-                                    )
+                            if not matching_indexes:
 
-                                    # L = No SPK Lama
-                                    target_sheet_to.update_cell(
-                                        idx,
-                                        12,
-                                        old_spk,
-                                    )
+                                st.error(
+                                    "❌ Site tidak ditemukan "
+                                    "pada data database."
+                                )
 
-                                    # M = Mitra Baru
-                                    target_sheet_to.update_cell(
-                                        idx,
-                                        13,
-                                        new_mitra,
-                                    )
+                                st.stop()
 
-                                    break
+                            # Saat ini logic lama hanya mengubah
+                            # baris pertama yang cocok.
+                            target_df_index = (
+                                matching_indexes[0]
+                            )
+
+                            excel_row_idx = (
+                                target_df_index
+                                + 2
+                            )
+
+                            # ==================================================
+                            # K = Date Take Over
+                            # L = No SPK Lama
+                            # M = Mitra Baru
+                            #
+                            # SATU BATCH WRITE.
+                            # ==================================================
+
+                            takeover_updates = [
+                                {
+                                    "row": excel_row_idx,
+                                    "col": 11,
+                                    "value": today_date_str,
+                                },
+                                {
+                                    "row": excel_row_idx,
+                                    "col": 12,
+                                    "value": old_spk,
+                                },
+                                {
+                                    "row": excel_row_idx,
+                                    "col": 13,
+                                    "value": new_mitra,
+                                },
+                            ]
+
+                            batch_update_cells(
+                                target_sheet_to,
+                                takeover_updates,
+                            )
+
+                            clear_spk_sheet_cache()
 
                             st.success(
                                 f"🎉 Take Over Berhasil!\n\n"
@@ -2616,6 +2990,7 @@ def show_spk_page():
             "Masukkan PIN Khusus COO:",
             type="password",
             placeholder="Masukkan PIN...",
+            key="coo_pin_input",
         )
 
         if pin_input == COO_PIN_SECRET:
@@ -2638,15 +3013,46 @@ def show_spk_page():
             try:
 
                 # ==============================================================
-                # LOAD SHEET
+                # LOAD SHEET OBJECT
                 # ==============================================================
 
-                sheet_appr = sh.worksheet(
-                    db_approval_type
-                )
+                try:
+
+                    sheet_appr = sh.worksheet(
+                        db_approval_type
+                    )
+
+                except Exception:
+
+                    st.error(
+                        f"❌ Sheet `{db_approval_type}` "
+                        "tidak ditemukan."
+                    )
+
+                    st.stop()
+
+                # ==============================================================
+                # SINGLE CACHED READ
+                #
+                # INI SANGAT PENTING:
+                #
+                # Sebelum:
+                #     get_all_values()
+                #     cell()
+                #     cell()
+                #     cell()
+                #     ...
+                #
+                # Sekarang:
+                #     1x cached get_all_values()
+                #
+                # Semua pencarian row dilakukan dari DataFrame.
+                # ==============================================================
 
                 appr_rows = (
-                    sheet_appr.get_all_values()
+                    get_cached_sheet_values(
+                        db_approval_type
+                    )
                 )
 
                 if len(appr_rows) <= 1:
@@ -2662,54 +3068,9 @@ def show_spk_page():
                     # CREATE DATAFRAME
                     # ==========================================================
 
-                    headers = [
-                        normalize_header(h)
-                        for h in appr_rows[0]
-                    ]
-
-                    max_cols = max(
-                        len(headers),
-                        max(
-                            [
-                                len(r)
-                                for r in appr_rows[1:]
-                            ],
-                            default=0,
-                        ),
-                    )
-
-                    # Tambahkan header kosong jika row lebih panjang
-                    while len(headers) < max_cols:
-
-                        headers.append(
-                            f"Column_{len(headers) + 1}"
-                        )
-
-                    normalized_data = []
-
-                    for row in appr_rows[1:]:
-
-                        row_copy = list(row)
-
-                        while (
-                            len(row_copy)
-                            < max_cols
-                        ):
-
-                            row_copy.append("")
-
-                        normalized_data.append(
-                            row_copy[:max_cols]
-                        )
-
-                    df_appr = pd.DataFrame(
-                        normalized_data,
-                        columns=headers,
-                    )
-
                     df_appr = (
-                        normalize_dataframe_headers(
-                            df_appr
+                        dataframe_from_sheet_values(
+                            appr_rows
                         )
                     )
 
@@ -2788,11 +3149,24 @@ def show_spk_page():
                         ensure_status_column(
                             sheet_appr,
                             df_appr,
+                            raw_rows=appr_rows,
                         )
                     )
 
+                    # Jika ensure_status_column menulis ke sheet,
+                    # cache lama harus dibersihkan.
+                    if col_status not in (
+                        dataframe_from_sheet_values(
+                            appr_rows
+                        ).columns
+                        if appr_rows
+                        else []
+                    ):
+
+                        clear_spk_sheet_cache()
+
                     # ==========================================================
-                    # VALIDASI KOLOM UTAMA
+                    # VALIDASI NO SPK
                     # ==========================================================
 
                     if not col_no_spk:
@@ -2827,7 +3201,7 @@ def show_spk_page():
 
                     # ==========================================================
                     # FILTER PENDING
-                    # ==========================================================
+                    # ==============================================================
 
                     pending_df = (
                         df_appr[
@@ -2898,6 +3272,10 @@ def show_spk_page():
                                 st.selectbox(
                                     "Pilih SPK yang akan ditinjau:",
                                     options=pending_spks,
+                                    key=(
+                                        f"approval_spk_select_"
+                                        f"{db_approval_type}"
+                                    ),
                                 )
                             )
 
@@ -2925,10 +3303,6 @@ def show_spk_page():
                                 "#### 🔍 Detail Informasi SPK:"
                             )
 
-                            # --------------------------------------------------
-                            # BUILD DISPLAY COLUMNS SAFELY
-                            # --------------------------------------------------
-
                             display_columns = []
 
                             for col in [
@@ -2952,10 +3326,6 @@ def show_spk_page():
                                         col
                                     )
 
-                            # --------------------------------------------------
-                            # IF DATE SPK NOT FOUND
-                            # --------------------------------------------------
-
                             if not col_date_spk:
 
                                 st.warning(
@@ -2964,10 +3334,6 @@ def show_spk_page():
                                     f"`{db_approval_type}`. "
                                     "Data tetap dapat diproses."
                                 )
-
-                            # --------------------------------------------------
-                            # DISPLAY
-                            # --------------------------------------------------
 
                             if display_columns:
 
@@ -2997,9 +3363,9 @@ def show_spk_page():
                                 )
                             )
 
-                            # --------------------------------------------------
+                            # ==================================================
                             # APPROVE
-                            # --------------------------------------------------
+                            # ==================================================
 
                             with col_btn1:
 
@@ -3017,6 +3383,10 @@ def show_spk_page():
                                         "Memproses Approval..."
                                     ):
 
+                                        # --------------------------------------
+                                        # Tentukan kolom
+                                        # --------------------------------------
+
                                         status_col_index = (
                                             list(
                                                 df_appr.columns
@@ -3025,8 +3395,6 @@ def show_spk_page():
                                             )
                                             + 1
                                         )
-
-                                        updated_count = 0
 
                                         spk_col_index = (
                                             list(
@@ -3037,57 +3405,98 @@ def show_spk_page():
                                             + 1
                                         )
 
-                                        for excel_row_idx in range(
-                                            2,
-                                            len(df_appr)
-                                            + 2,
-                                        ):
+                                        # --------------------------------------
+                                        # CARI BARIS DARI DATAFRAME
+                                        #
+                                        # TIDAK ADA:
+                                        #     sheet_appr.cell()
+                                        #
+                                        # --------------------------------------
 
-                                            current_spk = (
-                                                sheet_appr.cell(
-                                                    excel_row_idx,
-                                                    spk_col_index,
-                                                ).value
-                                            )
-
-                                            if (
-                                                str(
-                                                    current_spk
-                                                ).strip()
+                                        matching_indices = (
+                                            df_appr.index[
+                                                df_appr[
+                                                    col_no_spk
+                                                ]
+                                                .astype(str)
+                                                .str.strip()
                                                 ==
                                                 str(
                                                     selected_appr_spk
                                                 ).strip()
-                                            ):
+                                            ]
+                                            .tolist()
+                                        )
 
-                                                sheet_appr.update_cell(
-                                                    excel_row_idx,
-                                                    status_col_index,
-                                                    "Approved by COO",
-                                                )
-
-                                                updated_count += 1
-
-                                        if updated_count > 0:
-
-                                            st.success(
-                                                f"✅ SPK "
-                                                f"`{selected_appr_spk}` "
-                                                "BERHASIL DI-APPROVE!"
-                                            )
-
-                                            st.rerun()
-
-                                        else:
+                                        if not matching_indices:
 
                                             st.error(
                                                 "❌ SPK tidak ditemukan "
-                                                "pada Google Sheet."
+                                                "pada data yang sudah dibaca."
                                             )
 
-                            # --------------------------------------------------
+                                        else:
+
+                                            approval_updates = []
+
+                                            for df_index in (
+                                                matching_indices
+                                            ):
+
+                                                # DataFrame row 0
+                                                # = Excel row 2.
+                                                excel_row_idx = (
+                                                    int(
+                                                        df_index
+                                                    )
+                                                    + 2
+                                                )
+
+                                                approval_updates.append(
+                                                    {
+                                                        "row": excel_row_idx,
+                                                        "col": status_col_index,
+                                                        "value": "Approved by COO",
+                                                    }
+                                                )
+
+                                            # ----------------------------------
+                                            # SATU BATCH WRITE
+                                            # ----------------------------------
+
+                                            updated_count = (
+                                                batch_update_cells(
+                                                    sheet_appr,
+                                                    approval_updates,
+                                                )
+                                            )
+
+                                            # ----------------------------------
+                                            # INVALIDATE CACHE
+                                            # ----------------------------------
+
+                                            clear_spk_sheet_cache()
+
+                                            if updated_count > 0:
+
+                                                st.success(
+                                                    f"✅ SPK "
+                                                    f"`{selected_appr_spk}` "
+                                                    "BERHASIL DI-APPROVE!"
+                                                )
+
+                                                st.rerun()
+
+                                            else:
+
+                                                st.error(
+                                                    "❌ Tidak ada baris "
+                                                    "yang berhasil di-update."
+                                                )
+
+                            # ==================================================
                             # REJECT
-                            # --------------------------------------------------
+                            # ==================================================
 
                             with col_btn2:
 
@@ -3104,6 +3513,10 @@ def show_spk_page():
                                         "Memproses Penolakan..."
                                     ):
 
+                                        # --------------------------------------
+                                        # Tentukan kolom
+                                        # --------------------------------------
+
                                         status_col_index = (
                                             list(
                                                 df_appr.columns
@@ -3113,64 +3526,91 @@ def show_spk_page():
                                             + 1
                                         )
 
-                                        spk_col_index = (
-                                            list(
-                                                df_appr.columns
-                                            ).index(
-                                                col_no_spk
-                                            )
-                                            + 1
-                                        )
+                                        # --------------------------------------
+                                        # CARI ROW DARI DATAFRAME
+                                        #
+                                        # TIDAK ADA:
+                                        #     sheet_appr.cell()
+                                        # --------------------------------------
 
-                                        updated_count = 0
-
-                                        for excel_row_idx in range(
-                                            2,
-                                            len(df_appr)
-                                            + 2,
-                                        ):
-
-                                            current_spk = (
-                                                sheet_appr.cell(
-                                                    excel_row_idx,
-                                                    spk_col_index,
-                                                ).value
-                                            )
-
-                                            if (
-                                                str(
-                                                    current_spk
-                                                ).strip()
+                                        matching_indices = (
+                                            df_appr.index[
+                                                df_appr[
+                                                    col_no_spk
+                                                ]
+                                                .astype(str)
+                                                .str.strip()
                                                 ==
                                                 str(
                                                     selected_appr_spk
                                                 ).strip()
-                                            ):
+                                            ]
+                                            .tolist()
+                                        )
 
-                                                sheet_appr.update_cell(
-                                                    excel_row_idx,
-                                                    status_col_index,
-                                                    "Rejected by COO",
-                                                )
-
-                                                updated_count += 1
-
-                                        if updated_count > 0:
-
-                                            st.warning(
-                                                f"❌ SPK "
-                                                f"`{selected_appr_spk}` "
-                                                "DITOLAK!"
-                                            )
-
-                                            st.rerun()
-
-                                        else:
+                                        if not matching_indices:
 
                                             st.error(
                                                 "❌ SPK tidak ditemukan "
-                                                "pada Google Sheet."
+                                                "pada data yang sudah dibaca."
                                             )
+
+                                        else:
+
+                                            reject_updates = []
+
+                                            for df_index in (
+                                                matching_indices
+                                            ):
+
+                                                excel_row_idx = (
+                                                    int(
+                                                        df_index
+                                                    )
+                                                    + 2
+                                                )
+
+                                                reject_updates.append(
+                                                    {
+                                                        "row": excel_row_idx,
+                                                        "col": status_col_index,
+                                                        "value": "Rejected by COO",
+                                                    }
+                                                )
+
+                                            # ----------------------------------
+                                            # SATU BATCH WRITE
+                                            # ----------------------------------
+
+                                            updated_count = (
+                                                batch_update_cells(
+                                                    sheet_appr,
+                                                    reject_updates,
+                                                )
+                                            )
+
+                                            # ----------------------------------
+                                            # INVALIDATE CACHE
+                                            # ----------------------------------
+
+                                            clear_spk_sheet_cache()
+
+                                            if updated_count > 0:
+
+                                                st.warning(
+                                                    f"❌ SPK "
+                                                    f"`{selected_appr_spk}` "
+                                                    "DITOLAK!"
+                                                )
+
+                                                st.rerun()
+
+                                            else:
+
+                                                st.error(
+                                                    "❌ Tidak ada baris "
+                                                    "yang berhasil di-update."
+                                                )
 
             except Exception as e:
 
@@ -3193,3 +3633,4 @@ def show_spk_page():
 
 if __name__ == "__main__":
     show_spk_page()
+```
