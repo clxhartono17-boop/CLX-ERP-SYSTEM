@@ -692,7 +692,7 @@ def generate_spk_pdf_bytes(
     # KOP
     # --------------------------------------------------------------------------
 
-    logo_path = "assets/logo.png"
+    logo_path = "assets/CLX.png"
 
     if os.path.exists(logo_path):
 
