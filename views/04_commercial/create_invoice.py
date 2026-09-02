@@ -21,6 +21,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 # ==============================================================================
 # 🎯 SPREADSHEET ID & KONSTANTA
 # ==============================================================================
+
 SPREADSHEET_ID = "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
 
 MONTH_ROMAN = {
@@ -40,55 +41,56 @@ MONTH_ROMAN = {
 
 
 # ==============================================================================
-# GOOGLE SHEETS CONNECTION
+# 🔌 GOOGLE SHEETS CONNECTION
 # ==============================================================================
+
 @st.cache_resource
 def init_gspread():
     """
-    Fungsi inisialisasi gspread yang fleksibel
-    (Cloud Secrets vs Local File)
+    Inisialisasi koneksi Google Sheets.
+    Mendukung:
+    1. Streamlit Cloud Secrets
+    2. credentials.json untuk localhost
     """
 
     gc = None
 
     # --------------------------------------------------------------------------
-    # 1. Streamlit Secrets
+    # 1. STREAMLIT SECRETS
     # --------------------------------------------------------------------------
     if "gcp_service_account" in st.secrets:
         try:
             creds_dict = dict(st.secrets["gcp_service_account"])
             gc = gspread.service_account_from_dict(creds_dict)
-
         except Exception as e:
             st.warning(
                 f"⚠️ Gagal menghubungkan Secrets Cloud: {e}"
             )
 
     # --------------------------------------------------------------------------
-    # 2. Local credentials.json
+    # 2. LOCAL CREDENTIALS
     # --------------------------------------------------------------------------
     if gc is None:
-
         cred_path = "credentials.json"
 
         if os.path.exists(cred_path):
-
             try:
                 gc = gspread.service_account(
                     filename=cred_path
                 )
-
             except Exception as e:
-
                 st.error(
                     f"🚨 File credentials.json ditemukan "
                     f"tapi gagal dibaca: {e}"
                 )
-
-                return None, None, None, None
-
+                return (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
         else:
-
             st.error(
                 "🚨 Kredensial tidak ditemukan! "
                 "Harap set 'Secrets' di Streamlit Cloud "
@@ -96,13 +98,18 @@ def init_gspread():
                 "di localhost."
             )
 
-            return None, None, None, None
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
 
     # --------------------------------------------------------------------------
-    # 3. Open Spreadsheet
+    # 3. OPEN GOOGLE SPREADSHEET
     # --------------------------------------------------------------------------
     try:
-
         sh = gc.open_by_key(SPREADSHEET_ID)
 
         sheet_query = sh.worksheet("Query")
@@ -110,31 +117,55 @@ def init_gspread():
         sheet_erp = sh.worksheet("ERP Project")
         sheet_db = sh.worksheet("DB Invoice")
 
+        # ==============================================================
+        # ⭐ PERBAIKAN UTAMA
+        # Ambil DB BOQ
+        # Struktur:
+        # A = No
+        # B = BOQ No.
+        # C = Site Name
+        # D = Charger Type
+        # E = BOQ Amount Exc. PPN
+        # F = BOQ Amount inc. PPN
+        # G = EPC Name
+        # ==============================================================
+        sheet_db_boq = sh.worksheet("DB BOQ")
+
         return (
             sheet_query,
             sheet_dropdown,
             sheet_erp,
             sheet_db,
+            sheet_db_boq,
         )
 
     except Exception as e:
-
         st.error(
             f"🚨 Gagal terhubung ke Google Sheets: {e}"
         )
 
-        return None, None, None, None
+        return (
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 # ==============================================================================
-# GET RAW MATRIX
+# 📥 GET RAW MATRIX
 # ==============================================================================
+
 def get_raw_matrix(sheet):
     """
     Membaca seluruh isi sheet menjadi 2D List.
     """
 
     try:
+        if sheet is None:
+            return []
+
         return sheet.get_all_values()
 
     except Exception:
@@ -142,16 +173,18 @@ def get_raw_matrix(sheet):
 
 
 # ==============================================================================
-# GENERATE AUTO INVOICE NUMBER
+# 🔢 GENERATE INVOICE NUMBER
 # ==============================================================================
+
 def generate_auto_invoice_no(sheet_db):
     """
-    Generate No. Invoice Otomatis
+    Generate No. Invoice Otomatis.
 
     Format:
     0000/INV/CLX/BULAN_ROMAWI/TAHUN
 
-    Nomor awal minimal 462.
+    Minimum sequence:
+    462
     """
 
     now = datetime.now()
@@ -166,7 +199,6 @@ def generate_auto_invoice_no(sheet_db):
     if sheet_db:
 
         try:
-
             records = sheet_db.get_all_records()
 
             next_seq = max(
@@ -175,11 +207,9 @@ def generate_auto_invoice_no(sheet_db):
             )
 
         except Exception:
-
             next_seq = 462
 
     else:
-
         next_seq = 462
 
     formatted_seq = f"{next_seq:04d}"
@@ -191,11 +221,24 @@ def generate_auto_invoice_no(sheet_db):
 
 
 # ==============================================================================
-# SAFE FLOAT
+# 💰 PARSE CURRENCY / NUMBER
 # ==============================================================================
-def safe_float(value):
+
+def parse_amount(value):
     """
-    Mengubah berbagai format angka menjadi float.
+    Mengubah berbagai format nominal menjadi float.
+
+    Contoh:
+
+    47.562.500
+    Rp 47.562.500
+    47,562,500
+    47562500
+    47.562.500,00
+
+    menjadi:
+
+    47562500.0
     """
 
     if value is None:
@@ -204,164 +247,279 @@ def safe_float(value):
     if isinstance(value, (int, float)):
         return float(value)
 
-    value = str(value).strip()
+    text = str(value).strip()
 
-    if not value:
+    if not text:
         return 0.0
+
+    # Hilangkan Rp
+    text = (
+        text
+        .replace("Rp", "")
+        .replace("rp", "")
+        .replace(" ", "")
+    )
+
+    # --------------------------------------------------------------------------
+    # Jika terdapat titik dan koma:
+    #
+    # 47.562.500,00
+    #
+    # titik = pemisah ribuan
+    # koma = decimal
+    # --------------------------------------------------------------------------
+    if "." in text and "," in text:
+
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "")
+            text = text.replace(",", ".")
+
+        else:
+            text = text.replace(",", "")
+
+    # --------------------------------------------------------------------------
+    # Hanya koma
+    # --------------------------------------------------------------------------
+    elif "," in text:
+
+        parts = text.split(",")
+
+        if (
+            len(parts) == 2
+            and len(parts[1]) <= 2
+        ):
+            text = text.replace(",", ".")
+
+        else:
+            text = text.replace(",", "")
+
+    # --------------------------------------------------------------------------
+    # Hanya titik
+    #
+    # 47.562.500
+    #
+    # Jika lebih dari satu titik → ribuan
+    # --------------------------------------------------------------------------
+    elif "." in text:
+
+        if text.count(".") > 1:
+            text = text.replace(".", "")
+
+        else:
+            parts = text.split(".")
+
+            if (
+                len(parts) == 2
+                and len(parts[1]) == 3
+            ):
+                text = text.replace(".", "")
 
     try:
-
-        # Format Indonesia:
-        # 47.562.500
-        if "." in value and "," not in value:
-
-            value = (
-                value
-                .replace("Rp", "")
-                .replace(".", "")
-                .replace(" ", "")
-                .strip()
-            )
-
-            return float(value)
-
-        # Format:
-        # 47.562.500,50
-        value = (
-            value
-            .replace("Rp", "")
-            .replace(".", "")
-            .replace(",", ".")
-            .replace(" ", "")
-            .strip()
-        )
-
-        return float(value)
+        return float(text)
 
     except Exception:
-
         return 0.0
 
 
 # ==============================================================================
-# GET SITE DATA
+# 🔍 GET SITE DATA FROM QUERY
 # ==============================================================================
-def get_site_data(
+
+def get_site_data_from_query(
     raw_query,
-    raw_erp,
     site_name
 ):
     """
-    Mengambil data site dari Query dan ERP Project.
+    Mengambil data site dari sheet Query.
 
-    Query:
-        Charger Type -> Column C / index 2
-        Site Name    -> Column F / index 5
-        WO Number    -> Column W / index 22
+    Struktur yang digunakan dari kode lama:
 
-    ERP Project:
-        Site Name    -> Column E / index 4
-        Charger Type -> Column C / index 2
-        BOQ Amount   -> Column M / index 12
+    C / index 2  = Charging Type
+    F / index 5  = Site Name
+    W / index 22 = WO Number
     """
 
     result = {
         "site_name": site_name,
         "charging_type": "",
         "wo_number": "",
-        "boq_amount": 0.0,
-        "qty": 1,
-        "uom": "Unit",
     }
 
-    # --------------------------------------------------------------------------
-    # QUERY
-    # --------------------------------------------------------------------------
-    if len(raw_query) > 1:
+    if not site_name:
+        return result
 
-        target_site = site_name.strip().lower()
+    if not raw_query or len(raw_query) <= 1:
+        return result
 
-        for row in raw_query[1:]:
+    target = site_name.strip().lower()
 
-            if len(row) > 5:
+    for row in raw_query[1:]:
 
-                current_site = (
-                    row[5]
-                    .strip()
-                    .lower()
-                )
+        if len(row) <= 5:
+            continue
 
-                if current_site == target_site:
+        current_site = str(
+            row[5]
+        ).strip()
 
-                    # Charging Type
-                    if len(row) > 2:
-                        result["charging_type"] = (
-                            row[2].strip()
-                        )
+        if current_site.lower() != target:
+            continue
 
-                    # WO Number
-                    if len(row) > 22:
-                        result["wo_number"] = (
-                            row[22].strip()
-                        )
+        # Charging Type
+        if len(row) > 2:
+            result["charging_type"] = str(
+                row[2]
+            ).strip()
 
-                    break
+        # WO Number
+        if len(row) > 22:
+            result["wo_number"] = str(
+                row[22]
+            ).strip()
 
-    # --------------------------------------------------------------------------
-    # ERP PROJECT
-    # --------------------------------------------------------------------------
-    if len(raw_erp) > 1:
-
-        target_site = site_name.strip().lower()
-
-        target_charge = (
-            result["charging_type"]
-            .strip()
-            .lower()
-        )
-
-        for row in raw_erp[1:]:
-
-            if len(row) > 4:
-
-                erp_site = (
-                    row[4]
-                    .strip()
-                    .lower()
-                )
-
-                erp_charge = (
-                    row[2].strip().lower()
-                    if len(row) > 2
-                    else ""
-                )
-
-                if (
-                    erp_site == target_site
-                    and (
-                        not target_charge
-                        or erp_charge == target_charge
-                    )
-                ):
-
-                    if len(row) > 12:
-
-                        result["boq_amount"] = safe_float(
-                            row[12]
-                        )
-
-                    break
+        break
 
     return result
 
 
 # ==============================================================================
-# CREATE MULTI SITE INVOICE PDF
+# ⭐ GET BOQ FROM DB BOQ
 # ==============================================================================
+
+def get_boq_amount_from_db_boq(
+    raw_db_boq,
+    site_name,
+    charging_type
+):
+    """
+    Mencari BOQ Amount dari sheet DB BOQ.
+
+    Struktur DB BOQ:
+
+    A = No
+    B = BOQ No.
+    C = Site Name
+    D = Charger Type
+    E = BOQ Amount Exc. PPN
+    F = BOQ Amount inc. PPN
+    G = EPC Name
+
+    Matching:
+        Site Name + Charger Type
+
+    Return:
+        BOQ Amount Exc. PPN
+    """
+
+    if not raw_db_boq:
+        return 0.0
+
+    if len(raw_db_boq) <= 1:
+        return 0.0
+
+    target_site = (
+        str(site_name)
+        .strip()
+        .lower()
+    )
+
+    target_charger = (
+        str(charging_type)
+        .strip()
+        .lower()
+    )
+
+    for row in raw_db_boq[1:]:
+
+        # Minimal sampai kolom E
+        if len(row) <= 4:
+            continue
+
+        db_site = (
+            str(row[2])
+            .strip()
+            .lower()
+        )
+
+        db_charger = (
+            str(row[3])
+            .strip()
+            .lower()
+        )
+
+        # Cocokkan Site Name + Charger Type
+        if (
+            db_site == target_site
+            and db_charger == target_charger
+        ):
+
+            # ==============================================================
+            # ⭐ KOLOM E = INDEX 4
+            # BOQ Amount Exc. PPN
+            # ==============================================================
+            return parse_amount(row[4])
+
+    return 0.0
+
+
+# ==============================================================================
+# 🔎 BUILD SITE DATA
+# ==============================================================================
+
+def build_site_data(
+    raw_query,
+    raw_db_boq,
+    selected_sites
+):
+    """
+    Membuat data lengkap setiap site.
+    """
+
+    site_data = []
+
+    for site in selected_sites:
+
+        query_data = get_site_data_from_query(
+            raw_query,
+            site
+        )
+
+        charging_type = query_data[
+            "charging_type"
+        ]
+
+        wo_number = query_data[
+            "wo_number"
+        ]
+
+        # ==============================================================
+        # ⭐ BOQ DARI DB BOQ
+        # ==============================================================
+        boq_amount = get_boq_amount_from_db_boq(
+            raw_db_boq,
+            site,
+            charging_type
+        )
+
+        site_data.append(
+            {
+                "site_name": site,
+                "charging_type": charging_type,
+                "wo_number": wo_number,
+                "boq_amount": boq_amount,
+            }
+        )
+
+    return site_data
+
+
+# ==============================================================================
+# 📄 CREATE INVOICE PDF
+# ==============================================================================
+
 def create_invoice_pdf(data):
     """
-    Fungsi pembuat PDF Invoice.
-
+    Membuat PDF Invoice.
     Mendukung multiple site.
     """
 
@@ -383,6 +541,7 @@ def create_invoice_pdf(data):
     # --------------------------------------------------------------------------
     # STYLES
     # --------------------------------------------------------------------------
+
     title_style = ParagraphStyle(
         name="TitleStyle",
         parent=styles["Heading1"],
@@ -407,13 +566,6 @@ def create_invoice_pdf(data):
         leading=11,
     )
 
-    small_text = ParagraphStyle(
-        name="SmallText",
-        parent=styles["Normal"],
-        fontSize=7.5,
-        leading=9,
-    )
-
     pay_title_style = ParagraphStyle(
         name="PayTitle",
         parent=styles["Normal"],
@@ -423,9 +575,23 @@ def create_invoice_pdf(data):
         textColor=colors.HexColor("#1A365D"),
     )
 
+    table_text = ParagraphStyle(
+        name="TableText",
+        parent=styles["Normal"],
+        fontSize=7.5,
+        leading=9,
+    )
+
+    table_text_center = ParagraphStyle(
+        name="TableTextCenter",
+        parent=table_text,
+        alignment=1,
+    )
+
     # --------------------------------------------------------------------------
     # HEADER & FOOTER
     # --------------------------------------------------------------------------
+
     base_dir = os.path.abspath(
         os.path.join(
             os.path.dirname(__file__),
@@ -456,7 +622,10 @@ def create_invoice_pdf(data):
             "assets/Footer.png"
         )
 
-    def draw_header_footer(canvas, doc):
+    def draw_header_footer(
+        canvas,
+        doc
+    ):
 
         canvas.saveState()
 
@@ -465,7 +634,6 @@ def create_invoice_pdf(data):
         if os.path.exists(header_path):
 
             try:
-
                 canvas.drawImage(
                     header_path,
                     0,
@@ -481,7 +649,6 @@ def create_invoice_pdf(data):
         if os.path.exists(footer_path):
 
             try:
-
                 canvas.drawImage(
                     footer_path,
                     0,
@@ -499,6 +666,7 @@ def create_invoice_pdf(data):
     # --------------------------------------------------------------------------
     # TITLE
     # --------------------------------------------------------------------------
+
     elements.append(
         Paragraph(
             "<b>INVOICE</b>",
@@ -513,6 +681,7 @@ def create_invoice_pdf(data):
     # --------------------------------------------------------------------------
     # BILL TO
     # --------------------------------------------------------------------------
+
     bill_to_text = Paragraph(
         """
         <b>Bill To :</b><br/>
@@ -525,7 +694,6 @@ def create_invoice_pdf(data):
     )
 
     issuer_and_meta = [
-
         [
             Paragraph(
                 "<b>Invoice No.</b>",
@@ -536,7 +704,6 @@ def create_invoice_pdf(data):
                 normal_text
             ),
         ],
-
         [
             Paragraph(
                 "<b>Invoice Date</b>",
@@ -547,7 +714,6 @@ def create_invoice_pdf(data):
                 normal_text
             ),
         ],
-
         [
             Paragraph(
                 "<b>Project Name</b>",
@@ -558,7 +724,6 @@ def create_invoice_pdf(data):
                 normal_text
             ),
         ],
-
         [
             Paragraph(
                 "<b>No. Efaktur</b>",
@@ -626,84 +791,91 @@ def create_invoice_pdf(data):
     )
 
     # --------------------------------------------------------------------------
-    # MULTI SITE ITEM TABLE
+    # ⭐ ITEM TABLE MULTI SITE
     # --------------------------------------------------------------------------
-    table_data = [
 
+    table_data = [
         [
             Paragraph(
                 "<b>NO.</b>",
-                small_text
+                normal_bold
             ),
-
             Paragraph(
                 "<b>ITEM DESCRIPTION</b>",
-                small_text
+                normal_bold
             ),
-
             Paragraph(
                 "<b>QTY</b>",
-                small_text
+                normal_bold
             ),
-
             Paragraph(
                 "<b>UOM</b>",
-                small_text
+                normal_bold
             ),
-
             Paragraph(
                 "<b>CHARGER TYPE</b>",
-                small_text
+                normal_bold
             ),
-
             Paragraph(
                 "<b>WO NUMBER</b>",
-                small_text
+                normal_bold
             ),
-
             Paragraph(
                 "<b>UNIT PRICE</b>",
-                small_text
+                normal_bold
             ),
-
             Paragraph(
                 "<b>AMOUNT</b>",
-                small_text
+                normal_bold
             ),
         ]
     ]
 
-    for idx, item in enumerate(
+    for index, item in enumerate(
         data["items"],
         start=1
     ):
 
         table_data.append(
             [
-                str(idx),
-
                 Paragraph(
-                    str(item["site_name"]),
-                    small_text
+                    str(index),
+                    table_text_center
                 ),
-
-                str(item.get("qty", 1)),
-
-                str(item.get("uom", "Unit")),
-
                 Paragraph(
-                    str(item["charging_type"]),
-                    small_text
+                    str(
+                        item["site_name"]
+                    ),
+                    table_text
                 ),
-
                 Paragraph(
-                    str(item["wo_number"]),
-                    small_text
+                    "1",
+                    table_text_center
                 ),
-
-                f"{item['unit_price']:,.2f}",
-
-                f"{item['amount']:,.2f}",
+                Paragraph(
+                    "Unit",
+                    table_text_center
+                ),
+                Paragraph(
+                    str(
+                        item["charging_type"]
+                    ),
+                    table_text_center
+                ),
+                Paragraph(
+                    str(
+                        item["wo_number"]
+                    ),
+                    table_text_center
+                ),
+                Paragraph(
+                    f"{item['unit_price']:,.2f}",
+                    table_text_center
+                ),
+                Paragraph(
+                    f"{item['amount']:,.2f}",
+                    table_text_center
+                ),
             ]
         )
 
@@ -711,12 +883,12 @@ def create_invoice_pdf(data):
         table_data,
         colWidths=[
             25,
-            145,
+            155,
             30,
-            35,
-            60,
+            40,
+            70,
             75,
-            75,
+            70,
             75,
         ],
         repeatRows=1,
@@ -731,42 +903,36 @@ def create_invoice_pdf(data):
                     (-1, 0),
                     colors.HexColor("#9FA5AD")
                 ),
-
                 (
                     "TEXTCOLOR",
                     (0, 0),
                     (-1, 0),
                     colors.white
                 ),
-
                 (
                     "ALIGN",
                     (0, 0),
-                    (0, -1),
+                    (-1, -1),
                     "CENTER"
                 ),
-
                 (
                     "ALIGN",
-                    (2, 1),
-                    (3, -1),
-                    "CENTER"
+                    (1, 1),
+                    (1, -1),
+                    "LEFT"
                 ),
-
                 (
                     "ALIGN",
                     (6, 1),
                     (7, -1),
                     "RIGHT"
                 ),
-
                 (
                     "PADDING",
                     (0, 0),
                     (-1, -1),
-                    4
+                    5
                 ),
-
                 (
                     "GRID",
                     (0, 0),
@@ -774,7 +940,6 @@ def create_invoice_pdf(data):
                     0.5,
                     colors.HexColor("#CBD5E0")
                 ),
-
                 (
                     "VALIGN",
                     (0, 0),
@@ -792,20 +957,18 @@ def create_invoice_pdf(data):
     )
 
     # --------------------------------------------------------------------------
-    # SUMMARY TOTALS
+    # SUMMARY
     # --------------------------------------------------------------------------
-    summary_data = [
 
+    summary_data = [
         [
             "Subtotal (Excl. Tax) :",
             f"Rp {data['subtotal']:,.2f}"
         ],
-
         [
             f"PPN ({data['tax_rate']}%) :",
             f"Rp {data['tax_amount']:,.2f}"
         ],
-
         [
             "TOTAL AMOUNT :",
             f"Rp {data['grand_total']:,.2f}"
@@ -826,14 +989,12 @@ def create_invoice_pdf(data):
                     (-1, -1),
                     "RIGHT"
                 ),
-
                 (
                     "FONTNAME",
                     (0, -1),
                     (-1, -1),
                     "Helvetica-Bold"
                 ),
-
                 (
                     "LINEABOVE",
                     (0, -1),
@@ -841,7 +1002,6 @@ def create_invoice_pdf(data):
                     1,
                     colors.HexColor("#2B6CB0")
                 ),
-
                 (
                     "PADDING",
                     (0, 0),
@@ -861,8 +1021,8 @@ def create_invoice_pdf(data):
     # --------------------------------------------------------------------------
     # PAYMENT INFO
     # --------------------------------------------------------------------------
-    pay_table_data = [
 
+    pay_table_data = [
         [
             Paragraph(
                 "<b>PAYMENT INFO</b>",
@@ -871,7 +1031,6 @@ def create_invoice_pdf(data):
             "",
             "",
         ],
-
         [
             Paragraph(
                 "Bank Name",
@@ -883,7 +1042,6 @@ def create_invoice_pdf(data):
                 normal_text
             ),
         ],
-
         [
             Paragraph(
                 "Bank Account",
@@ -895,7 +1053,6 @@ def create_invoice_pdf(data):
                 normal_text
             ),
         ],
-
         [
             Paragraph(
                 "Account Name",
@@ -922,28 +1079,24 @@ def create_invoice_pdf(data):
                     (0, 0),
                     (2, 0)
                 ),
-
                 (
                     "BACKGROUND",
                     (0, 0),
                     (2, 0),
                     colors.HexColor("#E2E8F0")
                 ),
-
                 (
                     "PADDING",
                     (0, 0),
                     (-1, -1),
                     4
                 ),
-
                 (
                     "VALIGN",
                     (0, 0),
                     (-1, -1),
                     "MIDDLE"
                 ),
-
                 (
                     "GRID",
                     (0, 0),
@@ -951,7 +1104,6 @@ def create_invoice_pdf(data):
                     0.5,
                     colors.HexColor("#A0AEC0")
                 ),
-
                 (
                     "BOX",
                     (0, 0),
@@ -966,8 +1118,17 @@ def create_invoice_pdf(data):
     # --------------------------------------------------------------------------
     # SIGNATURE
     # --------------------------------------------------------------------------
+
     now_str = datetime.now().strftime(
         "%d %B %Y"
+    )
+
+    sig_style = ParagraphStyle(
+        name="SigStyle",
+        parent=styles["Normal"],
+        fontSize=8.5,
+        leading=12,
+        alignment=1,
     )
 
     sig_block = Paragraph(
@@ -976,17 +1137,14 @@ def create_invoice_pdf(data):
         <b><u>Christian</u></b><br/>
         President Director
         """,
-        ParagraphStyle(
-            name="SigStyle",
-            parent=styles["Normal"],
-            fontSize=8.5,
-            leading=12,
-            alignment=1,
-        )
+        sig_style,
     )
 
     bottom_grid = Table(
-        [[payment_info_table, sig_block]],
+        [[
+            payment_info_table,
+            sig_block
+        ]],
         colWidths=[300, 240]
     )
 
@@ -999,14 +1157,12 @@ def create_invoice_pdf(data):
                     (-1, -1),
                     "BOTTOM"
                 ),
-
                 (
                     "ALIGN",
                     (1, 0),
                     (1, 0),
                     "CENTER"
                 ),
-
                 (
                     "PADDING",
                     (0, 0),
@@ -1022,6 +1178,7 @@ def create_invoice_pdf(data):
     # --------------------------------------------------------------------------
     # BUILD PDF
     # --------------------------------------------------------------------------
+
     doc.build(
         elements,
         onFirstPage=draw_header_footer,
@@ -1034,8 +1191,9 @@ def create_invoice_pdf(data):
 
 
 # ==============================================================================
-# RENDER
+# 🖥️ RENDER
 # ==============================================================================
+
 def render():
 
     st.title("📄 Create Invoice")
@@ -1049,19 +1207,22 @@ def render():
     # ==========================================================================
     # CONNECT GOOGLE SHEETS
     # ==========================================================================
+
     (
         sheet_query,
         sheet_dropdown,
         sheet_erp,
         sheet_db,
+        sheet_db_boq,
     ) = init_gspread()
 
     if not sheet_query:
         return
 
     # ==========================================================================
-    # LOAD SHEETS
+    # LOAD DATA
     # ==========================================================================
+
     raw_query = get_raw_matrix(
         sheet_query
     )
@@ -1078,9 +1239,15 @@ def render():
         sheet_db
     )
 
+    # ⭐ DB BOQ
+    raw_db_boq = get_raw_matrix(
+        sheet_db_boq
+    )
+
     # ==========================================================================
     # AUTO INVOICE NUMBER
     # ==========================================================================
+
     auto_inv_no = generate_auto_invoice_no(
         sheet_db
     )
@@ -1088,6 +1255,7 @@ def render():
     # ==========================================================================
     # PROJECT OPTIONS
     # ==========================================================================
+
     project_options = []
 
     if len(raw_dropdown) > 1:
@@ -1096,13 +1264,12 @@ def render():
 
             if len(row) > 6:
 
-                if row[6].strip():
+                val = str(
+                    row[6]
+                ).strip()
 
-                    val = row[6].strip()
-
-                    if val not in project_options:
-
-                        project_options.append(val)
+                if val and val not in project_options:
+                    project_options.append(val)
 
     if not project_options:
 
@@ -1114,181 +1281,26 @@ def render():
         ]
 
     # ==========================================================================
-    # PROJECT NAME
-    #
-    # PENTING:
-    # Diletakkan DI LUAR FORM agar perubahan selection
-    # langsung melakukan rerun.
+    # FORM
     # ==========================================================================
-    selected_project = st.selectbox(
-        "Project Name",
-        options=project_options,
-        key="invoice_project_name",
-    )
 
-    # ==========================================================================
-    # SITE SELECTION
-    # ==========================================================================
-    selected_sites = []
-
-    if selected_project == "VGreen - Project":
-
-        site_options = []
-
-        if len(raw_query) > 1:
-
-            for row in raw_query[1:]:
-
-                if len(row) > 5:
-
-                    s_name = row[5].strip()
-
-                    if s_name:
-
-                        if s_name not in site_options:
-
-                            site_options.append(
-                                s_name
-                            )
-
-        selected_sites = st.multiselect(
-            "Item Description / Site Name",
-            options=site_options,
-            placeholder="Pilih satu atau beberapa site...",
-            key="invoice_selected_sites",
-            help=(
-                "Anda dapat memilih lebih dari satu site. "
-                "Setelah site dipilih, tabel detail akan "
-                "langsung muncul di bawah."
-            ),
-        )
-
-    else:
-
-        manual_site = st.text_input(
-            "Item Description / Site Name",
-            placeholder=(
-                "Ketik Site Name secara manual..."
-            ),
-            key="invoice_manual_site",
-        )
-
-        if manual_site.strip():
-
-            selected_sites = [
-                manual_site.strip()
-            ]
-
-    # ==========================================================================
-    # BUILD SITE DATA
-    # ==========================================================================
-    site_data_list = []
-
-    for site in selected_sites:
-
-        item = get_site_data(
-            raw_query,
-            raw_erp,
-            site,
-        )
-
-        site_data_list.append(item)
-
-    # ==========================================================================
-    # PREVIEW TABLE
-    # ==========================================================================
-    if selected_project == "VGreen - Project":
-
-        st.markdown("---")
-
-        st.subheader(
-            "🔎 Preview Detail Site"
-        )
-
-        if site_data_list:
-
-            preview_rows = []
-
-            for idx, item in enumerate(
-                site_data_list,
-                start=1
-            ):
-
-                preview_rows.append(
-                    {
-                        "NO.": idx,
-                        "ITEM DESCRIPTION": item[
-                            "site_name"
-                        ],
-                        "QTY": item.get(
-                            "qty",
-                            1
-                        ),
-                        "UOM": item.get(
-                            "uom",
-                            "Unit"
-                        ),
-                        "CHARGER TYPE": item[
-                            "charging_type"
-                        ],
-                        "WO NUMBER": item[
-                            "wo_number"
-                        ],
-                        "BOQ AMOUNT": item[
-                            "boq_amount"
-                        ],
-                    }
-                )
-
-            preview_df = pd.DataFrame(
-                preview_rows
-            )
-
-            # ------------------------------------------------------------------
-            # FORMAT CURRENCY UNTUK DISPLAY
-            # ------------------------------------------------------------------
-            display_df = preview_df.copy()
-
-            display_df[
-                "BOQ AMOUNT"
-            ] = display_df[
-                "BOQ AMOUNT"
-            ].apply(
-                lambda x: f"Rp {x:,.2f}"
-            )
-
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.caption(
-                f"📌 Total site dipilih: "
-                f"**{len(site_data_list)} site**"
-            )
-
-        else:
-
-            st.info(
-                "👆 Silakan pilih satu atau beberapa site "
-                "untuk melihat detail dan nominalnya."
-            )
-
-    # ==========================================================================
-    # FORM DETAIL INVOICE
-    # ==========================================================================
     with st.form(
         "form_create_invoice",
         clear_on_submit=False
     ):
 
-        # ----------------------------------------------------------------------
-        # INFO INVOICE
-        # ----------------------------------------------------------------------
         col1, col2 = st.columns(2)
 
+        # ======================================================================
+        # LEFT COLUMN
+        # ======================================================================
+
         with col1:
+
+            selected_project = st.selectbox(
+                "Project Name",
+                options=project_options,
+            )
 
             st.text_input(
                 "No. Invoice (Auto Generated)",
@@ -1298,80 +1310,85 @@ def render():
 
             inv_date = st.date_input(
                 "Invoice Date",
-                datetime.now(),
+                datetime.now()
             )
+
+            # ==================================================================
+            # SITE SELECTION
+            # ==================================================================
+
+            site_options = []
+
+            if len(raw_query) > 1:
+
+                for row in raw_query[1:]:
+
+                    if len(row) > 5:
+
+                        s_name = str(
+                            row[5]
+                        ).strip()
+
+                        if (
+                            s_name
+                            and s_name not in site_options
+                        ):
+                            site_options.append(
+                                s_name
+                            )
+
+            if selected_project == "VGreen - Project":
+
+                if site_options:
+
+                    selected_sites = st.multiselect(
+                        "Item Description / Site Name",
+                        options=site_options,
+                        help=(
+                            "Pilih satu atau lebih site. "
+                            "Data Charger Type, WO Number "
+                            "dan BOQ Amount akan otomatis "
+                            "ditampilkan."
+                        ),
+                    )
+
+                else:
+
+                    selected_sites = []
+
+                    st.warning(
+                        "⚠️ Tidak ada Site Name "
+                        "yang ditemukan pada sheet Query."
+                    )
+
+            else:
+
+                manual_site = st.text_input(
+                    "Item Description / Site Name",
+                    placeholder=(
+                        "Ketik Site Name secara manual..."
+                    ),
+                )
+
+                selected_sites = (
+                    [manual_site]
+                    if manual_site.strip()
+                    else []
+                )
+
+        # ======================================================================
+        # RIGHT COLUMN
+        # ======================================================================
 
         with col2:
 
-            # ------------------------------------------------------------------
-            # CHARGING TYPE
-            # ------------------------------------------------------------------
-            if (
-                selected_project == "VGreen - Project"
-                and site_data_list
-            ):
-
-                charging_types = []
-
-                for item in site_data_list:
-
-                    ct = item[
-                        "charging_type"
-                    ]
-
-                    if ct not in charging_types:
-
-                        charging_types.append(
-                            ct
-                        )
-
-                charging_type_display = (
-                    ", ".join(charging_types)
-                )
-
-            else:
-
-                charging_type_display = ""
-
             st.text_input(
-                "Charging Type (Auto)",
-                value=charging_type_display,
-                disabled=True,
-            )
-
-            # ------------------------------------------------------------------
-            # WO
-            # ------------------------------------------------------------------
-            if (
-                selected_project == "VGreen - Project"
-                and site_data_list
-            ):
-
-                wo_numbers = []
-
-                for item in site_data_list:
-
-                    wo = item[
-                        "wo_number"
-                    ]
-
-                    if wo and wo not in wo_numbers:
-
-                        wo_numbers.append(
-                            wo
-                        )
-
-                wo_display = ", ".join(
-                    wo_numbers
-                )
-
-            else:
-
-                wo_display = ""
-
-            st.text_input(
-                "WO No. (Auto)",
-                value=wo_display,
+                "Mode",
+                value=(
+                    "Multi Site"
+                    if selected_project == "VGreen - Project"
+                    else "Manual"
+                ),
                 disabled=True,
             )
 
@@ -1383,23 +1400,29 @@ def render():
             )
 
         # ======================================================================
-        # DETAIL PEMBAYARAN
+        # SITE DATA
         # ======================================================================
+
+        site_data = build_site_data(
+            raw_query,
+            raw_db_boq,
+            selected_sites,
+        )
+
+        # ======================================================================
+        # TOP
+        # ======================================================================
+
         st.markdown(
             "### 💳 Detail Pembayaran & Termin"
         )
 
-        # ----------------------------------------------------------------------
-        # TOP SCHEMA
-        # ----------------------------------------------------------------------
         top_schema_options = {
-
             "Skema Standar (35% - 60% - 5%)": [
                 "35%",
                 "60%",
                 "5%",
             ],
-
             "Skema Baru (10% - 85% - 5%)": [
                 "10%",
                 "85%",
@@ -1425,147 +1448,98 @@ def render():
         )
 
         # ======================================================================
-        # DETEKSI TERMIN YANG SUDAH TERPAKAI
+        # USED TERMIN
         # ======================================================================
-        used_termins_by_site = {}
+
+        used_termins = []
 
         if (
             selected_project == "VGreen - Project"
             and len(raw_db) > 1
+            and selected_sites
         ):
 
-            for site in selected_sites:
-
-                used_termins_by_site[
-                    site.strip().lower()
-                ] = []
+            selected_site_lower = [
+                s.strip().lower()
+                for s in selected_sites
+            ]
 
             for r in raw_db[1:]:
 
                 if len(r) > 6:
 
                     db_charging = (
-                        r[3]
+                        str(r[3])
                         .strip()
                         .lower()
                     )
 
                     db_site = (
-                        r[4]
+                        str(r[4])
                         .strip()
                         .lower()
                     )
 
-                    db_term = (
-                        r[6].strip()
-                    )
+                    db_term = str(
+                        r[6]
+                    ).strip()
 
                     if (
-                        db_site
-                        in used_termins_by_site
-                    ):
-
-                        site_info = get_site_data(
-                            raw_query,
-                            raw_erp,
-                            db_site,
-                        )
-
-                        current_charge = (
-                            site_info[
-                                "charging_type"
-                            ]
+                        db_site in selected_site_lower
+                        and any(
+                            db_site
+                            == s["site_name"]
                             .strip()
                             .lower()
+                            and db_charging
+                            == s["charging_type"]
+                            .strip()
+                            .lower()
+                            for s in site_data
                         )
+                    ):
 
-                        if (
-                            current_charge
-                            == db_charging
-                        ):
-
-                            used_termins_by_site[
-                                db_site
-                            ].append(
+                        if db_term:
+                            used_termins.append(
                                 db_term
                             )
 
-        # ======================================================================
-        # AVAILABLE TERMIN
-        # ======================================================================
-        available_termins = (
-            all_possible_termins.copy()
-        )
+        available_termins = [
+            t
+            for t in all_possible_termins
+            if t not in used_termins
+        ]
 
-        if selected_project == "VGreen - Project":
+        if (
+            selected_project == "VGreen - Project"
+            and used_termins
+        ):
 
-            # Sebuah termin hanya tersedia apabila
-            # termin tersebut belum digunakan oleh
-            # SEMUA site yang dipilih.
-            #
-            # Jika salah satu site sudah menggunakan termin,
-            # maka termin tidak dapat digunakan untuk invoice
-            # gabungan tersebut.
-
-            for site in selected_sites:
-
-                used_for_site = (
-                    used_termins_by_site.get(
-                        site.strip().lower(),
-                        []
+            st.warning(
+                "ℹ️ Beberapa termin sudah pernah "
+                "dibuat untuk site yang dipilih: "
+                + ", ".join(
+                    sorted(
+                        set(used_termins)
                     )
                 )
+            )
 
-                available_termins = [
-                    t
-                    for t in available_termins
-                    if t not in used_for_site
-                ]
+        if (
+            selected_project == "VGreen - Project"
+            and selected_sites
+            and not available_termins
+        ):
 
-            # --------------------------------------------------------------
-            # WARNING
-            # --------------------------------------------------------------
-            warning_parts = []
-
-            for site in selected_sites:
-
-                used_for_site = (
-                    used_termins_by_site.get(
-                        site.strip().lower(),
-                        []
-                    )
-                )
-
-                if used_for_site:
-
-                    warning_parts.append(
-                        f"**{site}**: "
-                        f"{', '.join(set(used_for_site))}"
-                    )
-
-            if warning_parts:
-
-                st.warning(
-                    "ℹ️ Termin yang sudah pernah "
-                    "dibuat:\n\n"
-                    + "\n\n".join(
-                        warning_parts
-                    )
-                )
-
-            if (
-                selected_sites
-                and not available_termins
-            ):
-
-                st.error(
-                    "⛔ Tidak ada termin yang tersedia "
-                    "untuk seluruh site yang dipilih."
-                )
+            st.error(
+                "⛔ Semua termin pada skema "
+                f"{selected_schema} sudah terpakai."
+            )
 
         # ======================================================================
-        # TERMIN + TAX
+        # TERMIN / TAX
         # ======================================================================
+
         c1, c2, c3 = st.columns(3)
 
         with c1:
@@ -1598,116 +1572,50 @@ def render():
 
                 st.selectbox(
                     "Termin Pembayaran",
-                    options=[
-                        "Penuh / Lunas"
-                    ],
+                    options=["Penuh / Lunas"],
                     disabled=True,
                 )
 
                 pct_val = 0.0
 
         # ======================================================================
-        # CALCULATE PER SITE
+        # ⭐ HITUNG BOQ PER SITE DARI DB BOQ
         # ======================================================================
-        calculated_items = []
 
-        if selected_project == "VGreen - Project":
+        total_boq_amount = 0.0
+        total_invoice_amount = 0.0
 
-            for item in site_data_list:
+        for item in site_data:
 
-                unit_price = (
-                    item["boq_amount"]
-                    * pct_val
-                )
+            item["unit_price"] = (
+                item["boq_amount"]
+                * pct_val
+            )
 
-                calculated_item = {
-                    "site_name": item[
-                        "site_name"
-                    ],
+            item["amount"] = (
+                item["unit_price"]
+            )
 
-                    "charging_type": item[
-                        "charging_type"
-                    ],
+            total_boq_amount += (
+                item["boq_amount"]
+            )
 
-                    "wo_number": item[
-                        "wo_number"
-                    ],
-
-                    "boq_amount": item[
-                        "boq_amount"
-                    ],
-
-                    "qty": item.get(
-                        "qty",
-                        1
-                    ),
-
-                    "uom": item.get(
-                        "uom",
-                        "Unit"
-                    ),
-
-                    "unit_price": unit_price,
-
-                    "amount": unit_price,
-                }
-
-                calculated_items.append(
-                    calculated_item
-                )
-
-        else:
-
-            manual_unit_price = 0.0
-
-            calculated_items = [
-                {
-                    "site_name": (
-                        selected_sites[0]
-                        if selected_sites
-                        else ""
-                    ),
-
-                    "charging_type": "",
-
-                    "wo_number": "",
-
-                    "boq_amount": 0.0,
-
-                    "qty": 1,
-
-                    "uom": "Unit",
-
-                    "unit_price": 0.0,
-
-                    "amount": 0.0,
-                }
-            ]
+            total_invoice_amount += (
+                item["amount"]
+            )
 
         # ======================================================================
         # UNIT PRICE
         # ======================================================================
+
         with c2:
 
-            if (
-                selected_project == "VGreen - Project"
-            ):
+            if selected_project == "VGreen - Project":
 
-                total_boq = sum(
-                    item["boq_amount"]
-                    for item in site_data_list
-                )
-
-                total_unit_price = sum(
-                    item["unit_price"]
-                    for item in calculated_items
-                )
-
-                st.number_input(
-                    "Unit Price Total "
-                    "(IDR - Auto Calculated)",
+                unit_price = st.number_input(
+                    "Total Unit Price / Invoice Amount",
                     value=float(
-                        total_unit_price
+                        total_invoice_amount
                     ),
                     disabled=True,
                     format="%.2f",
@@ -1715,28 +1623,21 @@ def render():
 
             else:
 
-                manual_unit_price = (
-                    st.number_input(
-                        "Unit Price (IDR)",
-                        min_value=0.0,
-                        value=0.0,
-                        step=1000.0,
-                    )
+                unit_price = st.number_input(
+                    "Unit Price (IDR)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=1000.0,
                 )
 
-                if calculated_items:
-
-                    calculated_items[0][
-                        "unit_price"
-                    ] = manual_unit_price
-
-                    calculated_items[0][
-                        "amount"
-                    ] = manual_unit_price
+                total_invoice_amount = (
+                    unit_price
+                )
 
         # ======================================================================
         # TAX
         # ======================================================================
+
         with c3:
 
             tax_rate = st.number_input(
@@ -1747,22 +1648,12 @@ def render():
             )
 
         # ======================================================================
-        # TOTAL
+        # TAX CALCULATION
         # ======================================================================
-        if selected_project == "VGreen - Project":
 
-            termin_amount = sum(
-                item["amount"]
-                for item in calculated_items
-            )
-
-        else:
-
-            termin_amount = (
-                manual_unit_price
-                if calculated_items
-                else 0.0
-            )
+        termin_amount = (
+            total_invoice_amount
+        )
 
         tax_amount = (
             termin_amount
@@ -1775,98 +1666,127 @@ def render():
         )
 
         # ======================================================================
-        # DETAIL CROSS CHECK TABLE
+        # ⭐ CROSS CHECK TABLE
         # ======================================================================
-        if (
-            selected_project == "VGreen - Project"
-            and calculated_items
-        ):
+
+        if selected_project == "VGreen - Project":
 
             st.markdown(
-                "### 💰 Detail Nilai Invoice"
+                "### 🔎 Cross Check Site & BOQ"
             )
 
-            invoice_preview_rows = []
+            if site_data:
 
-            for idx, item in enumerate(
-                calculated_items,
-                start=1
-            ):
+                preview_rows = []
 
-                invoice_preview_rows.append(
-                    {
-                        "NO.": idx,
+                for index, item in enumerate(
+                    site_data,
+                    start=1
+                ):
 
-                        "ITEM DESCRIPTION": item[
-                            "site_name"
-                        ],
+                    preview_rows.append(
+                        {
+                            "NO.": index,
+                            "ITEM DESCRIPTION": (
+                                item["site_name"]
+                            ),
+                            "QTY": 1,
+                            "UOM": "Unit",
+                            "Charger Type": (
+                                item["charging_type"]
+                                or "-"
+                            ),
+                            "WO Number": (
+                                item["wo_number"]
+                                or "-"
+                            ),
+                            "BOQ Amount Exc. PPN": (
+                                item["boq_amount"]
+                            ),
+                            f"Invoice Amount ({selected_termin})": (
+                                item["amount"]
+                            ),
+                        }
+                    )
 
-                        "QTY": item[
-                            "qty"
-                        ],
-
-                        "UOM": item[
-                            "uom"
-                        ],
-
-                        "CHARGER TYPE": item[
-                            "charging_type"
-                        ],
-
-                        "WO NUMBER": item[
-                            "wo_number"
-                        ],
-
-                        "UNIT PRICE": item[
-                            "unit_price"
-                        ],
-
-                        "AMOUNT": item[
-                            "amount"
-                        ],
-                    }
+                preview_df = pd.DataFrame(
+                    preview_rows
                 )
 
-            invoice_preview_df = pd.DataFrame(
-                invoice_preview_rows
-            )
+                # ==============================================================
+                # FORMAT NOMINAL
+                # ==============================================================
 
-            display_invoice_df = (
-                invoice_preview_df.copy()
-            )
+                display_df = preview_df.copy()
 
-            display_invoice_df[
-                "UNIT PRICE"
-            ] = display_invoice_df[
-                "UNIT PRICE"
-            ].apply(
-                lambda x: f"{x:,.0f}"
-            )
+                display_df[
+                    "BOQ Amount Exc. PPN"
+                ] = display_df[
+                    "BOQ Amount Exc. PPN"
+                ].apply(
+                    lambda x: f"Rp {x:,.2f}"
+                )
 
-            display_invoice_df[
-                "AMOUNT"
-            ] = display_invoice_df[
-                "AMOUNT"
-            ].apply(
-                lambda x: f"{x:,.0f}"
-            )
+                display_df[
+                    f"Invoice Amount ({selected_termin})"
+                ] = display_df[
+                    f"Invoice Amount ({selected_termin})"
+                ].apply(
+                    lambda x: f"Rp {x:,.2f}"
+                )
 
-            st.dataframe(
-                display_invoice_df,
-                use_container_width=True,
-                hide_index=True,
-            )
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # ==============================================================
+                # WARNING JIKA BOQ KOSONG
+                # ==============================================================
+
+                missing_boq = [
+                    item["site_name"]
+                    for item in site_data
+                    if item["boq_amount"] <= 0
+                ]
+
+                if missing_boq:
+
+                    st.warning(
+                        "⚠️ BOQ Amount tidak ditemukan "
+                        "di DB BOQ untuk:"
+                    )
+
+                    for site in missing_boq:
+                        st.write(
+                            f"- {site}"
+                        )
+
+                    st.caption(
+                        "Pencarian menggunakan "
+                        "Site Name + Charger Type "
+                        "pada DB BOQ."
+                    )
+
+            else:
+
+                st.info(
+                    "Pilih minimal satu Site Name "
+                    "untuk melihat detail BOQ."
+                )
 
         # ======================================================================
         # SUMMARY
         # ======================================================================
+
         st.info(
             f"""
 **Ringkasan Perhitungan:**
 
 * **Skema TOP Terpilih:** {selected_schema}
-* **Jumlah Site:** {len(calculated_items)}
-* **BOQ Amount Total:** Rp {sum(item['boq_amount'] for item in calculated_items):,.2f}
+* **Jumlah Site:** {len(site_data)}
+* **Total BOQ Amount Exc. PPN:** Rp {total_boq_amount:,.2f}
 * **Nilai Invoice ({selected_termin}):** Rp {termin_amount:,.2f}
 * **PPN ({tax_rate}%):** Rp {tax_amount:,.2f}
 * **GRAND TOTAL:** Rp {grand_total:,.2f}
@@ -1876,17 +1796,13 @@ def render():
         # ======================================================================
         # SUBMIT
         # ======================================================================
+
         is_disabled = (
-            True
-            if (
-                selected_project
-                == "VGreen - Project"
-                and (
-                    not available_termins
-                    or not selected_sites
-                )
+            selected_project == "VGreen - Project"
+            and (
+                not available_termins
+                or not selected_sites
             )
-            else False
         )
 
         submit_btn = st.form_submit_button(
@@ -1896,9 +1812,14 @@ def render():
         )
 
     # ==========================================================================
-    # SAVE TO DB
+    # SAVE
     # ==========================================================================
+
     if submit_btn:
+
+        # ----------------------------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------------------------
 
         if not efaktur_no:
 
@@ -1906,160 +1827,164 @@ def render():
                 "⚠️ No. Efaktur wajib diisi!"
             )
 
-        elif not selected_sites:
+            return
+
+        if not selected_sites:
 
             st.error(
                 "⚠️ Site Name / Item Description "
                 "wajib diisi!"
             )
 
-        else:
+            return
+
+        # ----------------------------------------------------------------------
+        # VALIDASI BOQ
+        # ----------------------------------------------------------------------
+
+        if (
+            selected_project
+            == "VGreen - Project"
+        ):
+
+            missing_boq = [
+                item["site_name"]
+                for item in site_data
+                if item["boq_amount"] <= 0
+            ]
+
+            if missing_boq:
+
+                st.error(
+                    "🚨 Invoice tidak dapat disimpan "
+                    "karena BOQ Amount tidak ditemukan "
+                    "untuk site berikut:"
+                )
+
+                for site in missing_boq:
+                    st.write(
+                        f"- {site}"
+                    )
+
+                st.info(
+                    "Pastikan Site Name dan Charger Type "
+                    "pada DB BOQ sesuai dengan data Query."
+                )
+
+                return
+
+        # ----------------------------------------------------------------------
+        # SAVE EACH SITE
+        # ----------------------------------------------------------------------
+
+        if sheet_db:
 
             try:
 
-                # =================================================================
-                # SAVE SATU ROW UNTUK SETIAP SITE
-                # =================================================================
-                if sheet_db:
+                # ==============================================================
+                # SATU INVOICE NUMBER
+                # DIGUNAKAN UNTUK SEMUA SITE
+                # ==============================================================
 
-                    for item in calculated_items:
+                for item in site_data:
 
-                        new_row = [
+                    new_row = [
+                        selected_project,
+                        auto_inv_no,
+                        inv_date.strftime(
+                            "%d %B %Y"
+                        ),
+                        item["charging_type"],
+                        item["site_name"],
+                        item["wo_number"],
+                        selected_termin,
+                        efaktur_no,
+                        f"{item['amount']:.2f}",
+                        f"{
+                            item['amount']
+                            + (
+                                item['amount']
+                                * tax_rate
+                                / 100
+                            )
+                        :.2f}",
+                    ]
 
-                            selected_project,
-
-                            auto_inv_no,
-
-                            inv_date.strftime(
-                                "%d %B %Y"
-                            ),
-
-                            item[
-                                "charging_type"
-                            ],
-
-                            item[
-                                "site_name"
-                            ],
-
-                            item[
-                                "wo_number"
-                            ],
-
-                            selected_termin,
-
-                            efaktur_no,
-
-                            f"{item['amount']:.2f}",
-
-                            f"{item['amount'] + (item['amount'] * tax_rate / 100):.2f}",
-                        ]
-
-                        sheet_db.append_row(
-                            new_row
-                        )
-
-                    # =============================================================
-                    # SUCCESS
-                    # =============================================================
-                    st.success(
-                        f"✅ Invoice **{auto_inv_no}** "
-                        f"berhasil disimpan ke Sheet "
-                        f"'DB Invoice'!"
+                    sheet_db.append_row(
+                        new_row
                     )
 
-                    st.success(
-                        f"📍 Total **{len(calculated_items)} site** "
-                        f"berhasil disimpan."
+                st.success(
+                    f"✅ Invoice **{auto_inv_no}** "
+                    f"berhasil disimpan ke Sheet "
+                    f"'DB Invoice' untuk "
+                    f"**{len(site_data)} site**!"
+                )
+
+                st.balloons()
+
+                # ==============================================================
+                # PDF PAYLOAD
+                # ==============================================================
+
+                pdf_payload = {
+                    "project_name": selected_project,
+                    "inv_no": auto_inv_no,
+                    "inv_date": inv_date.strftime(
+                        "%d %B %Y"
+                    ),
+                    "efaktur": efaktur_no,
+                    "items": site_data,
+                    "subtotal": termin_amount,
+                    "tax_rate": tax_rate,
+                    "tax_amount": tax_amount,
+                    "grand_total": grand_total,
+                }
+
+                # ==============================================================
+                # CREATE PDF
+                # ==============================================================
+
+                pdf_file_bytes = create_invoice_pdf(
+                    pdf_payload
+                )
+
+                st.session_state[
+                    "pdf_ready"
+                ] = pdf_file_bytes
+
+                st.session_state[
+                    "pdf_name"
+                ] = (
+                    "Invoice_"
+                    + auto_inv_no.replace(
+                        "/",
+                        "_"
                     )
-
-                    st.balloons()
-
-                    # =============================================================
-                    # PDF PAYLOAD
-                    # =============================================================
-                    pdf_payload = {
-
-                        "project_name":
-                            selected_project,
-
-                        "inv_no":
-                            auto_inv_no,
-
-                        "inv_date":
-                            inv_date.strftime(
-                                "%d %B %Y"
-                            ),
-
-                        "efaktur":
-                            efaktur_no,
-
-                        "termin":
-                            selected_termin,
-
-                        "items":
-                            calculated_items,
-
-                        "subtotal":
-                            termin_amount,
-
-                        "tax_rate":
-                            tax_rate,
-
-                        "tax_amount":
-                            tax_amount,
-
-                        "grand_total":
-                            grand_total,
-                    }
-
-                    # =============================================================
-                    # GENERATE PDF
-                    # =============================================================
-                    pdf_file_bytes = (
-                        create_invoice_pdf(
-                            pdf_payload
-                        )
-                    )
-
-                    st.session_state[
-                        "pdf_ready"
-                    ] = pdf_file_bytes
-
-                    st.session_state[
-                        "pdf_name"
-                    ] = (
-                        "Invoice_"
-                        + auto_inv_no.replace(
-                            "/",
-                            "_"
-                        )
-                        + ".pdf"
-                    )
-
-                else:
-
-                    st.error(
-                        "🚨 Tidak terhubung ke "
-                        "Google Sheets."
-                    )
+                    + ".pdf"
+                )
 
             except Exception as e:
 
                 st.error(
-                    f"🚨 Gagal menyimpan ke "
+                    "🚨 Gagal menyimpan ke "
                     f"Google Sheets: {e}"
                 )
+
+        else:
+
+            st.error(
+                "🚨 Tidak terhubung ke "
+                "Google Sheets."
+            )
 
     # ==========================================================================
     # DOWNLOAD PDF
     # ==========================================================================
+
     if (
-        "pdf_ready"
-        in st.session_state
-        and st.session_state[
-            "pdf_ready"
-        ]
+        "pdf_ready" in st.session_state
+        and st.session_state["pdf_ready"]
     ):
 
         st.markdown("---")
@@ -2070,18 +1995,13 @@ def render():
 
         st.download_button(
             label="📄 Download Invoice PDF",
-
             data=st.session_state[
                 "pdf_ready"
             ],
-
             file_name=st.session_state[
                 "pdf_name"
             ],
-
             mime="application/pdf",
-
             type="primary",
-
             key="dl_btn_invoice",
         )
