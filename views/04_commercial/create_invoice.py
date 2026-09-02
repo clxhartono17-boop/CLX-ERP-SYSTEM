@@ -3,16 +3,20 @@
 # CLX ERP SYSTEM
 #
 # VERSION:
-# CREATE INVOICE V2.0
+# CREATE INVOICE V2.1
 #
-# UPDATE:
-# 1. Site Name selector moved OUTSIDE st.form
-# 2. Live Preview Site & BOQ saat Site Name dipilih
-# 3. BOQ Amount mengambil DB BOQ kolom E
-# 4. Termin / Percentage realtime
-# 5. Invoice Amount realtime
-# 6. Save tetap menggunakan form_submit_button
-# 7. PDF Invoice tetap dipertahankan
+# UPDATE V2.1:
+# 1. Site Name menggunakan MULTISELECT
+# 2. Bisa memilih lebih dari 1 Site
+# 3. Site selection berada OUTSIDE st.form
+# 4. Live Preview Site & BOQ
+# 5. Session State untuk menjaga pilihan Site
+# 6. BOQ Amount mengambil DB BOQ kolom E
+# 7. Invoice Amount realtime
+# 8. Total BOQ realtime
+# 9. Total Invoice realtime
+# 10. Save ke DB Invoice tetap berjalan
+# 11. Generate PDF tetap berjalan
 # ==============================================================================
 
 import os
@@ -31,14 +35,19 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import (
+    getSampleStyleSheet,
+    ParagraphStyle,
+)
 
 
 # ==============================================================================
 # CONFIG
 # ==============================================================================
 
-SPREADSHEET_ID = "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
+SPREADSHEET_ID = (
+    "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
+)
 
 MONTH_ROMAN = {
     1: "I",
@@ -57,35 +66,55 @@ MONTH_ROMAN = {
 
 
 # ==============================================================================
-# GENERAL HELPERS
+# SESSION STATE INITIALIZATION
+# ==============================================================================
+
+def initialize_session_state():
+
+    if "invoice_selected_sites" not in st.session_state:
+        st.session_state[
+            "invoice_selected_sites"
+        ] = []
+
+    if "pdf_ready" not in st.session_state:
+        st.session_state[
+            "pdf_ready"
+        ] = None
+
+    if "pdf_name" not in st.session_state:
+        st.session_state[
+            "pdf_name"
+        ] = "Invoice.pdf"
+
+
+# ==============================================================================
+# FORMAT CURRENCY
 # ==============================================================================
 
 def format_currency(value):
-    """
-    Format angka menjadi format Rupiah.
-    """
+
     try:
         value = float(value or 0)
     except Exception:
         value = 0
 
-    return f"Rp {value:,.0f}".replace(",", ".")
+    return (
+        f"Rp {value:,.0f}"
+        .replace(",", ".")
+    )
 
+
+# ==============================================================================
+# PARSE AMOUNT
+# ==============================================================================
 
 def parse_amount(value):
-    """
-    Parse berbagai format nominal:
-    1000000
-    1.000.000
-    Rp 1.000.000
-    1,000,000
-    1.000,50
-    """
 
     if value is None:
         return 0.0
 
     if isinstance(value, (int, float)):
+
         try:
             return float(value)
         except Exception:
@@ -97,58 +126,79 @@ def parse_amount(value):
         return 0.0
 
     value = (
-        value.replace("Rp", "")
+        value
+        .replace("Rp", "")
         .replace("rp", "")
         .replace(" ", "")
     )
 
-    # ------------------------------------------------------------------
-    # Handle Indonesian / international number format
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
+    # Both "." and ","
+    # --------------------------------------------------------------
+
     if "." in value and "," in value:
 
-        # Example:
+        # Indonesian:
         # 1.234.567,89
-        # => 1234567.89
         if value.rfind(",") > value.rfind("."):
+
             value = value.replace(".", "")
             value = value.replace(",", ".")
 
-        # Example:
+        # International:
         # 1,234,567.89
         else:
+
             value = value.replace(",", "")
+
+    # --------------------------------------------------------------
+    # Comma only
+    # --------------------------------------------------------------
 
     elif "," in value:
 
         parts = value.split(",")
 
-        # 1,234,567
         if len(parts) > 2:
+
             value = value.replace(",", "")
 
-        # 100,50
-        elif len(parts) == 2 and len(parts[1]) <= 2:
+        elif (
+            len(parts) == 2
+            and len(parts[1]) <= 2
+        ):
+
             value = value.replace(",", ".")
 
         else:
+
             value = value.replace(",", "")
+
+    # --------------------------------------------------------------
+    # Dot only
+    # --------------------------------------------------------------
 
     elif "." in value:
 
         parts = value.split(".")
 
-        # 1.000.000
         if len(parts) > 2:
+
             value = value.replace(".", "")
 
-        # 1.000
-        elif len(parts) == 2 and len(parts[1]) == 3:
+        elif (
+            len(parts) == 2
+            and len(parts[1]) == 3
+        ):
+
             value = value.replace(".", "")
 
     try:
+
         return float(value)
+
     except Exception:
+
         return 0.0
 
 
@@ -158,46 +208,49 @@ def parse_amount(value):
 
 @st.cache_resource
 def init_gspread():
-    """
-    Initialize Google Sheets connection.
-
-    Supports:
-    1. Streamlit secrets
-    2. Local credentials.json
-    """
 
     gc = None
 
     # ------------------------------------------------------------------
-    # Streamlit Cloud / Secrets
+    # Streamlit Secrets
     # ------------------------------------------------------------------
+
     try:
+
         if "gcp_service_account" in st.secrets:
 
             credentials_dict = dict(
-                st.secrets["gcp_service_account"]
+                st.secrets[
+                    "gcp_service_account"
+                ]
             )
 
-            gc = gspread.service_account_from_dict(
-                credentials_dict
+            gc = (
+                gspread
+                .service_account_from_dict(
+                    credentials_dict
+                )
             )
 
     except Exception:
+
         gc = None
 
     # ------------------------------------------------------------------
     # Local credentials.json
     # ------------------------------------------------------------------
+
     if gc is None:
 
         credentials_path = os.path.join(
             os.getcwd(),
-            "credentials.json"
+            "credentials.json",
         )
 
-        if not os.path.exists(credentials_path):
+        if not os.path.exists(
+            credentials_path
+        ):
 
-            # Try project root
             project_root = os.path.dirname(
                 os.path.dirname(
                     os.path.abspath(__file__)
@@ -206,10 +259,12 @@ def init_gspread():
 
             credentials_path = os.path.join(
                 project_root,
-                "credentials.json"
+                "credentials.json",
             )
 
-        if not os.path.exists(credentials_path):
+        if not os.path.exists(
+            credentials_path
+        ):
 
             raise FileNotFoundError(
                 "credentials.json tidak ditemukan."
@@ -227,20 +282,28 @@ def init_gspread():
         "Query"
     )
 
-    sheet_master_dropdown = spreadsheet.worksheet(
-        "Master Dropdown"
+    sheet_master_dropdown = (
+        spreadsheet.worksheet(
+            "Master Dropdown"
+        )
     )
 
-    sheet_erp_project = spreadsheet.worksheet(
-        "ERP Project"
+    sheet_erp_project = (
+        spreadsheet.worksheet(
+            "ERP Project"
+        )
     )
 
-    sheet_db_invoice = spreadsheet.worksheet(
-        "DB Invoice"
+    sheet_db_invoice = (
+        spreadsheet.worksheet(
+            "DB Invoice"
+        )
     )
 
-    sheet_db_boq = spreadsheet.worksheet(
-        "DB BOQ"
+    sheet_db_boq = (
+        spreadsheet.worksheet(
+            "DB BOQ"
+        )
     )
 
     return (
@@ -253,21 +316,20 @@ def init_gspread():
 
 
 # ==============================================================================
-# GOOGLE SHEETS RAW DATA
+# GET RAW MATRIX
 # ==============================================================================
 
 def get_raw_matrix(sheet):
-    """
-    Read worksheet as matrix.
-    """
 
     try:
+
         return sheet.get_all_values()
 
     except Exception as e:
 
         st.error(
-            f"Gagal membaca sheet `{sheet.title}`: {e}"
+            f"Gagal membaca sheet "
+            f"`{sheet.title}`: {e}"
         )
 
         return []
@@ -277,32 +339,33 @@ def get_raw_matrix(sheet):
 # AUTO INVOICE NUMBER
 # ==============================================================================
 
-def generate_auto_invoice_no(sheet_db):
-    """
-    Generate Invoice Number:
-
-    0001/INV/CLX/IX/2026
-
-    Existing sequence minimum starts at 462.
-    """
+def generate_auto_invoice_no(
+    sheet_db
+):
 
     now = datetime.now()
 
     month_roman = MONTH_ROMAN.get(
         now.month,
-        ""
+        "",
     )
 
     try:
-        records = sheet_db.get_all_records()
+
+        records = (
+            sheet_db
+            .get_all_records()
+        )
+
     except Exception:
+
         records = []
 
     try:
 
         next_seq = max(
             len(records) + 1,
-            462
+            462,
         )
 
     except Exception:
@@ -316,22 +379,16 @@ def generate_auto_invoice_no(sheet_db):
 
 
 # ==============================================================================
-# QUERY DATA
+# QUERY SITE DATA
 # ==============================================================================
 
 def get_site_data_from_query(
     raw_query,
-    site_name
+    site_name,
 ):
-    """
-    Query structure:
-
-    C = Charging Type
-    F = Site Name
-    W = WO Number
-    """
 
     if not raw_query:
+
         return {
             "site_name": site_name,
             "charging_type": "",
@@ -367,28 +424,14 @@ def get_site_data_from_query(
 
 
 # ==============================================================================
-# DB BOQ DATA
+# GET BOQ AMOUNT
 # ==============================================================================
 
 def get_boq_amount_from_db_boq(
     raw_db_boq,
     site_name,
-    charging_type
+    charging_type,
 ):
-    """
-    DB BOQ structure:
-
-    A = No
-    B = BOQ No.
-    C = Site Name
-    D = Charger Type
-    E = BOQ Amount Exc. PPN
-    F = BOQ Amount inc. PPN
-    G = EPC Name
-
-    Return:
-    BOQ Amount Exc. PPN
-    """
 
     if not raw_db_boq:
         return 0.0
@@ -433,20 +476,8 @@ def get_boq_amount_from_db_boq(
 def build_site_data(
     raw_query,
     raw_db_boq,
-    selected_sites
+    selected_sites,
 ):
-    """
-    Build complete site data.
-
-    Output:
-
-    {
-        site_name,
-        charging_type,
-        wo_number,
-        boq_amount
-    }
-    """
 
     result = []
 
@@ -455,36 +486,46 @@ def build_site_data(
 
     for site in selected_sites:
 
-        query_data = get_site_data_from_query(
-            raw_query,
-            site
+        query_data = (
+            get_site_data_from_query(
+                raw_query,
+                site,
+            )
         )
 
         site_name = query_data.get(
             "site_name",
-            site
+            site,
         )
 
-        charging_type = query_data.get(
-            "charging_type",
-            ""
+        charging_type = (
+            query_data.get(
+                "charging_type",
+                "",
+            )
         )
 
-        wo_number = query_data.get(
-            "wo_number",
-            ""
+        wo_number = (
+            query_data.get(
+                "wo_number",
+                "",
+            )
         )
 
-        boq_amount = get_boq_amount_from_db_boq(
-            raw_db_boq,
-            site_name,
-            charging_type
+        boq_amount = (
+            get_boq_amount_from_db_boq(
+                raw_db_boq,
+                site_name,
+                charging_type,
+            )
         )
 
         result.append(
             {
                 "site_name": site_name,
-                "charging_type": charging_type,
+                "charging_type": (
+                    charging_type
+                ),
                 "wo_number": wo_number,
                 "boq_amount": boq_amount,
             }
@@ -494,24 +535,46 @@ def build_site_data(
 
 
 # ==============================================================================
-# PREVIEW SITE & BOQ
+# SITE SELECTION CALLBACK
+# ==============================================================================
+
+def update_selected_sites():
+
+    selected = st.session_state.get(
+        "invoice_site_selector_multi_v2",
+        [],
+    )
+
+    # Pastikan selalu list
+    if selected is None:
+
+        selected = []
+
+    if not isinstance(
+        selected,
+        list,
+    ):
+
+        selected = list(selected)
+
+    st.session_state[
+        "invoice_selected_sites"
+    ] = selected
+
+
+# ==============================================================================
+# RENDER SITE BOQ PREVIEW
 # ==============================================================================
 
 def render_site_boq_preview(
     site_data,
-    show_invoice_amount=False,
-    selected_pct=0
 ):
-    """
-    Live preview table.
-
-    Dipanggil setelah Site Name dipilih.
-    """
 
     if not site_data:
 
         st.info(
-            "🔎 Pilih Site Name untuk melihat preview BOQ."
+            "👆 Pilih Site Name terlebih dahulu "
+            "untuk melihat Preview BOQ."
         )
 
         return
@@ -526,14 +589,15 @@ def render_site_boq_preview(
 
     for index, item in enumerate(
         site_data,
-        start=1
+        start=1,
     ):
 
         boq_amount = float(
             item.get(
                 "boq_amount",
-                0
-            ) or 0
+                0,
+            )
+            or 0
         )
 
         if boq_amount <= 0:
@@ -541,45 +605,31 @@ def render_site_boq_preview(
             missing_boq.append(
                 item.get(
                     "site_name",
-                    ""
+                    "",
                 )
             )
 
-        invoice_amount = (
-            boq_amount
-            * float(selected_pct or 0)
-            / 100
-        )
-
-        row = {
-            "NO.": index,
-            "SITE NAME": item.get(
-                "site_name",
-                ""
-            ),
-            "CHARGER TYPE": item.get(
-                "charging_type",
-                ""
-            ),
-            "WO NUMBER": item.get(
-                "wo_number",
-                ""
-            ),
-            "BOQ AMOUNT EXC. PPN": format_currency(
-                boq_amount
-            ),
-        }
-
-        if show_invoice_amount:
-
-            row[
-                "INVOICE AMOUNT"
-            ] = format_currency(
-                invoice_amount
-            )
-
         preview_rows.append(
-            row
+            {
+                "NO.": index,
+                "SITE NAME": item.get(
+                    "site_name",
+                    "",
+                ),
+                "CHARGER TYPE": item.get(
+                    "charging_type",
+                    "",
+                ),
+                "WO NUMBER": item.get(
+                    "wo_number",
+                    "",
+                ),
+                "BOQ AMOUNT EXC. PPN": (
+                    format_currency(
+                        boq_amount
+                    )
+                ),
+            }
         )
 
     preview_df = pd.DataFrame(
@@ -592,35 +642,75 @@ def render_site_boq_preview(
         hide_index=True,
     )
 
+    # ------------------------------------------------------------------
+    # Summary selected site
+    # ------------------------------------------------------------------
+
+    total_selected = len(
+        site_data
+    )
+
+    total_boq = sum(
+        float(
+            item.get(
+                "boq_amount",
+                0,
+            )
+            or 0
+        )
+        for item in site_data
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        st.metric(
+            "Jumlah Site",
+            total_selected,
+        )
+
+    with col2:
+
+        st.metric(
+            "Total BOQ Exc. PPN",
+            format_currency(
+                total_boq
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # BOQ validation
+    # ------------------------------------------------------------------
+
     if missing_boq:
 
         st.warning(
             "⚠️ BOQ Amount belum ditemukan "
-            "untuk site berikut:\n\n"
-            + "\n".join(
-                [
-                    f"- {site}"
-                    for site in missing_boq
-                ]
-            )
+            "untuk Site berikut:"
         )
+
+        for site in missing_boq:
+
+            st.write(
+                f"- {site}"
+            )
 
     else:
 
         st.success(
-            "✅ Semua Site memiliki data "
+            "✅ Semua Site memiliki "
             "BOQ Amount dari DB BOQ kolom E."
         )
 
 
 # ==============================================================================
-# PDF GENERATOR
+# CREATE INVOICE PDF
 # ==============================================================================
 
-def create_invoice_pdf(data):
-    """
-    Generate Invoice PDF.
-    """
+def create_invoice_pdf(
+    data
+):
 
     buffer = io.BytesIO()
 
@@ -661,7 +751,7 @@ def create_invoice_pdf(data):
     story = []
 
     # ------------------------------------------------------------------
-    # Header image
+    # PROJECT ROOT
     # ------------------------------------------------------------------
 
     project_root = os.path.dirname(
@@ -673,16 +763,22 @@ def create_invoice_pdf(data):
     header_path = os.path.join(
         project_root,
         "assets",
-        "header.png"
+        "header.png",
     )
 
     footer_path = os.path.join(
         project_root,
         "assets",
-        "Footer.png"
+        "Footer.png",
     )
 
-    if os.path.exists(header_path):
+    # ------------------------------------------------------------------
+    # HEADER
+    # ------------------------------------------------------------------
+
+    if os.path.exists(
+        header_path
+    ):
 
         try:
 
@@ -692,8 +788,13 @@ def create_invoice_pdf(data):
                 header_path
             )
 
-            header_img.drawHeight = 0.55 * 72
-            header_img.drawWidth = 7.0 * 72
+            header_img.drawHeight = (
+                0.55 * 72
+            )
+
+            header_img.drawWidth = (
+                7.0 * 72
+            )
 
             story.append(
                 header_img
@@ -704,16 +805,17 @@ def create_invoice_pdf(data):
             )
 
         except Exception:
+
             pass
 
     # ------------------------------------------------------------------
-    # Title
+    # TITLE
     # ------------------------------------------------------------------
 
     story.append(
         Paragraph(
             "INVOICE",
-            title_style
+            title_style,
         )
     )
 
@@ -722,7 +824,7 @@ def create_invoice_pdf(data):
             "<b>Bill To:</b> "
             "PT Vgreen Global Charging "
             "Station Investment Indonesia",
-            normal_style
+            normal_style,
         )
     )
 
@@ -731,68 +833,68 @@ def create_invoice_pdf(data):
     )
 
     # ------------------------------------------------------------------
-    # Invoice Meta
+    # META
     # ------------------------------------------------------------------
 
     meta_data = [
         [
             Paragraph(
                 "<b>No Invoice</b>",
-                normal_style
+                normal_style,
             ),
             Paragraph(
                 str(
                     data.get(
                         "invoice_no",
-                        ""
+                        "",
                     )
                 ),
-                normal_style
+                normal_style,
             ),
         ],
         [
             Paragraph(
                 "<b>Invoice Date</b>",
-                normal_style
+                normal_style,
             ),
             Paragraph(
                 str(
                     data.get(
                         "invoice_date",
-                        ""
+                        "",
                     )
                 ),
-                normal_style
+                normal_style,
             ),
         ],
         [
             Paragraph(
                 "<b>Project Name</b>",
-                normal_style
+                normal_style,
             ),
             Paragraph(
                 str(
                     data.get(
                         "project_name",
-                        ""
+                        "",
                     )
                 ),
-                normal_style
+                normal_style,
             ),
         ],
         [
             Paragraph(
                 "<b>No Efaktur</b>",
-                normal_style
+                normal_style,
             ),
             Paragraph(
                 str(
                     data.get(
                         "efaktur_no",
-                        ""
+                        "",
                     )
                 ),
-                normal_style
+                normal_style,
             ),
         ],
     ]
@@ -801,8 +903,8 @@ def create_invoice_pdf(data):
         meta_data,
         colWidths=[
             100,
-            390
-        ]
+            390,
+        ],
     )
 
     meta_table.setStyle(
@@ -812,31 +914,31 @@ def create_invoice_pdf(data):
                     "VALIGN",
                     (0, 0),
                     (-1, -1),
-                    "TOP"
+                    "TOP",
                 ),
                 (
                     "LEFTPADDING",
                     (0, 0),
                     (-1, -1),
-                    0
+                    0,
                 ),
                 (
                     "RIGHTPADDING",
                     (0, 0),
                     (-1, -1),
-                    4
+                    4,
                 ),
                 (
                     "TOPPADDING",
                     (0, 0),
                     (-1, -1),
-                    2
+                    2,
                 ),
                 (
                     "BOTTOMPADDING",
                     (0, 0),
                     (-1, -1),
-                    2
+                    2,
                 ),
             ]
         )
@@ -851,7 +953,7 @@ def create_invoice_pdf(data):
     )
 
     # ------------------------------------------------------------------
-    # Item Table
+    # ITEM TABLE
     # ------------------------------------------------------------------
 
     table_header = [
@@ -869,7 +971,7 @@ def create_invoice_pdf(data):
         [
             Paragraph(
                 f"<b>{x}</b>",
-                small_style
+                small_style,
             )
             for x in table_header
         ]
@@ -878,70 +980,71 @@ def create_invoice_pdf(data):
     for index, item in enumerate(
         data.get(
             "site_data",
-            []
+            [],
         ),
-        start=1
+        start=1,
     ):
 
         amount = float(
             item.get(
                 "invoice_amount",
-                0
-            ) or 0
+                0,
+            )
+            or 0
         )
 
         item_rows.append(
             [
                 Paragraph(
                     str(index),
-                    small_style
+                    small_style,
                 ),
                 Paragraph(
                     str(
                         item.get(
                             "site_name",
-                            ""
+                            "",
                         )
                     ),
-                    small_style
+                    small_style,
                 ),
                 Paragraph(
                     "1",
-                    small_style
+                    small_style,
                 ),
                 Paragraph(
                     "Unit",
-                    small_style
+                    small_style,
                 ),
                 Paragraph(
                     str(
                         item.get(
                             "charging_type",
-                            ""
+                            "",
                         )
                     ),
-                    small_style
+                    small_style,
                 ),
                 Paragraph(
                     str(
                         item.get(
                             "wo_number",
-                            ""
+                            "",
                         )
                     ),
-                    small_style
+                    small_style,
                 ),
                 Paragraph(
                     format_currency(
                         amount
                     ),
-                    small_style
+                    small_style,
                 ),
                 Paragraph(
                     format_currency(
                         amount
                     ),
-                    small_style
+                    small_style,
                 ),
             ]
         )
@@ -969,67 +1072,67 @@ def create_invoice_pdf(data):
                     (0, 0),
                     (-1, -1),
                     0.5,
-                    colors.black
+                    colors.black,
                 ),
                 (
                     "BACKGROUND",
                     (0, 0),
                     (-1, 0),
-                    colors.lightgrey
+                    colors.lightgrey,
                 ),
                 (
                     "VALIGN",
                     (0, 0),
                     (-1, -1),
-                    "MIDDLE"
+                    "MIDDLE",
                 ),
                 (
                     "ALIGN",
                     (0, 0),
                     (0, -1),
-                    "CENTER"
+                    "CENTER",
                 ),
                 (
                     "ALIGN",
                     (2, 1),
                     (2, -1),
-                    "CENTER"
+                    "CENTER",
                 ),
                 (
                     "ALIGN",
                     (3, 1),
                     (3, -1),
-                    "CENTER"
+                    "CENTER",
                 ),
                 (
                     "ALIGN",
                     (6, 1),
                     (-1, -1),
-                    "RIGHT"
+                    "RIGHT",
                 ),
                 (
                     "LEFTPADDING",
                     (0, 0),
                     (-1, -1),
-                    3
+                    3,
                 ),
                 (
                     "RIGHTPADDING",
                     (0, 0),
                     (-1, -1),
-                    3
+                    3,
                 ),
                 (
                     "TOPPADDING",
                     (0, 0),
                     (-1, -1),
-                    4
+                    4,
                 ),
                 (
                     "BOTTOMPADDING",
                     (0, 0),
                     (-1, -1),
-                    4
+                    4,
                 ),
             ]
         )
@@ -1044,35 +1147,39 @@ def create_invoice_pdf(data):
     )
 
     # ------------------------------------------------------------------
-    # Summary
+    # SUMMARY
     # ------------------------------------------------------------------
 
     subtotal = float(
         data.get(
             "subtotal",
-            0
-        ) or 0
+            0,
+        )
+        or 0
     )
 
     tax_rate = float(
         data.get(
             "tax_rate",
-            11
-        ) or 0
+            11,
+        )
+        or 0
     )
 
     tax_amount = float(
         data.get(
             "tax_amount",
-            0
-        ) or 0
+            0,
+        )
+        or 0
     )
 
     grand_total = float(
         data.get(
             "grand_total",
-            0
-        ) or 0
+            0,
+        )
+        or 0
     )
 
     summary_rows = [
@@ -1080,39 +1187,39 @@ def create_invoice_pdf(data):
             "",
             Paragraph(
                 "<b>Subtotal</b>",
-                normal_style
+                normal_style,
             ),
             Paragraph(
                 format_currency(
                     subtotal
                 ),
-                normal_style
+                normal_style,
             ),
         ],
         [
             "",
             Paragraph(
                 f"<b>PPN {tax_rate:.0f}%</b>",
-                normal_style
+                normal_style,
             ),
             Paragraph(
                 format_currency(
                     tax_amount
                 ),
-                normal_style
+                normal_style,
             ),
         ],
         [
             "",
             Paragraph(
                 "<b>TOTAL</b>",
-                normal_style
+                normal_style,
             ),
             Paragraph(
                 format_currency(
                     grand_total
                 ),
-                normal_style
+                normal_style,
             ),
         ],
     ]
@@ -1122,8 +1229,8 @@ def create_invoice_pdf(data):
         colWidths=[
             270,
             120,
-            125
-        ]
+            125,
+        ],
     )
 
     summary_table.setStyle(
@@ -1133,26 +1240,26 @@ def create_invoice_pdf(data):
                     "ALIGN",
                     (2, 0),
                     (2, -1),
-                    "RIGHT"
+                    "RIGHT",
                 ),
                 (
                     "TOPPADDING",
                     (0, 0),
                     (-1, -1),
-                    4
+                    4,
                 ),
                 (
                     "BOTTOMPADDING",
                     (0, 0),
                     (-1, -1),
-                    4
+                    4,
                 ),
                 (
                     "LINEABOVE",
                     (1, 2),
                     (2, 2),
                     1,
-                    colors.black
+                    colors.black,
                 ),
             ]
         )
@@ -1167,13 +1274,13 @@ def create_invoice_pdf(data):
     )
 
     # ------------------------------------------------------------------
-    # Payment Info
+    # PAYMENT INFO
     # ------------------------------------------------------------------
 
     story.append(
         Paragraph(
             "<b>Payment Information</b>",
-            normal_style
+            normal_style,
         )
     )
 
@@ -1181,8 +1288,9 @@ def create_invoice_pdf(data):
         Paragraph(
             "Bank : BCA<br/>"
             "Account Number : 540-5282841<br/>"
-            "Account Name : PT. CONNECTIVITY LEADS EXCELLENCE",
-            normal_style
+            "Account Name : "
+            "PT. CONNECTIVITY LEADS EXCELLENCE",
+            normal_style,
         )
     )
 
@@ -1191,7 +1299,7 @@ def create_invoice_pdf(data):
     )
 
     # ------------------------------------------------------------------
-    # Signature
+    # SIGNATURE
     # ------------------------------------------------------------------
 
     today_str = datetime.now().strftime(
@@ -1202,7 +1310,7 @@ def create_invoice_pdf(data):
         [
             Paragraph(
                 f"Jakarta, {today_str}",
-                normal_style
+                normal_style,
             )
         ],
         [
@@ -1211,13 +1319,13 @@ def create_invoice_pdf(data):
         [
             Paragraph(
                 "<b>Christian</b>",
-                normal_style
+                normal_style,
             )
         ],
         [
             Paragraph(
                 "President Director",
-                normal_style
+                normal_style,
             )
         ],
     ]
@@ -1226,7 +1334,7 @@ def create_invoice_pdf(data):
         signature_data,
         colWidths=[
             200
-        ]
+        ],
     )
 
     signature_table.setStyle(
@@ -1236,7 +1344,7 @@ def create_invoice_pdf(data):
                     "ALIGN",
                     (0, 0),
                     (-1, -1),
-                    "CENTER"
+                    "CENTER",
                 ),
             ]
         )
@@ -1247,10 +1355,12 @@ def create_invoice_pdf(data):
     )
 
     # ------------------------------------------------------------------
-    # Footer image
+    # FOOTER
     # ------------------------------------------------------------------
 
-    if os.path.exists(footer_path):
+    if os.path.exists(
+        footer_path
+    ):
 
         try:
 
@@ -1264,14 +1374,20 @@ def create_invoice_pdf(data):
                 footer_path
             )
 
-            footer_img.drawHeight = 0.35 * 72
-            footer_img.drawWidth = 7.0 * 72
+            footer_img.drawHeight = (
+                0.35 * 72
+            )
+
+            footer_img.drawWidth = (
+                7.0 * 72
+            )
 
             story.append(
                 footer_img
             )
 
         except Exception:
+
             pass
 
     doc.build(
@@ -1289,6 +1405,8 @@ def create_invoice_pdf(data):
 
 def render():
 
+    initialize_session_state()
+
     # ------------------------------------------------------------------
     # PAGE HEADER
     # ------------------------------------------------------------------
@@ -1298,12 +1416,12 @@ def render():
     )
 
     st.caption(
-        "Create Invoice berdasarkan Site Name, "
-        "BOQ, WO Number dan Termin."
+        "Create Invoice berdasarkan "
+        "Site Name, BOQ, WO Number dan Termin."
     )
 
     # ------------------------------------------------------------------
-    # CONNECT GOOGLE SHEETS
+    # CONNECT
     # ------------------------------------------------------------------
 
     try:
@@ -1349,16 +1467,16 @@ def render():
     )
 
     # ------------------------------------------------------------------
-    # AUTO INVOICE NUMBER
+    # AUTO INVOICE NO
     # ------------------------------------------------------------------
 
     auto_inv_no = generate_auto_invoice_no(
         sheet_db_invoice
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================================
     # PROJECT OPTIONS
-    # ------------------------------------------------------------------
+    # ==============================================================================
 
     project_options = []
 
@@ -1373,13 +1491,15 @@ def render():
                 row[6]
             ).strip()
 
-            if value and value not in project_options:
+            if (
+                value
+                and value not in project_options
+            ):
 
                 project_options.append(
                     value
                 )
 
-    # Fallback
     if not project_options:
 
         project_options = [
@@ -1389,7 +1509,6 @@ def render():
             "Charge Core",
         ]
 
-    # Ensure known projects exist
     known_projects = [
         "VGreen - Project",
         "VGreen - Operation",
@@ -1405,13 +1524,9 @@ def render():
                 project
             )
 
-    # ------------------------------------------------------------------
-    # BASIC INFORMATION
-    #
-    # IMPORTANT:
-    # Semua widget di bawah ini berada OUTSIDE FORM
-    # agar setiap perubahan langsung rerun.
-    # ------------------------------------------------------------------
+    # ==============================================================================
+    # INVOICE INFORMATION
+    # ==============================================================================
 
     st.markdown(
         "### 📋 Invoice Information"
@@ -1426,28 +1541,30 @@ def render():
         selected_project = st.selectbox(
             "Project Name",
             project_options,
-            key="invoice_project_name",
+            key="invoice_project_name_v2",
         )
 
         st.text_input(
             "Invoice No.",
             value=auto_inv_no,
             disabled=True,
-            key="invoice_number_display",
+            key="invoice_number_display_v2",
         )
 
         inv_date = st.date_input(
             "Invoice Date",
             value=datetime.now().date(),
-            key="invoice_date",
+            key="invoice_date_v2",
         )
 
     with col_right:
 
         efaktur_no = st.text_input(
             "No Efaktur",
-            key="invoice_efaktur",
-            placeholder="Masukkan nomor Efaktur",
+            key="invoice_efaktur_v2",
+            placeholder=(
+                "Masukkan nomor Efaktur"
+            ),
         )
 
         mode_invoice = st.selectbox(
@@ -1456,7 +1573,7 @@ def render():
                 "Invoice",
                 "Proforma Invoice",
             ],
-            key="invoice_mode",
+            key="invoice_mode_v2",
         )
 
     st.divider()
@@ -1470,6 +1587,10 @@ def render():
     )
 
     selected_sites = []
+
+    # ==============================================================================
+    # VGREEN PROJECT
+    # ==============================================================================
 
     if selected_project == "VGreen - Project":
 
@@ -1496,26 +1617,108 @@ def render():
                     )
 
         site_options = sorted(
-            site_options
+            site_options,
+            key=lambda x: x.lower(),
         )
+
+        # ------------------------------------------------------------------
+        # IMPORTANT:
+        #
+        # MULTISELECT
+        # Bisa pilih banyak Site.
+        #
+        # TIDAK ADA max_selections=1
+        # ------------------------------------------------------------------
+
+        current_selection = (
+            st.session_state.get(
+                "invoice_selected_sites",
+                [],
+            )
+        )
+
+        # ------------------------------------------------------------------
+        # Clean session state:
+        # hanya pertahankan site yang masih
+        # tersedia di options.
+        # ------------------------------------------------------------------
+
+        current_selection = [
+            x
+            for x in current_selection
+            if x in site_options
+        ]
+
+        st.session_state[
+            "invoice_selected_sites"
+        ] = current_selection
 
         selected_sites = st.multiselect(
             "Pilih Site Name",
             options=site_options,
-            key="invoice_site_selector",
-            placeholder="Pilih satu atau beberapa Site Name",
+
+            # ----------------------------------------------------------
+            # NO max_selections
+            # ----------------------------------------------------------
+            # Artinya unlimited selection.
+            # ----------------------------------------------------------
+
+            default=current_selection,
+
+            key=(
+                "invoice_site_selector_multi_v2"
+            ),
+
+            on_change=(
+                update_selected_sites
+            ),
+
+            placeholder=(
+                "Pilih satu atau beberapa "
+                "Site Name"
+            ),
+
             help=(
-                "Setelah Site Name dipilih, "
-                "Preview BOQ akan langsung muncul."
+                "Bisa memilih lebih dari "
+                "satu Site Name. "
+                "Klik Site berikutnya untuk "
+                "menambahkan ke pilihan."
             ),
         )
+
+        # ------------------------------------------------------------------
+        # Sinkronkan kembali session state
+        # ------------------------------------------------------------------
+
+        st.session_state[
+            "invoice_selected_sites"
+        ] = list(
+            selected_sites
+        )
+
+        # ------------------------------------------------------------------
+        # Selected site counter
+        # ------------------------------------------------------------------
+
+        if selected_sites:
+
+            st.caption(
+                f"📌 {len(selected_sites)} "
+                f"Site dipilih"
+            )
+
+    # ==============================================================================
+    # NON VGREEN PROJECT
+    # ==============================================================================
 
     else:
 
         manual_site = st.text_input(
             "Site Name",
-            key="invoice_manual_site",
-            placeholder="Masukkan Site Name",
+            key="invoice_manual_site_v2",
+            placeholder=(
+                "Masukkan Site Name"
+            ),
         )
 
         if manual_site.strip():
@@ -1524,6 +1727,10 @@ def render():
                 manual_site.strip()
             ]
 
+        else:
+
+            selected_sites = []
+
     # ==============================================================================
     # BUILD SITE DATA
     # ==============================================================================
@@ -1531,42 +1738,30 @@ def render():
     site_data = build_site_data(
         raw_query,
         raw_db_boq,
-        selected_sites
+        selected_sites,
     )
 
     # ==============================================================================
-    # LIVE PREVIEW
-    #
-    # INI BAGIAN UTAMA PERBAIKAN
+    # LIVE SITE & BOQ PREVIEW
     # ==============================================================================
 
-    if selected_sites:
-
-        render_site_boq_preview(
-            site_data=site_data,
-            show_invoice_amount=False,
-        )
-
-    else:
-
-        st.info(
-            "👆 Silakan pilih Site Name terlebih dahulu. "
-            "Preview BOQ akan muncul otomatis di sini."
-        )
+    render_site_boq_preview(
+        site_data
+    )
 
     st.divider()
 
     # ==============================================================================
-    # TOP / TERMIN
+    # INVOICE CALCULATION
     # ==============================================================================
 
     st.markdown(
         "### 💰 Invoice Calculation"
     )
 
-    # ------------------------------------------------------------------
-    # Determine used terms
-    # ------------------------------------------------------------------
+    # ==============================================================================
+    # CHECK USED TERMS
+    # ==============================================================================
 
     used_terms = set()
 
@@ -1603,29 +1798,30 @@ def render():
                 item_site = str(
                     item.get(
                         "site_name",
-                        ""
+                        "",
                     )
                 ).strip().lower()
 
                 item_charging = str(
                     item.get(
                         "charging_type",
-                        ""
+                        "",
                     )
                 ).strip().lower()
 
                 if (
                     site_db == item_site
-                    and charging_db == item_charging
+                    and charging_db
+                    == item_charging
                 ):
 
                     used_terms.add(
                         term_db
                     )
 
-    # ------------------------------------------------------------------
-    # TOP Schema
-    # ------------------------------------------------------------------
+    # ==============================================================================
+    # TOP SCHEMA
+    # ==============================================================================
 
     top_schema = st.selectbox(
         "Pilih TOP",
@@ -1633,10 +1829,13 @@ def render():
             "Standard 35/60/5",
             "New 10/85/5",
         ],
-        key="invoice_top_schema",
+        key="invoice_top_schema_v2",
     )
 
-    if top_schema == "Standard 35/60/5":
+    if (
+        top_schema
+        == "Standard 35/60/5"
+    ):
 
         term_options = [
             "DP",
@@ -1668,9 +1867,9 @@ def render():
             "Retensi": 5,
         }
 
-    # ------------------------------------------------------------------
-    # Available terms
-    # ------------------------------------------------------------------
+    # ==============================================================================
+    # AVAILABLE TERMS
+    # ==============================================================================
 
     available_terms = [
         term
@@ -1682,24 +1881,34 @@ def render():
 
         available_terms = term_options
 
+    # ==============================================================================
+    # TERMIN
+    # ==============================================================================
+
     selected_termin = st.selectbox(
         "Pilih Termin",
         available_terms,
-        key="invoice_termin",
+        key="invoice_termin_v2",
+    )
+
+    # ==============================================================================
+    # PERCENTAGE
+    # ==============================================================================
+
+    default_pct = float(
+        term_percentages.get(
+            selected_termin,
+            0,
+        )
     )
 
     selected_pct = st.number_input(
         "Percentage (%)",
         min_value=0.0,
         max_value=100.0,
-        value=float(
-            term_percentages.get(
-                selected_termin,
-                0
-            )
-        ),
+        value=default_pct,
         step=1.0,
-        key="invoice_percentage",
+        key="invoice_percentage_v2",
     )
 
     # ==============================================================================
@@ -1707,6 +1916,7 @@ def render():
     # ==============================================================================
 
     total_boq_amount = 0.0
+
     total_invoice_amount = 0.0
 
     for item in site_data:
@@ -1714,8 +1924,9 @@ def render():
         boq_amount = float(
             item.get(
                 "boq_amount",
-                0
-            ) or 0
+                0,
+            )
+            or 0
         )
 
         invoice_amount = (
@@ -1737,7 +1948,7 @@ def render():
         )
 
     # ==============================================================================
-    # SECOND LIVE PREVIEW
+    # LIVE INVOICE PREVIEW
     # ==============================================================================
 
     if site_data:
@@ -1750,21 +1961,23 @@ def render():
 
         for index, item in enumerate(
             site_data,
-            start=1
+            start=1,
         ):
 
             boq_amount = float(
                 item.get(
                     "boq_amount",
-                    0
-                ) or 0
+                    0,
+                )
+                or 0
             )
 
             invoice_amount = float(
                 item.get(
                     "invoice_amount",
-                    0
-                ) or 0
+                    0,
+                )
+                or 0
             )
 
             invoice_preview_rows.append(
@@ -1772,27 +1985,34 @@ def render():
                     "NO.": index,
                     "SITE NAME": item.get(
                         "site_name",
-                        ""
+                        "",
                     ),
                     "CHARGER TYPE": item.get(
                         "charging_type",
-                        ""
+                        "",
                     ),
                     "WO NUMBER": item.get(
                         "wo_number",
-                        ""
+                        "",
                     ),
-                    "BOQ EXC. PPN": format_currency(
-                        boq_amount
+                    "BOQ EXC. PPN": (
+                        format_currency(
+                            boq_amount
+                        )
                     ),
-                    f"INVOICE ({selected_pct:.0f}%)": format_currency(
+                    (
+                        f"INVOICE "
+                        f"({selected_pct:.0f}%)"
+                    ): format_currency(
                         invoice_amount
                     ),
                 }
             )
 
-        invoice_preview_df = pd.DataFrame(
-            invoice_preview_rows
+        invoice_preview_df = (
+            pd.DataFrame(
+                invoice_preview_rows
+            )
         )
 
         st.dataframe(
@@ -1802,10 +2022,13 @@ def render():
         )
 
     # ==============================================================================
-    # PRICE INFORMATION
+    # PRICE
     # ==============================================================================
 
-    if selected_project == "VGreen - Project":
+    if (
+        selected_project
+        == "VGreen - Project"
+    ):
 
         st.number_input(
             "Total Invoice Amount Before PPN",
@@ -1815,7 +2038,7 @@ def render():
             ),
             disabled=True,
             format="%.0f",
-            key="invoice_total_before_ppn",
+            key="invoice_total_before_ppn_v2",
         )
 
         termin_amount = (
@@ -1832,7 +2055,7 @@ def render():
             ),
             step=1000.0,
             format="%.0f",
-            key="invoice_manual_amount",
+            key="invoice_manual_amount_v2",
         )
 
         termin_amount = (
@@ -1849,7 +2072,7 @@ def render():
         max_value=100.0,
         value=11.0,
         step=0.5,
-        key="invoice_tax_rate",
+        key="invoice_tax_rate_v2",
     )
 
     tax_amount = (
@@ -1871,35 +2094,33 @@ def render():
         "### 📊 Invoice Summary"
     )
 
-    summary_col1, summary_col2, summary_col3 = st.columns(
-        3
+    summary_col1, summary_col2, summary_col3 = (
+        st.columns(3)
     )
 
     with summary_col1:
 
         st.metric(
-            "BOQ Amount Exc. PPN",
-            format_currency(
-                total_boq_amount
-            )
+            "Jumlah Site",
+            len(site_data),
         )
 
     with summary_col2:
 
         st.metric(
-            "Invoice Before PPN",
+            "Total BOQ Exc. PPN",
             format_currency(
-                termin_amount
-            )
+                total_boq_amount
+            ),
         )
 
     with summary_col3:
 
         st.metric(
-            f"Grand Total + PPN {tax_rate:.0f}%",
+            "Grand Total",
             format_currency(
                 grand_total
-            )
+            ),
         )
 
     # ==============================================================================
@@ -1913,45 +2134,44 @@ def render():
         if float(
             item.get(
                 "boq_amount",
-                0
-            ) or 0
+                0,
+            )
+            or 0
         ) <= 0:
 
             missing_boq_sites.append(
                 item.get(
                     "site_name",
-                    ""
+                    "",
                 )
             )
 
     if (
-        selected_project == "VGreen - Project"
+        selected_project
+        == "VGreen - Project"
         and missing_boq_sites
     ):
 
         st.error(
             "❌ Invoice belum dapat disimpan "
             "karena BOQ Amount belum ditemukan "
-            "untuk Site berikut:\n\n"
-            + "\n".join(
-                [
-                    f"- {x}"
-                    for x in missing_boq_sites
-                ]
-            )
+            "untuk Site berikut:"
         )
 
+        for site in missing_boq_sites:
+
+            st.write(
+                f"- {site}"
+            )
+
     # ==============================================================================
-    # SAVE FORM
-    #
-    # HANYA tombol Save berada di dalam FORM.
-    # Semua input sebelumnya berada di luar form.
+    # SAVE BUTTON
     # ==============================================================================
 
     st.divider()
 
     with st.form(
-        "form_save_invoice",
+        "form_save_invoice_v2",
         clear_on_submit=False,
     ):
 
@@ -1976,9 +2196,9 @@ def render():
 
     if submit_btn:
 
-        # --------------------------------------------------------------
-        # Validate Efaktur
-        # --------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Efaktur
+        # ------------------------------------------------------------------
 
         if not efaktur_no.strip():
 
@@ -1988,9 +2208,9 @@ def render():
 
             return
 
-        # --------------------------------------------------------------
-        # Validate Site
-        # --------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Site
+        # ------------------------------------------------------------------
 
         if not selected_sites:
 
@@ -2000,9 +2220,9 @@ def render():
 
             return
 
-        # --------------------------------------------------------------
-        # Validate BOQ
-        # --------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # BOQ
+        # ------------------------------------------------------------------
 
         if (
             selected_project
@@ -2018,9 +2238,9 @@ def render():
 
             return
 
-        # --------------------------------------------------------------
-        # Save each site
-        # --------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # SAVE ROWS
+        # ------------------------------------------------------------------
 
         save_rows = []
 
@@ -2028,24 +2248,25 @@ def render():
 
             charging_type = item.get(
                 "charging_type",
-                ""
+                "",
             )
 
             site_name = item.get(
                 "site_name",
-                ""
+                "",
             )
 
             wo_number = item.get(
                 "wo_number",
-                ""
+                "",
             )
 
             amount = float(
                 item.get(
                     "invoice_amount",
-                    0
-                ) or 0
+                    0,
+                )
+                or 0
             )
 
             amount_inc_tax = (
@@ -2074,9 +2295,9 @@ def render():
                 ]
             )
 
-        # --------------------------------------------------------------
-        # Append to DB Invoice
-        # --------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # APPEND DB INVOICE
+        # ------------------------------------------------------------------
 
         try:
 
@@ -2084,12 +2305,15 @@ def render():
 
                 sheet_db_invoice.append_row(
                     row,
-                    value_input_option="USER_ENTERED"
+                    value_input_option=(
+                        "USER_ENTERED"
+                    ),
                 )
 
             st.success(
                 f"✅ Invoice `{auto_inv_no}` "
-                f"berhasil disimpan ke DB Invoice."
+                f"berhasil disimpan ke DB Invoice "
+                f"untuk {len(save_rows)} Site."
             )
 
             st.balloons()
@@ -2097,7 +2321,7 @@ def render():
         except Exception as e:
 
             st.error(
-                f"❌ Gagal menyimpan Invoice "
+                "❌ Gagal menyimpan Invoice "
                 f"ke DB Invoice: {e}"
             )
 
@@ -2115,21 +2339,22 @@ def render():
                 {
                     "site_name": item.get(
                         "site_name",
-                        ""
+                        "",
                     ),
                     "charging_type": item.get(
                         "charging_type",
-                        ""
+                        "",
                     ),
                     "wo_number": item.get(
                         "wo_number",
-                        ""
+                        "",
                     ),
                     "invoice_amount": float(
                         item.get(
                             "invoice_amount",
-                            0
-                        ) or 0
+                            0,
+                        )
+                        or 0
                     ),
                 }
             )
@@ -2139,7 +2364,9 @@ def render():
             "invoice_date": inv_date.strftime(
                 "%d-%m-%Y"
             ),
-            "project_name": selected_project,
+            "project_name": (
+                selected_project
+            ),
             "efaktur_no": efaktur_no,
             "site_data": pdf_site_data,
             "subtotal": termin_amount,
@@ -2174,7 +2401,8 @@ def render():
         except Exception as e:
 
             st.error(
-                f"❌ Gagal membuat PDF Invoice: {e}"
+                "❌ Gagal membuat PDF Invoice: "
+                f"{e}"
             )
 
     # ==============================================================================
@@ -2182,8 +2410,10 @@ def render():
     # ==============================================================================
 
     if (
-        "pdf_ready"
-        in st.session_state
+        st.session_state.get(
+            "pdf_ready"
+        )
+        is not None
     ):
 
         st.divider()
@@ -2192,19 +2422,17 @@ def render():
             "### 📄 Download Invoice"
         )
 
-        pdf_bytes = st.session_state[
-            "pdf_ready"
-        ]
-
-        pdf_name = st.session_state.get(
-            "pdf_name",
-            "Invoice.pdf"
-        )
-
         st.download_button(
-            label="⬇️ Download Invoice PDF",
-            data=pdf_bytes,
-            file_name=pdf_name,
+            label=(
+                "⬇️ Download Invoice PDF"
+            ),
+            data=st.session_state[
+                "pdf_ready"
+            ],
+            file_name=st.session_state.get(
+                "pdf_name",
+                "Invoice.pdf",
+            ),
             mime="application/pdf",
             use_container_width=True,
         )
@@ -2215,4 +2443,5 @@ def render():
 # ==============================================================================
 
 if __name__ == "__main__":
+
     render()
