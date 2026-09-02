@@ -1,6 +1,5 @@
 import os
 import io
-import json
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -15,10 +14,8 @@ from reportlab.platypus import (
     Spacer,
     Table,
     TableStyle,
-    Image
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from PIL import Image as PILImage
 
 
 # ==============================================================================
@@ -38,7 +35,7 @@ MONTH_ROMAN = {
     9: "IX",
     10: "X",
     11: "XI",
-    12: "XII"
+    12: "XII",
 }
 
 
@@ -117,7 +114,7 @@ def init_gspread():
             sheet_query,
             sheet_dropdown,
             sheet_erp,
-            sheet_db
+            sheet_db,
         )
 
     except Exception as e:
@@ -134,7 +131,7 @@ def init_gspread():
 # ==============================================================================
 def get_raw_matrix(sheet):
     """
-    Membaca seluruh isi sheet menjadi 2D List
+    Membaca seluruh isi sheet menjadi 2D List.
     """
 
     try:
@@ -161,9 +158,8 @@ def generate_auto_invoice_no(sheet_db):
     Nomor awal:
     0462
 
-    Penting:
-    Tidak menggunakan len(records) karena satu invoice sekarang
-    dapat menghasilkan beberapa baris untuk beberapa site.
+    Menggunakan nomor terbesar yang sudah ada + 1,
+    bukan jumlah baris.
     """
 
     now = datetime.now()
@@ -241,15 +237,13 @@ def get_site_information(
     site_name
 ):
     """
-    Mengambil Charging Type, WO Number dan BOQ
-    berdasarkan Site Name.
+    Mengambil:
 
-    Return:
-        {
-            charging_type,
-            wo_number,
-            boq_amount
-        }
+    - Charging Type dari Query
+    - WO Number dari Query
+    - BOQ Amount dari ERP Project
+
+    Berdasarkan Site Name.
     """
 
     charging_type = ""
@@ -276,14 +270,14 @@ def get_site_information(
 
             if query_site == site_lower:
 
-                # Charging Type
+                # Charging Type → Column C
                 if len(row) > 2:
 
                     charging_type = str(
                         row[2]
                     ).strip()
 
-                # WO Number
+                # WO Number → Column W
                 if len(row) > 22:
 
                     wo_number = str(
@@ -323,6 +317,7 @@ def get_site_information(
                 )
             ):
 
+                # ERP Project Column M
                 if len(row) > 12:
 
                     raw_boq = str(
@@ -354,8 +349,106 @@ def get_site_information(
     return {
         "charging_type": charging_type,
         "wo_number": wo_number,
-        "boq_amount": boq_amount
+        "boq_amount": boq_amount,
     }
+
+
+# ==============================================================================
+# 💰 FORMAT RUPIAH
+# ==============================================================================
+def format_rupiah(value):
+    """
+    Format angka ke tampilan Rupiah seperti:
+
+    47.562.500
+    """
+
+    try:
+
+        value = float(value)
+
+        return f"{value:,.0f}".replace(
+            ",",
+            "."
+        )
+
+    except Exception:
+
+        return "0"
+
+
+# ==============================================================================
+# 📊 CREATE SITE PREVIEW TABLE
+# ==============================================================================
+def create_site_preview_dataframe(
+    site_details,
+    pct_val
+):
+    """
+    Membuat tabel preview seperti screenshot user.
+
+    Kolom:
+
+    NO.
+    ITEM DESCRIPTION
+    QTY
+    UOM
+    Charger Type
+    WO Number
+    UNIT PRICE
+    AMOUNT
+    """
+
+    preview_rows = []
+
+    for idx, site in enumerate(
+        site_details,
+        start=1
+    ):
+
+        boq_amount = float(
+            site.get(
+                "boq_amount",
+                0.0
+            )
+        )
+
+        # Nilai invoice site
+        invoice_amount = (
+            boq_amount
+            * pct_val
+        )
+
+        preview_rows.append({
+            "NO.": idx,
+
+            "ITEM DESCRIPTION": site.get(
+                "site_name",
+                ""
+            ),
+
+            "QTY": 1,
+
+            "UOM": "Unit",
+
+            "Charger Type": site.get(
+                "charging_type",
+                ""
+            ),
+
+            "WO Number": site.get(
+                "wo_number",
+                ""
+            ),
+
+            "UNIT PRICE": invoice_amount,
+
+            "AMOUNT": invoice_amount,
+        })
+
+    return pd.DataFrame(
+        preview_rows
+    )
 
 
 # ==============================================================================
@@ -365,9 +458,7 @@ def create_invoice_pdf(data):
     """
     Membuat PDF Invoice.
 
-    Mendukung:
-    - 1 site
-    - Multiple site
+    Mendukung multiple site.
     """
 
     buffer = io.BytesIO()
@@ -466,7 +557,10 @@ def create_invoice_pdf(data):
     # --------------------------------------------------------------------------
     # HEADER & FOOTER
     # --------------------------------------------------------------------------
-    def draw_header_footer(canvas, doc):
+    def draw_header_footer(
+        canvas,
+        doc
+    ):
 
         canvas.saveState()
 
@@ -507,14 +601,14 @@ def create_invoice_pdf(data):
         canvas.restoreState()
 
     # --------------------------------------------------------------------------
-    # 1. INVOICE TITLE
+    # 1. TITLE
     # --------------------------------------------------------------------------
-    inv_title = Paragraph(
-        "<b>INVOICE</b>",
-        title_style
+    elements.append(
+        Paragraph(
+            "<b>INVOICE</b>",
+            title_style
+        )
     )
-
-    elements.append(inv_title)
 
     elements.append(
         Spacer(1, 10)
@@ -630,7 +724,7 @@ def create_invoice_pdf(data):
     )
 
     # --------------------------------------------------------------------------
-    # 3. ITEM TABLE - MULTIPLE SITE
+    # 3. ITEM TABLE
     # --------------------------------------------------------------------------
     table_data = [
         [
@@ -639,23 +733,31 @@ def create_invoice_pdf(data):
                 normal_bold
             ),
             Paragraph(
-                "<b>ITEM DESCRIPTION / SITE</b>",
+                "<b>ITEM DESCRIPTION</b>",
                 normal_bold
             ),
             Paragraph(
-                "<b>CHARGING TYPE</b>",
+                "<b>QTY</b>",
                 normal_bold
             ),
             Paragraph(
-                "<b>WO NO.</b>",
+                "<b>UOM</b>",
                 normal_bold
             ),
             Paragraph(
-                "<b>TERMIN</b>",
+                "<b>CHARGER TYPE</b>",
                 normal_bold
             ),
             Paragraph(
-                "<b>AMOUNT (IDR)</b>",
+                "<b>WO NUMBER</b>",
+                normal_bold
+            ),
+            Paragraph(
+                "<b>UNIT PRICE</b>",
+                normal_bold
+            ),
+            Paragraph(
+                "<b>AMOUNT</b>",
                 normal_bold
             )
         ]
@@ -684,6 +786,10 @@ def create_invoice_pdf(data):
                 site_style
             ),
 
+            "1",
+
+            "Unit",
+
             Paragraph(
                 str(
                     site.get(
@@ -704,25 +810,32 @@ def create_invoice_pdf(data):
                 site_style
             ),
 
-            str(
+            format_rupiah(
                 site.get(
-                    "termin",
-                    ""
+                    "termin_amount",
+                    0
                 )
             ),
 
-            f"{site.get('termin_amount', 0):,.2f}"
+            format_rupiah(
+                site.get(
+                    "termin_amount",
+                    0
+                )
+            )
         ])
 
     item_table = Table(
         table_data,
         colWidths=[
             25,
-            190,
+            155,
+            30,
+            35,
+            70,
             75,
-            90,
-            55,
-            105
+            75,
+            75
         ],
         repeatRows=1
     )
@@ -749,14 +862,14 @@ def create_invoice_pdf(data):
             ),
             (
                 "ALIGN",
-                (4, 0),
-                (4, -1),
+                (2, 1),
+                (3, -1),
                 "CENTER"
             ),
             (
                 "ALIGN",
-                (5, 0),
-                (5, -1),
+                (6, 0),
+                (7, -1),
                 "RIGHT"
             ),
             (
@@ -995,7 +1108,9 @@ def create_invoice_pdf(data):
         ])
     )
 
-    elements.append(bottom_grid)
+    elements.append(
+        bottom_grid
+    )
 
     # --------------------------------------------------------------------------
     # BUILD PDF
@@ -1024,9 +1139,9 @@ def render():
 
     st.markdown("---")
 
-    # --------------------------------------------------------------------------
+    # ==========================================================================
     # CONNECTION
-    # --------------------------------------------------------------------------
+    # ==========================================================================
     (
         sheet_query,
         sheet_dropdown,
@@ -1037,9 +1152,9 @@ def render():
     if not sheet_query:
         return
 
-    # --------------------------------------------------------------------------
+    # ==========================================================================
     # LOAD SHEETS
-    # --------------------------------------------------------------------------
+    # ==========================================================================
     raw_query = get_raw_matrix(
         sheet_query
     )
@@ -1056,9 +1171,9 @@ def render():
         sheet_db
     )
 
-    # --------------------------------------------------------------------------
-    # AUTO INVOICE NO
-    # --------------------------------------------------------------------------
+    # ==========================================================================
+    # AUTO INVOICE NUMBER
+    # ==========================================================================
     auto_inv_no = generate_auto_invoice_no(
         sheet_db
     )
@@ -1072,9 +1187,10 @@ def render():
 
         for row in raw_dropdown[1:]:
 
-            if len(row) > 6 and str(
-                row[6]
-            ).strip():
+            if (
+                len(row) > 6
+                and str(row[6]).strip()
+            ):
 
                 val = str(
                     row[6]
@@ -1096,12 +1212,249 @@ def render():
         ]
 
     # ==========================================================================
+    # 🏗️ PROJECT & SITE SELECTION
+    #
+    # BAGIAN INI SENGAJA DI LUAR FORM
+    # supaya perubahan multiselect langsung melakukan rerun
+    # dan tabel preview langsung berubah.
+    # ==========================================================================
+    st.markdown(
+        "### 🏗️ Project & Site Selection"
+    )
+
+    project_col1, project_col2 = st.columns(
+        2
+    )
+
+    with project_col1:
+
+        selected_project = st.selectbox(
+            "Project Name",
+            options=project_options,
+            key="invoice_project"
+        )
+
+    with project_col2:
+
+        st.text_input(
+            "No. Invoice (Auto Generated)",
+            value=auto_inv_no,
+            disabled=True,
+            key="invoice_number_preview"
+        )
+
+    # ==========================================================================
+    # SITE SELECTION
+    # ==========================================================================
+    selected_sites = []
+
+    if selected_project == "VGreen - Project":
+
+        site_options = []
+
+        if len(raw_query) > 1:
+
+            for row in raw_query[1:]:
+
+                if (
+                    len(row) > 5
+                    and str(row[5]).strip()
+                ):
+
+                    s_name = str(
+                        row[5]
+                    ).strip()
+
+                    if s_name not in site_options:
+
+                        site_options.append(
+                            s_name
+                        )
+
+        selected_sites = st.multiselect(
+            "Item Description / Site Name",
+            options=site_options,
+            placeholder=(
+                "Pilih satu atau lebih site..."
+            ),
+            help=(
+                "Pilih satu atau beberapa site. "
+                "Tabel preview akan langsung muncul "
+                "untuk cross-check."
+            ),
+            key="invoice_selected_sites"
+        )
+
+    else:
+
+        manual_site = st.text_input(
+            "Item Description / Site Name",
+            placeholder=(
+                "Ketik Site Name secara manual..."
+            ),
+            key="invoice_manual_site"
+        )
+
+        if manual_site.strip():
+
+            selected_sites = [
+                manual_site.strip()
+            ]
+
+    # ==========================================================================
+    # GET SITE DETAILS
+    # ==========================================================================
+    site_details = []
+
+    for site_name in selected_sites:
+
+        info = get_site_information(
+            raw_query,
+            raw_erp,
+            site_name
+        )
+
+        site_details.append({
+            "site_name": site_name,
+
+            "charging_type": info[
+                "charging_type"
+            ],
+
+            "wo_number": info[
+                "wo_number"
+            ],
+
+            "boq_amount": info[
+                "boq_amount"
+            ]
+        })
+
+    # ==========================================================================
+    # 🔎 LIVE SITE INFORMATION
+    # ==========================================================================
+    if selected_project == "VGreen - Project":
+
+        if site_details:
+
+            st.markdown("---")
+
+            st.markdown(
+                "### 🔎 Site Selected & Cross Check"
+            )
+
+            st.caption(
+                "Tabel di bawah akan otomatis berubah "
+                "setiap kali site ditambah atau dihapus."
+            )
+
+            # ------------------------------------------------------------------
+            # DEFAULT PREVIEW
+            #
+            # Sebelum termin dipilih, tampilkan BOQ Base.
+            # ------------------------------------------------------------------
+            preview_df = create_site_preview_dataframe(
+                site_details,
+                1.0
+            )
+
+            preview_df["UNIT PRICE"] = (
+                preview_df["UNIT PRICE"]
+            )
+
+            preview_df["AMOUNT"] = (
+                preview_df["AMOUNT"]
+            )
+
+            # ------------------------------------------------------------------
+            # DISPLAY TABLE
+            # ------------------------------------------------------------------
+            st.dataframe(
+                preview_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+
+                    "NO.": st.column_config.NumberColumn(
+                        "NO.",
+                        width="small"
+                    ),
+
+                    "ITEM DESCRIPTION": st.column_config.TextColumn(
+                        "ITEM DESCRIPTION",
+                        width="large"
+                    ),
+
+                    "QTY": st.column_config.NumberColumn(
+                        "QTY",
+                        width="small"
+                    ),
+
+                    "UOM": st.column_config.TextColumn(
+                        "UOM",
+                        width="small"
+                    ),
+
+                    "Charger Type": st.column_config.TextColumn(
+                        "Charger Type",
+                        width="medium"
+                    ),
+
+                    "WO Number": st.column_config.TextColumn(
+                        "WO Number",
+                        width="medium"
+                    ),
+
+                    "UNIT PRICE": st.column_config.NumberColumn(
+                        "UNIT PRICE",
+                        format="Rp %,.0f",
+                        width="medium"
+                    ),
+
+                    "AMOUNT": st.column_config.NumberColumn(
+                        "AMOUNT",
+                        format="Rp %,.0f",
+                        width="medium"
+                    ),
+                }
+            )
+
+            # ------------------------------------------------------------------
+            # TOTAL BOQ
+            # ------------------------------------------------------------------
+            total_boq_base = sum(
+                float(
+                    site.get(
+                        "boq_amount",
+                        0
+                    )
+                )
+                for site in site_details
+            )
+
+            st.info(
+                f"📌 **Total BOQ seluruh site: "
+                f"Rp {format_rupiah(total_boq_base)}**"
+            )
+
+        else:
+
+            st.info(
+                "👆 Silakan pilih satu atau beberapa site "
+                "untuk melihat detailnya."
+            )
+
+    # ==========================================================================
     # FORM UTAMA
     # ==========================================================================
     with st.form(
         "form_create_invoice",
         clear_on_submit=False
     ):
+
+        st.markdown(
+            "### 📋 Invoice Information"
+        )
 
         col1, col2 = st.columns(2)
 
@@ -1110,102 +1463,11 @@ def render():
         # ======================================================================
         with col1:
 
-            selected_project = st.selectbox(
-                "Project Name",
-                options=project_options
-            )
-
-            st.text_input(
-                "No. Invoice (Auto Generated)",
-                value=auto_inv_no,
-                disabled=True
-            )
-
             inv_date = st.date_input(
                 "Invoice Date",
-                datetime.now()
+                datetime.now(),
+                key="invoice_date"
             )
-
-            # ------------------------------------------------------------------
-            # MULTIPLE SITE
-            # ------------------------------------------------------------------
-            if selected_project == "VGreen - Project":
-
-                site_options = []
-
-                if len(raw_query) > 1:
-
-                    for row in raw_query[1:]:
-
-                        if (
-                            len(row) > 5
-                            and str(row[5]).strip()
-                        ):
-
-                            s_name = str(
-                                row[5]
-                            ).strip()
-
-                            if (
-                                s_name
-                                not in site_options
-                            ):
-
-                                site_options.append(
-                                    s_name
-                                )
-
-                selected_sites = st.multiselect(
-                    "Item Description / Site Name",
-                    options=site_options,
-                    placeholder="Pilih satu atau lebih site..."
-                    ,
-                    help=(
-                        "Anda dapat memilih lebih dari "
-                        "satu site untuk satu Invoice."
-                    )
-                )
-
-            else:
-
-                manual_site = st.text_input(
-                    "Item Description / Site Name",
-                    placeholder=(
-                        "Ketik Site Name secara manual..."
-                    )
-                )
-
-                selected_sites = (
-                    [manual_site]
-                    if manual_site.strip()
-                    else []
-                )
-
-        # ======================================================================
-        # SITE INFORMATION
-        # ======================================================================
-        site_details = []
-
-        for site_name in selected_sites:
-
-            info = get_site_information(
-                raw_query,
-                raw_erp,
-                site_name
-            )
-
-            site_details.append({
-                "site_name": site_name,
-                "charging_type": info[
-                    "charging_type"
-                ],
-                "wo_number": info[
-                    "wo_number"
-                ],
-                "boq_amount": info[
-                    "boq_amount"
-                ]
-            })
 
         # ======================================================================
         # RIGHT COLUMN
@@ -1214,39 +1476,34 @@ def render():
 
             if selected_project == "VGreen - Project":
 
-                if site_details:
+                charging_display = ", ".join(
+                    [
+                        d["charging_type"]
+                        for d in site_details
+                        if d["charging_type"]
+                    ]
+                )
 
-                    charging_display = ", ".join(
-                        [
-                            d["charging_type"]
-                            for d in site_details
-                            if d["charging_type"]
-                        ]
-                    )
-
-                    wo_display = ", ".join(
-                        [
-                            d["wo_number"]
-                            for d in site_details
-                            if d["wo_number"]
-                        ]
-                    )
-
-                else:
-
-                    charging_display = ""
-                    wo_display = ""
+                wo_display = ", ".join(
+                    [
+                        d["wo_number"]
+                        for d in site_details
+                        if d["wo_number"]
+                    ]
+                )
 
                 st.text_input(
                     "Charging Type (Auto)",
                     value=charging_display,
-                    disabled=True
+                    disabled=True,
+                    key="invoice_charging_display"
                 )
 
                 st.text_input(
                     "WO No. (Auto)",
                     value=wo_display,
-                    disabled=True
+                    disabled=True,
+                    key="invoice_wo_display"
                 )
 
             else:
@@ -1254,21 +1511,27 @@ def render():
                 st.text_input(
                     "Charging Type (Auto)",
                     value="",
-                    disabled=True
+                    disabled=True,
+                    key="invoice_charging_display_manual"
                 )
 
                 st.text_input(
                     "WO No. (Auto)",
                     value="",
-                    disabled=True
+                    disabled=True,
+                    key="invoice_wo_display_manual"
                 )
 
-            efaktur_no = st.text_input(
-                "No. Efaktur",
-                placeholder=(
-                    "Contoh: 04002600290355647"
-                )
-            )
+        # ======================================================================
+        # EFATUR
+        # ======================================================================
+        efaktur_no = st.text_input(
+            "No. Efaktur",
+            placeholder=(
+                "Contoh: 04002600290355647"
+            ),
+            key="invoice_efaktur"
+        )
 
         # ==========================================================================
         # 💳 DETAIL PEMBAYARAN
@@ -1277,9 +1540,6 @@ def render():
             "### 💳 Detail Pembayaran & Termin"
         )
 
-        # --------------------------------------------------------------------------
-        # TOP SCHEMA
-        # --------------------------------------------------------------------------
         top_schema_options = {
 
             "Skema Standar (35% - 60% - 5%)": [
@@ -1303,7 +1563,8 @@ def render():
             help=(
                 "Pilih skema TOP yang berlaku "
                 "sesuai kesepakatan customer."
-            )
+            ),
+            key="invoice_top_schema"
         )
 
         all_possible_termins = (
@@ -1313,7 +1574,7 @@ def render():
         )
 
         # ==========================================================================
-        # 🔒 DETEKSI TERMIN YANG SUDAH TERBIT
+        # 🔒 DETEKSI TERMIN
         # ==========================================================================
         used_termins_by_site = {}
 
@@ -1368,8 +1629,7 @@ def render():
                 ] = used_for_site
 
         # --------------------------------------------------------------------------
-        # Termin yang tidak boleh digunakan apabila sudah terpakai pada
-        # SALAH SATU site yang dipilih.
+        # Termin yang sudah digunakan pada salah satu site
         # --------------------------------------------------------------------------
         unavailable_termins = set()
 
@@ -1388,11 +1648,11 @@ def render():
         ]
 
         # ==========================================================================
-        # WARNING
+        # WARNING TERMIN
         # ==========================================================================
         if selected_project == "VGreen - Project":
 
-            if selected_sites:
+            if site_details:
 
                 for site in site_details:
 
@@ -1402,7 +1662,10 @@ def render():
 
                     used = (
                         used_termins_by_site
-                        .get(site_key, [])
+                        .get(
+                            site_key,
+                            []
+                        )
                     )
 
                     if used:
@@ -1416,17 +1679,17 @@ def render():
                         )
 
             if (
-                selected_sites
+                site_details
                 and not available_termins
             ):
 
                 st.error(
                     "⛔ Tidak ada termin yang tersedia "
-                    "untuk seluruh site yang dipilih."
+                    "untuk site yang dipilih."
                 )
 
         # ==========================================================================
-        # TERMIN / UNIT PRICE / TAX
+        # TERMIN / PRICE / TAX
         # ==========================================================================
         c1, c2, c3 = st.columns(3)
 
@@ -1436,7 +1699,8 @@ def render():
 
                 selected_termin = st.selectbox(
                     "Termin Pembayaran",
-                    options=available_termins
+                    options=available_termins,
+                    key="invoice_termin"
                 )
 
                 try:
@@ -1463,13 +1727,14 @@ def render():
                     options=[
                         "Penuh / Lunas"
                     ],
-                    disabled=True
+                    disabled=True,
+                    key="invoice_termin_disabled"
                 )
 
                 pct_val = 0.0
 
         # ==========================================================================
-        # CALCULATE TOTAL BOQ
+        # TOTAL BOQ
         # ==========================================================================
         total_boq_amount = sum(
             float(
@@ -1481,6 +1746,9 @@ def render():
             for site in site_details
         )
 
+        # ==========================================================================
+        # CALCULATED INVOICE
+        # ==========================================================================
         calculated_unit_price = (
             total_boq_amount
             * pct_val
@@ -1494,7 +1762,8 @@ def render():
                     "Unit Price (IDR - Auto Calculated)",
                     value=calculated_unit_price,
                     disabled=True,
-                    format="%.2f"
+                    format="%.2f",
+                    key="invoice_unit_price_auto"
                 )
 
             else:
@@ -1503,7 +1772,8 @@ def render():
                     "Unit Price (IDR)",
                     min_value=0.0,
                     value=0.0,
-                    step=1000.0
+                    step=1000.0,
+                    key="invoice_unit_price_manual"
                 )
 
         with c3:
@@ -1512,11 +1782,12 @@ def render():
                 "PPN / Tax (%)",
                 min_value=0.0,
                 value=11.0,
-                step=0.5
+                step=0.5,
+                key="invoice_tax_rate"
             )
 
         # ==========================================================================
-        # AMOUNT
+        # CALCULATION
         # ==========================================================================
         termin_amount = unit_price
 
@@ -1531,58 +1802,78 @@ def render():
         )
 
         # ==========================================================================
-        # SITE BREAKDOWN
+        # 🔄 UPDATE PREVIEW TABLE SESUAI TERMIN
         # ==========================================================================
-        if site_details:
+        if (
+            selected_project == "VGreen - Project"
+            and site_details
+        ):
+
+            st.markdown("---")
 
             st.markdown(
-                "#### 📋 Detail Nilai per Site"
+                "### 🧾 Invoice Preview"
             )
 
-            breakdown_rows = []
+            st.caption(
+                f"Preview setelah penerapan "
+                f"termin **{selected_termin}**"
+            )
 
-            for site in site_details:
-
-                site_termin_amount = (
-                    site["boq_amount"]
-                    * pct_val
+            final_preview_df = (
+                create_site_preview_dataframe(
+                    site_details,
+                    pct_val
                 )
-
-                breakdown_rows.append({
-                    "Site Name": site[
-                        "site_name"
-                    ],
-                    "Charging Type": site[
-                        "charging_type"
-                    ],
-                    "WO No.": site[
-                        "wo_number"
-                    ],
-                    "BOQ Amount": (
-                        site["boq_amount"]
-                    ),
-                    "Invoice Amount": (
-                        site_termin_amount
-                    )
-                })
-
-            breakdown_df = pd.DataFrame(
-                breakdown_rows
             )
 
             st.dataframe(
-                breakdown_df,
+                final_preview_df,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "BOQ Amount": st.column_config.NumberColumn(
-                        "BOQ Amount",
-                        format="Rp %,.2f"
+
+                    "NO.": st.column_config.NumberColumn(
+                        "NO.",
+                        width="small"
                     ),
-                    "Invoice Amount": st.column_config.NumberColumn(
-                        "Invoice Amount",
-                        format="Rp %,.2f"
-                    )
+
+                    "ITEM DESCRIPTION": st.column_config.TextColumn(
+                        "ITEM DESCRIPTION",
+                        width="large"
+                    ),
+
+                    "QTY": st.column_config.NumberColumn(
+                        "QTY",
+                        width="small"
+                    ),
+
+                    "UOM": st.column_config.TextColumn(
+                        "UOM",
+                        width="small"
+                    ),
+
+                    "Charger Type": st.column_config.TextColumn(
+                        "Charger Type",
+                        width="medium"
+                    ),
+
+                    "WO Number": st.column_config.TextColumn(
+                        "WO Number",
+                        width="medium"
+                    ),
+
+                    "UNIT PRICE": st.column_config.NumberColumn(
+                        "UNIT PRICE",
+                        format="Rp %,.0f",
+                        width="medium"
+                    ),
+
+                    "AMOUNT": st.column_config.NumberColumn(
+                        "AMOUNT",
+                        format="Rp %,.0f",
+                        width="medium"
+                    ),
                 }
             )
 
@@ -1603,7 +1894,7 @@ def render():
         )
 
         # ==========================================================================
-        # SUBMIT
+        # SUBMIT BUTTON
         # ==========================================================================
         is_disabled = (
             True
@@ -1648,7 +1939,7 @@ def render():
             return
 
         # --------------------------------------------------------------------------
-        # VALIDATE MULTIPLE SITE
+        # VALIDATE SITE DETAILS
         # --------------------------------------------------------------------------
         if selected_project == "VGreen - Project":
 
@@ -1660,7 +1951,6 @@ def render():
 
                 return
 
-            # Pastikan semua site mempunyai BOQ
             missing_boq = [
                 site["site_name"]
                 for site in site_details
@@ -1683,11 +1973,11 @@ def render():
                 return
 
         # ==========================================================================
-        # CREATE SITE ROWS
+        # CREATE DB ROWS
         # ==========================================================================
-        pdf_site_rows = []
-
         db_rows = []
+
+        pdf_site_rows = []
 
         for site in site_details:
 
@@ -1698,12 +1988,9 @@ def render():
                 )
             )
 
-            # Untuk VGreen Project:
-            # Site Amount = BOQ × Termin %
-            #
-            # Untuk project manual:
-            # karena sebelumnya Unit Price adalah nilai invoice,
-            # maka seluruh nilai diberikan ke site tersebut.
+            # ----------------------------------------------------------------------
+            # VGreen Project
+            # ----------------------------------------------------------------------
             if selected_project == "VGreen - Project":
 
                 site_invoice_amount = (
@@ -1711,6 +1998,9 @@ def render():
                     * pct_val
                 )
 
+            # ----------------------------------------------------------------------
+            # Project manual
+            # ----------------------------------------------------------------------
             else:
 
                 site_invoice_amount = (
@@ -1728,29 +2018,40 @@ def render():
             )
 
             # ----------------------------------------------------------------------
-            # PDF DATA
+            # PDF ROW
             # ----------------------------------------------------------------------
             pdf_site_rows.append({
-                "site_name": site[
-                    "site_name"
-                ],
-                "charging_type": site[
-                    "charging_type"
-                ],
-                "wo_number": site[
-                    "wo_number"
-                ],
-                "termin": selected_termin,
-                "boq_amount": site_boq,
-                "termin_amount": site_invoice_amount,
-                "tax_amount": site_tax_amount,
-                "grand_total": site_grand_total
+
+                "site_name":
+                    site["site_name"],
+
+                "charging_type":
+                    site["charging_type"],
+
+                "wo_number":
+                    site["wo_number"],
+
+                "termin":
+                    selected_termin,
+
+                "boq_amount":
+                    site_boq,
+
+                "termin_amount":
+                    site_invoice_amount,
+
+                "tax_amount":
+                    site_tax_amount,
+
+                "grand_total":
+                    site_grand_total
             })
 
             # ----------------------------------------------------------------------
             # DB ROW
             #
-            # Struktur tetap:
+            # Struktur:
+            #
             # Project Name
             # Invoice No.
             # Invoice Date
@@ -1763,35 +2064,45 @@ def render():
             # Grand Total
             # ----------------------------------------------------------------------
             db_rows.append([
+
                 selected_project,
+
                 auto_inv_no,
+
                 inv_date.strftime(
                     "%d %B %Y"
                 ),
+
                 site[
                     "charging_type"
                 ],
+
                 site[
                     "site_name"
                 ],
+
                 site[
                     "wo_number"
                 ],
+
                 selected_termin,
+
                 efaktur_no,
+
                 f"{site_invoice_amount:.2f}",
+
                 f"{site_grand_total:.2f}"
             ])
 
         # ==========================================================================
-        # SAVE TO GOOGLE SHEETS
+        # SAVE
         # ==========================================================================
         if sheet_db:
 
             try:
 
                 # ------------------------------------------------------------------
-                # Append setiap site sebagai 1 row
+                # Append each site
                 # ------------------------------------------------------------------
                 for row in db_rows:
 
@@ -1877,7 +2188,7 @@ def render():
                 )
 
                 # ------------------------------------------------------------------
-                # CLEAR CACHE / REFRESH
+                # CLEAR RESOURCE CACHE
                 # ------------------------------------------------------------------
                 st.cache_resource.clear()
 
