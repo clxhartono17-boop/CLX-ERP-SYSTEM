@@ -3167,6 +3167,12 @@ def show_spk_page():
                                 ),
                             )
 
+        except Exception as e:
+            st.error(
+                "❌ Terjadi kesalahan pada "
+                f"Create SPK Project: {e}"
+            )
+
     # ==========================================================================
     # CREATE SPK OPERATION
     # ==========================================================================
