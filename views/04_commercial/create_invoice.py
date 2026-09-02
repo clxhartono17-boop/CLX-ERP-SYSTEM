@@ -72,7 +72,7 @@ def get_raw_matrix(sheet):
 
 
 def generate_auto_invoice_no(sheet_db):
-    """Generate No. Invoice Otomatis -> Format: 0000/INV/CLX/BULAN_ROMAWI/TAHUN"""
+    """Generate No. Invoice Otomatis -> Format: 0000/INV/CLX/BULAN_ROMAWI/TAHUN (Mulai dari 462)"""
     now = datetime.now()
     roman_month = MONTH_ROMAN.get(now.month, "I")
     year = now.year
@@ -80,11 +80,12 @@ def generate_auto_invoice_no(sheet_db):
     if sheet_db:
         try:
             records = sheet_db.get_all_records()
-            next_seq = len(records) + 1
+            # Memastikan nomor urut minimal 462 atau melanjutkan jika record lebih dari 461
+            next_seq = max(len(records) + 1, 462)
         except Exception:
-            next_seq = 1
+            next_seq = 462
     else:
-        next_seq = 1
+        next_seq = 462
 
     formatted_seq = f"{next_seq:04d}"
     return f"{formatted_seq}/INV/CLX/{roman_month}/{year}"
