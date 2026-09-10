@@ -43,13 +43,7 @@ try:
         update_do_in_db_material_out,
         get_used_sites_from_db_material_out,
         get_query_sheet_data,
-
-        # ----------------------------------------------------------------------
-        # TAMBAHAN:
-        # Untuk membaca Master Item langsung melalui database layer.
-        # ----------------------------------------------------------------------
         get_sheet_values
-
     )
 
 except ImportError as e:
@@ -68,6 +62,13 @@ except ImportError as e:
 
 MAX_SITE_SELECTION = 15
 
+# ------------------------------------------------------------------------------
+# DEFAULT CHARGING TYPE
+#
+# Tetap dipertahankan sebagai fallback agar logic lama tidak rusak.
+# Charging Type yang ada di sheet "Standart Charging Type" akan ditambahkan
+# secara otomatis ke dropdown.
+# ------------------------------------------------------------------------------
 DEFAULT_CHARGING_TYPES = [
     "6S1P",
     "12S1P",
@@ -86,9 +87,11 @@ DEFAULT_EXPEDITIONS = [
 ]
 
 # ------------------------------------------------------------------------------
-# NAMA SHEET MASTER ITEM
+# NAMA SHEET
 # ------------------------------------------------------------------------------
 MASTER_ITEM_SHEET = "Master Item"
+
+STANDARD_CHARGING_TYPE_SHEET = "Standart Charging Type"
 
 
 # ==============================================================================
@@ -250,10 +253,6 @@ def load_master_item_uom():
             "MM0003": "Unit",
             ...
         }
-
-    Catatan:
-    Jika struktur header berubah, fungsi juga mencoba mendeteksi
-    berdasarkan nama kolom.
     """
 
     try:
@@ -266,26 +265,12 @@ def load_master_item_uom():
 
             return {}
 
-        # ======================================================================
-        # PRIORITAS UTAMA:
-        # Sesuai requirement user:
-        #
-        # A = Material Code
-        # B = Material Name
-        # C = Specification
-        # D = UoM
-        # ======================================================================
-
         uom_map = {}
 
         headers = [
             str(x).strip()
             for x in all_values[0]
         ]
-
-        # ----------------------------------------------------------------------
-        # Deteksi kolom berdasarkan header terlebih dahulu.
-        # ----------------------------------------------------------------------
 
         def find_header(candidates):
 
@@ -325,32 +310,18 @@ def load_master_item_uom():
             "Unit of Measure"
         ])
 
-        # ----------------------------------------------------------------------
-        # FALLBACK:
-        # Sesuai struktur tetap A:D.
-        # ----------------------------------------------------------------------
-
         if code_col is None:
-
             code_col = 0
 
         if uom_col is None:
-
             uom_col = 3
-
-        # ----------------------------------------------------------------------
-        # Safety:
-        # Jangan menggunakan kolom di luar data.
-        # ----------------------------------------------------------------------
 
         for row in all_values[1:]:
 
             if len(row) <= code_col:
-
                 continue
 
             if len(row) <= uom_col:
-
                 continue
 
             material_code = safe_text(
@@ -364,12 +335,7 @@ def load_master_item_uom():
             )
 
             if not material_code:
-
                 continue
-
-            # --------------------------------------------------------------
-            # Simpan case-insensitive agar AC0001 / ac0001 tetap cocok.
-            # --------------------------------------------------------------
 
             uom_map[
                 material_code.upper()
@@ -395,7 +361,6 @@ def get_master_uom(material_code, default="Pcs"):
     )
 
     if not code:
-
         return default
 
     uom_map = load_master_item_uom()
@@ -545,20 +510,234 @@ def fetch_raw_query_data():
 
 
 # ==============================================================================
+# STANDARD CHARGING TYPE - READ SHEET
+# ==============================================================================
+
+@st.cache_data(
+    ttl=300,
+    show_spinner=False
+)
+def load_standard_charging_type_sheet():
+
+    """
+    Membaca Sheet:
+
+        Standart Charging Type
+
+    Struktur:
+
+        A = Material Code
+        B = Material Name
+        C = 6S1P
+        D = 12S1P
+        E = DC20
+        F = DC30
+        G = DC60
+        dst...
+
+    Fungsi dibuat dinamis sehingga apabila nanti user menambahkan
+    charging type baru pada kolom H, I, J, dst., kolom tersebut
+    otomatis dapat digunakan.
+
+    Return:
+        DataFrame dengan header asli dari Google Sheet.
+    """
+
+    try:
+
+        all_values = get_sheet_values(
+            STANDARD_CHARGING_TYPE_SHEET
+        )
+
+        if not all_values:
+
+            return pd.DataFrame()
+
+        if len(all_values) < 1:
+
+            return pd.DataFrame()
+
+        headers = [
+            safe_text(
+                x,
+                default=""
+            )
+            for x in all_values[0]
+        ]
+
+        # ----------------------------------------------------------------------
+        # Hapus kolom kosong di bagian belakang.
+        # ----------------------------------------------------------------------
+
+        while headers and not headers[-1]:
+
+            headers.pop()
+
+        if len(headers) < 2:
+
+            return pd.DataFrame()
+
+        cleaned_rows = []
+
+        for row in all_values[1:]:
+
+            normalized_row = list(row)
+
+            if len(normalized_row) < len(headers):
+
+                normalized_row.extend(
+                    [""] * (
+                        len(headers)
+                        - len(normalized_row)
+                    )
+                )
+
+            elif len(normalized_row) > len(headers):
+
+                normalized_row = normalized_row[
+                    :len(headers)
+                ]
+
+            cleaned_rows.append(
+                normalized_row
+            )
+
+        df = pd.DataFrame(
+            cleaned_rows,
+            columns=headers
+        )
+
+        return df
+
+    except Exception as e:
+
+        st.warning(
+            "⚠️ Gagal membaca sheet "
+            f"'{STANDARD_CHARGING_TYPE_SHEET}': {e}"
+        )
+
+        return pd.DataFrame()
+
+
+# ==============================================================================
+# DETECT STANDARD CHARGING TYPE COLUMNS
+# ==============================================================================
+
+def get_standard_charging_type_columns():
+
+    df = load_standard_charging_type_sheet()
+
+    if df.empty:
+
+        return []
+
+    columns = list(df.columns)
+
+    if len(columns) <= 2:
+
+        return []
+
+    result = []
+
+    # --------------------------------------------------------------------------
+    # Sesuai struktur:
+    # A = Material Code
+    # B = Material Name
+    # C dst = Charging Type
+    # --------------------------------------------------------------------------
+
+    for col in columns[2:]:
+
+        charging_type = safe_text(
+            col,
+            default=""
+        )
+
+        if charging_type:
+
+            result.append(
+                charging_type
+            )
+
+    return result
+
+
+# ==============================================================================
 # MASTER DROPDOWN
 # ==============================================================================
 
 @st.cache_data(
-    ttl=3600,
+    ttl=300,
     show_spinner=False
 )
 def load_master_dropdown():
 
+    # --------------------------------------------------------------------------
+    # Charging Type:
+    #
+    # Default lama tetap dipertahankan.
+    # Charging Type baru yang ditambahkan pada header
+    # "Standart Charging Type" otomatis ikut masuk.
+    # --------------------------------------------------------------------------
+
     charging_types = DEFAULT_CHARGING_TYPES.copy()
+
+    sheet_charging_types = (
+        get_standard_charging_type_columns()
+    )
+
+    for charging_type in sheet_charging_types:
+
+        if not any(
+            str(existing).strip().lower()
+            ==
+            str(charging_type).strip().lower()
+            for existing in charging_types
+        ):
+
+            charging_types.append(
+                charging_type
+            )
 
     expeditions = DEFAULT_EXPEDITIONS.copy()
 
     return charging_types, expeditions
+
+
+# ==============================================================================
+# REFRESH MASTER DATA
+# ==============================================================================
+
+def refresh_master_data():
+
+    """
+    Membersihkan cache master yang berkaitan dengan DO.
+
+    Digunakan agar perubahan pada:
+        - Standart Charging Type
+        - Master Item
+    dapat langsung dibaca kembali tanpa menunggu TTL.
+    """
+
+    try:
+        load_standard_charging_type_sheet.clear()
+    except Exception:
+        pass
+
+    try:
+        load_standard_charging_materials.clear()
+    except Exception:
+        pass
+
+    try:
+        load_master_dropdown.clear()
+    except Exception:
+        pass
+
+    try:
+        load_master_item_uom.clear()
+    except Exception:
+        pass
 
 
 # ==============================================================================
@@ -952,351 +1131,7 @@ def load_available_relocation_sites():
 
 
 # ==============================================================================
-# STANDARD MATERIAL
-# ==============================================================================
-
-@st.cache_data(
-    ttl=3600,
-    show_spinner=False
-)
-def load_standard_charging_materials(
-    charging_type
-):
-
-    if not charging_type:
-
-        return []
-
-    raw_data = [
-
-        {
-            "code": "AC0001",
-            "name": "Clamp Conduit",
-            "qty_map": {
-                "6S1P": 5,
-                "12S1P": 5
-            }
-        },
-
-        {
-            "code": "AC0002",
-            "name": "Kabel Schoen 16",
-            "qty_map": {
-                "6S1P": 10,
-                "12S1P": 10
-            }
-        },
-
-        {
-            "code": "AC0004",
-            "name": "Kabel Vynil Biru",
-            "qty_map": {
-                "6S1P": 4,
-                "12S1P": 4
-            }
-        },
-
-        {
-            "code": "AC0005",
-            "name": "Kabel Vynil Hijau",
-            "qty_map": {
-                "6S1P": 2,
-                "12S1P": 2
-            }
-        },
-
-        {
-            "code": "AC0006",
-            "name": "Kabel Vynil Hitam",
-            "qty_map": {
-                "6S1P": 2,
-                "12S1P": 2
-            }
-        },
-
-        {
-            "code": "AC0008",
-            "name": "Kabel Vynil Merah",
-            "qty_map": {
-                "6S1P": 4,
-                "12S1P": 4
-            }
-        },
-
-        {
-            "code": "AC0009",
-            "name": "Kuku Macan 10",
-            "qty_map": {
-                "6S1P": 1,
-                "12S1P": 1
-            }
-        },
-
-        {
-            "code": "AC0010",
-            "name": "Sok Konektor Grounding 5/8\"",
-            "qty_map": {
-                "DC20": 1,
-                "DC30": 1,
-                "DC60": 1
-            }
-        },
-
-        {
-            "code": "MM0001",
-            "name": "APAR 3Kg",
-            "qty_map": {
-                "DC20": 1,
-                "DC30": 1,
-                "DC60": 1
-            }
-        },
-
-        {
-            "code": "MM0002",
-            "name": "Box APAR",
-            "qty_map": {
-                "DC20": 1,
-                "DC30": 1,
-                "DC60": 1
-            }
-        },
-
-        {
-            "code": "MM0003",
-            "name": "Combiner 125A",
-            "qty_map": {
-                "DC60": 1
-            }
-        },
-
-        {
-            "code": "MM0004",
-            "name": "Combiner 63A BSS",
-            "qty_map": {
-                "12S1P": 1
-            }
-        },
-
-        {
-            "code": "MM0005",
-            "name": "Combiner 40A 3P",
-            "qty_map": {
-                "DC20": 1
-            }
-        },
-
-        {
-            "code": "MM0006",
-            "name": "Combiner 40A BSS",
-            "qty_map": {
-                "6S1P": 1
-            }
-        },
-
-        {
-            "code": "MM0007",
-            "name": "Combiner 63A",
-            "qty_map": {
-                "DC30": 1
-            }
-        },
-
-        {
-            "code": "MM0009",
-            "name": "Conduit Anaconda 1\"",
-            "qty_map": {
-                "6S1P": 10,
-                "12S1P": 10
-            }
-        },
-
-        {
-            "code": "MM0011",
-            "name": "Kabel Grounding 6",
-            "qty_map": {
-                "6S1P": 5,
-                "12S1P": 5
-            }
-        },
-
-        {
-            "code": "MM0012",
-            "name": "Kabel Power NYY 4x10",
-            "qty_map": {
-                "DC20": 12
-            }
-        },
-
-        {
-            "code": "MM0013",
-            "name": "Kabel Power NYY 4x16",
-            "qty_map": {
-                "DC30": 12
-            }
-        },
-
-        {
-            "code": "MM0014",
-            "name": "Kabel Power NYY 4x25mm",
-            "qty_map": {
-                "DC60": 12
-            }
-        },
-
-        {
-            "code": "MM0016",
-            "name": "Kabel Power NYYHY 3x10",
-            "qty_map": {
-                "6S1P": 10
-            }
-        },
-
-        {
-            "code": "MM0017",
-            "name": "NYA 10mm",
-            "qty_map": {
-                "6S1P": 5,
-                "12S1P": 5,
-                "DC20": 15,
-                "DC30": 15
-            }
-        },
-
-        {
-            "code": "MM0018",
-            "name": "NYA 16mm",
-            "qty_map": {
-                "DC60": 15
-            }
-        },
-
-        {
-            "code": "MM0020",
-            "name": "Stick Rod 2m",
-            "qty_map": {
-                "6S1P": 1,
-                "12S1P": 1,
-                "DC20": 1,
-                "DC30": 1,
-                "DC60": 1
-            }
-        },
-
-        {
-            "code": "MM0021",
-            "name": "Stick Rod 1.5m",
-            "qty_map": {
-                "6S1P": 1,
-                "12S1P": 1,
-                "DC20": 1,
-                "DC30": 1,
-                "DC60": 1
-            }
-        },
-
-        {
-            "code": "MM0022",
-            "name": "Stick Rod 1m",
-            "qty_map": {
-                "6S1P": 1,
-                "12S1P": 1,
-                "DC20": 1,
-                "DC30": 1,
-                "DC60": 1
-            }
-        },
-
-        {
-            "code": "MM0023",
-            "name": "Wheel Stopper",
-            "qty_map": {
-                "DC20": 2,
-                "DC30": 2,
-                "DC60": 2
-            }
-        },
-
-        {
-            "code": "MM0024",
-            "name": "Kabel Power NYY 4x35",
-            "qty_map": {
-                "DC60": 12
-            }
-        }
-
-    ]
-
-    result = []
-
-    for item in raw_data:
-
-        std_qty = item["qty_map"].get(
-            charging_type,
-            0
-        )
-
-        if std_qty > 0:
-
-            # ------------------------------------------------------------------
-            # UoM SEKARANG DIAMBIL DARI MASTER ITEM
-            # berdasarkan Material Code.
-            # ------------------------------------------------------------------
-
-            master_uom = get_master_uom(
-                item["code"],
-                default="Pcs"
-            )
-
-            result.append({
-
-                "code":
-                    item["code"],
-
-                "name":
-                    item["name"],
-
-                "std_qty":
-                    std_qty,
-
-                "uom":
-                    master_uom
-
-            })
-
-    return result
-
-
-# ==============================================================================
-# ENSURE RELOCATION COLUMNS
-# ==============================================================================
-
-def ensure_relocation_columns(df):
-
-    relocation_columns = [
-
-        "Date Reloc.",
-        "No. DO Reloc.",
-        "Qty Reloc.",
-        "Site Reloc.",
-        "Mitra Reloc.",
-        "Remarks Reloc."
-
-    ]
-
-    result = df.copy()
-
-    for col in relocation_columns:
-
-        if col not in result.columns:
-
-            result[col] = ""
-
-    return result
-
-
-# ==============================================================================
-# SAFE QTY
+# SAFE NUMERIC QTY
 # ==============================================================================
 
 def safe_qty(value, default=0):
@@ -1328,6 +1163,273 @@ def safe_qty(value, default=0):
     except (ValueError, TypeError):
 
         return default
+
+
+# ==============================================================================
+# STANDARD MATERIAL
+# ==============================================================================
+@st.cache_data(
+    ttl=300,
+    show_spinner=False
+)
+def load_standard_charging_materials(
+    charging_type
+):
+
+    """
+    Membaca standard material langsung dari:
+
+        Standart Charging Type
+
+    Struktur sheet:
+
+        A = Material Code
+        B = Material Name
+        C = 6S1P
+        D = 12S1P
+        E = DC20
+        F = DC30
+        G = DC60
+        dst...
+
+    Contoh:
+
+        AC0001 | Clamp Conduit | 5 | 5 |   |   |   |
+
+    Jika charging_type = 6S1P:
+
+        AC0001 -> Qty 5
+
+    Jika charging_type = DC20:
+
+        AC0001 -> tidak masuk
+
+    UoM tetap mengambil dari:
+        Master Item
+    """
+
+    if not charging_type:
+
+        return []
+
+    df_standard = (
+        load_standard_charging_type_sheet()
+    )
+
+    if df_standard.empty:
+
+        return []
+
+    columns = list(
+        df_standard.columns
+    )
+
+    if len(columns) < 2:
+
+        return []
+
+    # --------------------------------------------------------------------------
+    # Cari Material Code dan Material Name.
+    #
+    # Sesuai struktur user:
+    # A = Material Code
+    # B = Material Name
+    # --------------------------------------------------------------------------
+
+    def find_column(
+        candidates,
+        fallback=None
+    ):
+
+        lower_map = {
+            str(col).strip().lower(): col
+            for col in columns
+        }
+
+        for candidate in candidates:
+
+            key = (
+                str(candidate)
+                .strip()
+                .lower()
+            )
+
+            if key in lower_map:
+
+                return lower_map[key]
+
+        return fallback
+
+    code_col = find_column(
+        [
+            "Material Code",
+            "MaterialCode",
+            "Code",
+            "Item Code",
+            "Kode Material",
+            "Kode"
+        ],
+        fallback=columns[0]
+    )
+
+    name_col = find_column(
+        [
+            "Material Name",
+            "MaterialName",
+            "Name",
+            "Item Name",
+            "Nama Material",
+            "Nama"
+        ],
+        fallback=columns[1]
+    )
+
+    # --------------------------------------------------------------------------
+    # Cari kolom Charging Type.
+    #
+    # Contoh:
+    # 6S1P
+    # 12S1P
+    # DC20
+    # DC30
+    # DC60
+    # --------------------------------------------------------------------------
+
+    target_charging = safe_text(
+        charging_type,
+        default=""
+    )
+
+    target_column = None
+
+    for col in columns[2:]:
+
+        if (
+            str(col).strip().lower()
+            ==
+            target_charging.lower()
+        ):
+
+            target_column = col
+
+            break
+
+    # --------------------------------------------------------------------------
+    # Kalau charging type tidak ditemukan di sheet,
+    # return kosong.
+    #
+    # Ini penting supaya sistem tidak lagi memakai hardcoded
+    # material lama secara diam-diam.
+    # --------------------------------------------------------------------------
+
+    if target_column is None:
+
+        return []
+
+    result = []
+
+    # --------------------------------------------------------------------------
+    # LOOP MATERIAL
+    # --------------------------------------------------------------------------
+
+    for _, row in df_standard.iterrows():
+
+        material_code = safe_text(
+            row.get(
+                code_col,
+                ""
+            ),
+            default=""
+        )
+
+        material_name = safe_text(
+            row.get(
+                name_col,
+                ""
+            ),
+            default=""
+        )
+
+        if not material_code:
+
+            continue
+
+        # ----------------------------------------------------------------------
+        # Ambil quantity dari kolom charging type.
+        # ----------------------------------------------------------------------
+
+        raw_qty = row.get(
+            target_column,
+            ""
+        )
+
+        std_qty = safe_qty(
+            raw_qty,
+            default=0
+        )
+
+        # ----------------------------------------------------------------------
+        # Hanya material dengan quantity > 0 yang ditampilkan.
+        # ----------------------------------------------------------------------
+
+        if std_qty <= 0:
+
+            continue
+
+        # ----------------------------------------------------------------------
+        # UoM TETAP dari Master Item.
+        # ----------------------------------------------------------------------
+
+        master_uom = get_master_uom(
+            material_code,
+            default="Pcs"
+        )
+
+        result.append({
+
+            "code":
+                material_code,
+
+            "name":
+                material_name,
+
+            "std_qty":
+                std_qty,
+
+            "uom":
+                master_uom
+
+        })
+
+    return result
+
+
+# ==============================================================================
+# ENSURE RELOCATION COLUMNS
+# ==============================================================================
+
+def ensure_relocation_columns(df):
+
+    relocation_columns = [
+
+        "Date Reloc.",
+        "No. DO Reloc.",
+        "Qty Reloc.",
+        "Site Reloc.",
+        "Mitra Reloc.",
+        "Remarks Reloc."
+
+    ]
+
+    result = df.copy()
+
+    for col in relocation_columns:
+
+        if col not in result.columns:
+
+            result[col] = ""
+
+    return result
 
 
 # ==============================================================================
@@ -1731,13 +1833,6 @@ def generate_do_a5_pdf(data):
             item.get("name", "")
         )
 
-        # ======================================================================
-        # UOM:
-        # 1. Jika data sudah memiliki UoM -> gunakan.
-        # 2. Jika kosong -> lookup Master Item.
-        # 3. Pcs hanya fallback terakhir.
-        # ======================================================================
-
         uom = get_uom_from_row(
             item,
             default=""
@@ -1749,10 +1844,6 @@ def generate_do_a5_pdf(data):
                 code,
                 default="Pcs"
             )
-
-        # ----------------------------------------------------------------------
-        # SITE
-        # ----------------------------------------------------------------------
 
         site = item.get(
             "Site Alocation"
@@ -1769,10 +1860,6 @@ def generate_do_a5_pdf(data):
 
             site = ""
 
-        # ----------------------------------------------------------------------
-        # QTY
-        # ----------------------------------------------------------------------
-
         qty = safe_qty(
             item.get(
                 "Qty",
@@ -1780,10 +1867,6 @@ def generate_do_a5_pdf(data):
             ),
             default=0
         )
-
-        # ----------------------------------------------------------------------
-        # REMARKS
-        # ----------------------------------------------------------------------
 
         remarks = item.get(
             "Remarks",
@@ -1823,10 +1906,6 @@ def generate_do_a5_pdf(data):
                     fontSize=6
                 )
             ),
-
-            # ==================================================================
-            # UOM DARI MASTER ITEM
-            # ==================================================================
 
             Paragraph(
                 str(uom),
@@ -2071,15 +2150,6 @@ def generate_do_a5_pdf(data):
 
 def save_do_and_verify(rows_data, no_do):
 
-    """
-    Menyimpan DO menggunakan database layer yang sudah ada.
-
-    Setelah save berhasil, dilakukan fresh READ ke DB Material Out
-    untuk memastikan nomor DO benar-benar sudah tercatat.
-
-    Tidak mengubah mekanisme save di database.py.
-    """
-
     if not rows_data:
 
         return False, "Tidak ada data material yang akan disimpan."
@@ -2095,11 +2165,6 @@ def save_do_and_verify(rows_data, no_do):
 
     try:
 
-        # ----------------------------------------------------------------------
-        # STEP 1
-        # Gunakan fungsi existing database.py.
-        # ----------------------------------------------------------------------
-
         save_result = (
             save_do_to_db_material_out(
                 rows_data
@@ -2112,14 +2177,6 @@ def save_do_and_verify(rows_data, no_do):
                 "Fungsi database mengembalikan status gagal "
                 "saat menyimpan DB Material Out."
             )
-
-        # ----------------------------------------------------------------------
-        # STEP 2
-        # Fresh READ.
-        #
-        # get_sheet_values() tidak memakai cache data, sehingga kita bisa
-        # memastikan data benar-benar ada di Google Sheets.
-        # ----------------------------------------------------------------------
 
         verify_values = get_sheet_values(
             "DB Material Out"
@@ -2292,6 +2349,10 @@ def render():
         "Create, Print, Search & Relocation DO"
     )
 
+    # ==========================================================================
+    # MASTER DROPDOWN
+    # ==========================================================================
+
     charging_list, exp_list = (
         load_master_dropdown()
     )
@@ -2317,6 +2378,38 @@ def render():
         st.subheader(
             "Header Delivery Order"
         )
+
+        # ----------------------------------------------------------------------
+        # REFRESH MASTER DATA
+        # ----------------------------------------------------------------------
+
+        refresh_col1, refresh_col2 = st.columns(
+            [5, 1]
+        )
+
+        with refresh_col1:
+
+            st.caption(
+                "Material standard dan quantity dibaca dari "
+                f"sheet **{STANDARD_CHARGING_TYPE_SHEET}**. "
+                "UoM tetap dibaca dari **Master Item**."
+            )
+
+        with refresh_col2:
+
+            if st.button(
+                "🔄 Refresh Master Data",
+                key="btn_refresh_do_master"
+            ):
+
+                refresh_master_data()
+
+                st.toast(
+                    "Master Data berhasil direfresh.",
+                    icon="🔄"
+                )
+
+                st.rerun()
 
         col1, col2, col3 = st.columns(3)
 
@@ -2382,6 +2475,10 @@ def render():
             )
 
         st.divider()
+
+        # ==========================================================================
+        # FILTER SITE
+        # ==========================================================================
 
         st.subheader(
             "Filter Site & Kalkulasi Material Automatic"
@@ -2464,9 +2561,9 @@ def render():
 
             )
 
-            # ----------------------------------------------------------------------
+            # ------------------------------------------------------------------
             # UOM DARI MASTER ITEM
-            # ----------------------------------------------------------------------
+            # ------------------------------------------------------------------
 
             item_uom = get_master_uom(
                 item["code"],
@@ -2561,6 +2658,33 @@ def render():
 
         )
 
+        # ----------------------------------------------------------------------
+        # INFORMASI STANDARD MATERIAL
+        # ----------------------------------------------------------------------
+
+        if charging_type:
+
+            standard_count = len(
+                raw_materials
+            )
+
+            if standard_count > 0:
+
+                st.caption(
+                    f"📦 {standard_count} material standard "
+                    f"ditemukan dari sheet "
+                    f"**{STANDARD_CHARGING_TYPE_SHEET}** "
+                    f"untuk charging type **{charging_type}**."
+                )
+
+            else:
+
+                st.warning(
+                    f"⚠️ Tidak ada material standard untuk "
+                    f"**{charging_type}** pada sheet "
+                    f"**{STANDARD_CHARGING_TYPE_SHEET}**."
+                )
+
         st.divider()
 
         # ==========================================================================
@@ -2615,6 +2739,13 @@ def render():
                     f"Maksimal {MAX_SITE_SELECTION} site."
                 )
 
+            elif edited_df.empty:
+
+                st.error(
+                    "Tidak ada material standard yang tersedia "
+                    "untuk Charging Type tersebut."
+                )
+
             else:
 
                 date_str = do_date.strftime(
@@ -2652,6 +2783,10 @@ def render():
                             default=""
                         )
 
+                        if not material_code:
+
+                            continue
+
                         qty = safe_qty(
                             mat_item.get(
                                 "Qty",
@@ -2659,11 +2794,6 @@ def render():
                             ),
                             default=0
                         )
-
-                        # ==========================================================
-                        # UOM:
-                        # SELALU CEK MASTER ITEM BERDASARKAN MATERIAL CODE.
-                        # ==========================================================
 
                         uom = get_master_uom(
                             material_code,
@@ -2703,10 +2833,6 @@ def render():
 
                             "Qty":
                                 qty,
-
-                            # ======================================================
-                            # UOM MASTER ITEM
-                            # ======================================================
 
                             "UoM":
                                 uom,
@@ -2758,96 +2884,106 @@ def render():
                 # SAVE + VERIFY
                 # ==================================================================
 
-                with st.spinner(
-                    "Menyimpan transaksi ke "
-                    "sheet 'DB Material Out'..."
-                ):
-
-                    save_ok, save_error = (
-                        save_do_and_verify(
-                            generated_db_rows,
-                            no_do
-                        )
-                    )
-
-                if not save_ok:
+                if not generated_db_rows:
 
                     st.error(
-                        "❌ Delivery Order belum berhasil disimpan.\n\n"
-                        f"{save_error}"
+                        "Tidak ada material valid yang dapat disimpan."
                     )
 
                 else:
 
-                    st.session_state.current_do = {
+                    with st.spinner(
+                        "Menyimpan transaksi ke "
+                        "sheet 'DB Material Out'..."
+                    ):
 
-                        "no_do":
-                            no_do,
-
-                        "date":
-                            date_str,
-
-                        "epc":
-                            epc,
-
-                        "charging_type":
-                            charging_type,
-
-                        "expedition":
-                            expedition,
-
-                        "to":
-                            to_name,
-
-                        "contact":
-                            contact,
-
-                        "address":
-                            address,
-
-                        "sites":
-                            selected_sites,
-
-                        "site_count":
-                            site_count,
-
-                        "materials":
-                            generated_db_rows
-
-                    }
-
-                    st.session_state.do_success_notification = {
-
-                        "no_do":
-                            no_do,
-
-                        "site_count":
-                            site_count,
-
-                        "material_count":
-                            len(generated_db_rows),
-
-                        "timestamp":
-                            datetime.now().strftime(
-                                "%Y-%m-%d %H:%M:%S"
+                        save_ok, save_error = (
+                            save_do_and_verify(
+                                generated_db_rows,
+                                no_do
                             )
+                        )
 
-                    }
+                    if not save_ok:
 
-                    # ==================================================================
-                    # CLEAR CACHE
-                    # ==================================================================
+                        st.error(
+                            "❌ Delivery Order belum berhasil disimpan.\n\n"
+                            f"{save_error}"
+                        )
 
-                    get_used_sites_cached.clear()
-                    fetch_raw_query_data_cached.clear()
-                    load_epc_list.clear()
-                    load_available_relocation_sites.clear()
-                    load_master_item_uom.clear()
-                    load_standard_charging_materials.clear()
+                    else:
 
-                    reset_do_number()
+                        st.session_state.current_do = {
 
-                    st.rerun()
+                            "no_do":
+                                no_do,
+
+                            "date":
+                                date_str,
+
+                            "epc":
+                                epc,
+
+                            "charging_type":
+                                charging_type,
+
+                            "expedition":
+                                expedition,
+
+                            "to":
+                                to_name,
+
+                            "contact":
+                                contact,
+
+                            "address":
+                                address,
+
+                            "sites":
+                                selected_sites,
+
+                            "site_count":
+                                site_count,
+
+                            "materials":
+                                generated_db_rows
+
+                        }
+
+                        st.session_state.do_success_notification = {
+
+                            "no_do":
+                                no_do,
+
+                            "site_count":
+                                site_count,
+
+                            "material_count":
+                                len(generated_db_rows),
+
+                            "timestamp":
+                                datetime.now().strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+
+                        }
+
+                        # ==================================================================
+                        # CLEAR CACHE
+                        # ==================================================================
+
+                        get_used_sites_cached.clear()
+                        fetch_raw_query_data_cached.clear()
+                        load_epc_list.clear()
+                        load_available_relocation_sites.clear()
+                        load_master_item_uom.clear()
+                        load_standard_charging_type_sheet.clear()
+                        load_standard_charging_materials.clear()
+                        load_master_dropdown.clear()
+
+                        reset_do_number()
+
+                        st.rerun()
 
     # ==========================================================================
     # TAB 2
@@ -2880,10 +3016,6 @@ def render():
         else:
 
             try:
-
-                # ------------------------------------------------------------------
-                # Refresh UoM dari Master Item sebelum PDF dibuat.
-                # ------------------------------------------------------------------
 
                 pdf_data = dict(do_data)
 
@@ -3004,10 +3136,6 @@ def render():
                 )
 
             if found_data:
-
-                # ------------------------------------------------------------------
-                # Refresh UoM berdasarkan Master Item.
-                # ------------------------------------------------------------------
 
                 found_materials = []
 
@@ -3156,17 +3284,9 @@ def render():
                 df_edit_mat
             )
 
-            # ======================================================================
-            # UOM NORMALIZATION
-            # ======================================================================
-
             if "UoM" not in df_edit_mat.columns:
 
                 df_edit_mat["UoM"] = ""
-
-            # ----------------------------------------------------------------------
-            # MASTER ITEM OVERRIDE
-            # ----------------------------------------------------------------------
 
             if "Material Code" in df_edit_mat.columns:
 
@@ -3272,9 +3392,9 @@ def render():
                 edited_mat_df
             )
 
-            # ======================================================================
+            # ==========================================================================
             # RELOCATION
-            # ======================================================================
+            # ==========================================================================
 
             st.markdown("---")
 
@@ -3414,9 +3534,9 @@ def render():
                     key="reloc_reason"
                 )
 
-                # ==================================================================
+                # ==========================================================================
                 # EXECUTE RELOCATION
-                # ==================================================================
+                # ==========================================================================
 
                 if st.button(
                     "🔀 Eksekusi Relokasi Site",
@@ -3587,10 +3707,6 @@ def render():
                                 default=0
                             )
 
-                            # ======================================================
-                            # UOM MASTER ITEM
-                            # ======================================================
-
                             new_row["UoM"] = (
                                 get_master_uom(
                                     row.get(
@@ -3722,7 +3838,9 @@ def render():
                                     load_epc_list.clear()
                                     load_available_relocation_sites.clear()
                                     load_master_item_uom.clear()
+                                    load_standard_charging_type_sheet.clear()
                                     load_standard_charging_materials.clear()
+                                    load_master_dropdown.clear()
 
                                     st.session_state.relocation_history.append({
 
@@ -3756,9 +3874,9 @@ def render():
 
                                     st.rerun()
 
-            # ======================================================================
+            # ==========================================================================
             # HISTORY
-            # ======================================================================
+            # ==========================================================================
 
             do_hist = [
                 h
@@ -3791,9 +3909,9 @@ def render():
 
             st.markdown("---")
 
-            # ======================================================================
+            # ==========================================================================
             # MANUAL EDIT
-            # ======================================================================
+            # ==========================================================================
 
             col_btn1, col_btn2 = st.columns(2)
 
@@ -3821,10 +3939,6 @@ def render():
                             ),
                             default=0
                         )
-
-                        # ----------------------------------------------------------
-                        # UOM SELALU MASTER ITEM
-                        # ----------------------------------------------------------
 
                         row["UoM"] = get_master_uom(
                             row.get(
@@ -3909,9 +4023,9 @@ def render():
                             "❌ Gagal memperbarui DO."
                         )
 
-            # ======================================================================
+            # ==========================================================================
             # PREVIEW
-            # ======================================================================
+            # ==========================================================================
 
             with col_btn2:
 
@@ -3936,10 +4050,6 @@ def render():
                             ),
                             default=0
                         )
-
-                        # ----------------------------------------------------------
-                        # UOM MASTER ITEM
-                        # ----------------------------------------------------------
 
                         row["UoM"] = get_master_uom(
                             row.get(
