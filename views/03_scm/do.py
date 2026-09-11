@@ -1008,14 +1008,16 @@ def load_filtered_sites(
 
         (
             working_df["_epc_clean"]
-            == target_epc
+            ==
+            target_epc
         )
 
         &
 
         (
             working_df["_charging_clean"]
-            == target_charging
+            ==
+            target_charging
         )
 
         &
@@ -1166,6 +1168,63 @@ def safe_qty(value, default=0):
 
 
 # ==============================================================================
+# QTY BREAKDOWN PER SITE
+# ==============================================================================
+
+def calculate_qty_per_site(
+    total_qty,
+    site_count
+):
+    """
+    Menghitung Qty material yang dialokasikan untuk setiap site.
+
+    Formula:
+
+        Qty Per Site =
+            Total Qty / Jumlah Site
+
+    Contoh:
+
+        Total Qty = 15
+        Site      = 3
+
+        Qty Per Site = 15 / 3 = 5
+
+    Fungsi ini sengaja dipisahkan agar:
+    - logic kalkulasi mudah dibaca
+    - Qty yang masuk DB konsisten
+    - PDF otomatis membaca Qty hasil breakdown
+    - logic lain seperti relokasi tidak perlu berubah
+    """
+
+    total_qty = safe_qty(
+        total_qty,
+        default=0
+    )
+
+    site_count = safe_qty(
+        site_count,
+        default=0
+    )
+
+    if site_count <= 0:
+
+        return total_qty
+
+    result = (
+        float(total_qty)
+        /
+        float(site_count)
+    )
+
+    if result.is_integer():
+
+        return int(result)
+
+    return result
+
+
+# ==============================================================================
 # STANDARD MATERIAL
 # ==============================================================================
 @st.cache_data(
@@ -1286,13 +1345,6 @@ def load_standard_charging_materials(
 
     # --------------------------------------------------------------------------
     # Cari kolom Charging Type.
-    #
-    # Contoh:
-    # 6S1P
-    # 12S1P
-    # DC20
-    # DC30
-    # DC60
     # --------------------------------------------------------------------------
 
     target_charging = safe_text(
@@ -1317,9 +1369,6 @@ def load_standard_charging_materials(
     # --------------------------------------------------------------------------
     # Kalau charging type tidak ditemukan di sheet,
     # return kosong.
-    #
-    # Ini penting supaya sistem tidak lagi memakai hardcoded
-    # material lama secara diam-diam.
     # --------------------------------------------------------------------------
 
     if target_column is None:
@@ -1779,6 +1828,15 @@ def generate_do_a5_pdf(data):
 
     # --------------------------------------------------------------------------
     # MATERIAL TABLE
+    #
+    # Qty di sini langsung membaca Qty yang sudah tersimpan.
+    #
+    # Karena pada saat CREATE DO Qty sudah dibreakdown:
+    #
+    #   Total Qty = Standard Qty x Site Count
+    #   Qty / Site = Total Qty / Site Count
+    #
+    # Maka PDF tidak melakukan pembagian ulang.
     # --------------------------------------------------------------------------
 
     mat_headers = [
@@ -1859,6 +1917,10 @@ def generate_do_a5_pdf(data):
         if site is None:
 
             site = ""
+
+        # ----------------------------------------------------------------------
+        # QTY SUDAH DALAM BENTUK BREAKDOWN PER SITE
+        # ----------------------------------------------------------------------
 
         qty = safe_qty(
             item.get(
@@ -2547,6 +2609,21 @@ def render():
             start=1
         ):
 
+            # ------------------------------------------------------------------
+            # TOTAL QTY
+            #
+            # Standard Qty x jumlah Site
+            #
+            # Contoh:
+            # Standard = 5
+            # Site = 3
+            #
+            # Total Qty = 15
+            #
+            # Nilai Total Qty ini tetap ditampilkan pada editor agar user
+            # dapat melakukan pengecekan/edit total kebutuhan.
+            # ------------------------------------------------------------------
+
             total_qty = (
 
                 item["std_qty"]
@@ -2601,7 +2678,7 @@ def render():
 
         st.subheader(
             "Detail Material Item "
-            "(Akan Didistribusikan per Site)"
+            "(Total Qty Akan Didistribusikan Per Site)"
         )
 
         edited_df = st.data_editor(
@@ -2636,8 +2713,9 @@ def render():
                     st.column_config.NumberColumn(
                         "Total Qty (Auto calculated)",
                         help=(
-                            "Qty awal = Std Qty x Total Site. "
-                            "Qty dapat diedit manual."
+                            "Qty awal = Standard Qty x Total Site. "
+                            "Saat disimpan, Qty akan dibreakdown "
+                            "menjadi Qty per Site."
                         ),
                         min_value=0,
                         step=1
@@ -2684,6 +2762,19 @@ def render():
                     f"**{charging_type}** pada sheet "
                     f"**{STANDARD_CHARGING_TYPE_SHEET}**."
                 )
+
+        # ----------------------------------------------------------------------
+        # BREAKDOWN PREVIEW
+        # ----------------------------------------------------------------------
+
+        if site_count > 0 and not df_materials.empty:
+
+            st.caption(
+                "📐 **Breakdown Qty:** "
+                "Total Qty ÷ Jumlah Site = Qty per Site. "
+                "Qty per Site inilah yang akan tersimpan pada "
+                "**DB Material Out**."
+            )
 
         st.divider()
 
@@ -2763,6 +2854,36 @@ def render():
                     )
                 )
 
+                # ==================================================================
+                # CREATE DATABASE ROW
+                #
+                # PERUBAHAN UTAMA:
+                #
+                # Sebelumnya:
+                #
+                #     Qty DB = Total Qty
+                #
+                # sehingga jika:
+                #     Standard Qty = 5
+                #     Site = 3
+                #
+                # maka:
+                #     Site A = 15
+                #     Site B = 15
+                #     Site C = 15
+                #
+                # Sekarang:
+                #
+                #     Total Qty = 5 x 3 = 15
+                #     Qty Per Site = 15 / 3 = 5
+                #
+                # sehingga:
+                #     Site A = 5
+                #     Site B = 5
+                #     Site C = 5
+                #
+                # ==================================================================
+
                 for site_name in selected_sites:
 
                     for mat_item in edited_material_rows:
@@ -2787,13 +2908,39 @@ def render():
 
                             continue
 
-                        qty = safe_qty(
+                        # ----------------------------------------------------------
+                        # TOTAL QTY DARI EDITOR
+                        # ----------------------------------------------------------
+
+                        total_qty = safe_qty(
                             mat_item.get(
                                 "Qty",
                                 0
                             ),
                             default=0
                         )
+
+                        # ----------------------------------------------------------
+                        # BREAKDOWN QTY PER SITE
+                        #
+                        # Formula:
+                        #
+                        # Qty Per Site =
+                        #       Total Qty / Site Count
+                        #
+                        # Contoh:
+                        #
+                        # 15 / 3 = 5
+                        # ----------------------------------------------------------
+
+                        qty_per_site = calculate_qty_per_site(
+                            total_qty,
+                            site_count
+                        )
+
+                        # ----------------------------------------------------------
+                        # UOM MASTER ITEM
+                        # ----------------------------------------------------------
 
                         uom = get_master_uom(
                             material_code,
@@ -2814,6 +2961,10 @@ def render():
 
                             remarks = ""
 
+                        # ----------------------------------------------------------
+                        # SAVE ROW PER SITE
+                        # ----------------------------------------------------------
+
                         generated_db_rows.append({
 
                             "No":
@@ -2831,8 +2982,12 @@ def render():
                             "Material Name":
                                 material_name,
 
+                            # ======================================================
+                            # QTY HASIL BREAKDOWN PER SITE
+                            # ======================================================
+
                             "Qty":
-                                qty,
+                                qty_per_site,
 
                             "UoM":
                                 uom,
@@ -2880,9 +3035,9 @@ def render():
 
                         row_counter += 1
 
-                # ==================================================================
+                # ==========================================================================
                 # SAVE + VERIFY
-                # ==================================================================
+                # ==========================================================================
 
                 if not generated_db_rows:
 
@@ -3046,6 +3201,20 @@ def render():
                         )
                     )
 
+                    # --------------------------------------------------------------
+                    # QTY TIDAK DIBAGI LAGI DI SINI.
+                    #
+                    # Qty yang datang dari DB sudah merupakan Qty Per Site.
+                    # --------------------------------------------------------------
+
+                    item_copy["Qty"] = safe_qty(
+                        item_copy.get(
+                            "Qty",
+                            0
+                        ),
+                        default=0
+                    )
+
                     pdf_materials.append(
                         item_copy
                     )
@@ -3159,6 +3328,14 @@ def render():
                             item_copy,
                             default="Pcs"
                         )
+                    )
+
+                    item_copy["Qty"] = safe_qty(
+                        item_copy.get(
+                            "Qty",
+                            0
+                        ),
+                        default=0
                     )
 
                     found_materials.append(
@@ -3546,7 +3723,8 @@ def render():
 
                     if (
                         selected_site_old
-                        == "Tidak Ada Site"
+                        ==
+                        "Tidak Ada Site"
                     ):
 
                         st.error(
@@ -3557,7 +3735,8 @@ def render():
                         not selected_site_new
                         or
                         selected_site_new
-                        == "Tidak ada site baru yang tersedia"
+                        ==
+                        "Tidak ada site baru yang tersedia"
                     ):
 
                         st.error(
@@ -3566,7 +3745,8 @@ def render():
 
                     elif (
                         selected_site_old
-                        == selected_site_new
+                        ==
+                        selected_site_new
                     ):
 
                         st.warning(
