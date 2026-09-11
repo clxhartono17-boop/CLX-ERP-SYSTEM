@@ -1535,7 +1535,7 @@ def generate_do_a5_pdf(data):
     # --------------------------------------------------------------------------
     # LOGO & COMPANY INFO
     # --------------------------------------------------------------------------
-    logo_path = "assets/logo.png"
+    logo_path = "assets/CLX.png"
     if os.path.exists(logo_path):
         logo_img = RLImage(logo_path, width=90, height=25)
     else:
