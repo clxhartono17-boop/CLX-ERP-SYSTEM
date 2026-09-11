@@ -1484,14 +1484,22 @@ def ensure_relocation_columns(df):
 # ==============================================================================
 # PDF GENERATOR
 # ==============================================================================
+import io
+import os
+from reportlab.lib.pagesizes import A5, portrait
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 def generate_do_a5_pdf(data):
-
+    # Pastikan variabel ini dideklarasikan di file utama kamu (biasanya True jika reportlab sukses di-import)
+    # Jika di kodemu tidak menggunakan pengecekan ini, baris di bawah bisa dihapus/diabaikan.
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab belum terpasang.")
 
     buffer = io.BytesIO()
 
+    # Setup margin PDF sangat tipis agar area tabel maksimal
     doc = SimpleDocTemplate(
         buffer,
         pagesize=portrait(A5),
@@ -1504,7 +1512,7 @@ def generate_do_a5_pdf(data):
     elements = []
     styles = getSampleStyleSheet()
 
-    # Font styles dibuat lebih compact (leading diperkecil)
+    # Font styles dengan leading (spasi antar baris) yang dipress agar compact
     title_style = ParagraphStyle(
         "T", fontName="Helvetica-Bold", fontSize=10, textColor=colors.HexColor("#1a365d")
     )
@@ -1553,9 +1561,9 @@ def generate_do_a5_pdf(data):
     # --------------------------------------------------------------------------
     to_box = [
         [Paragraph("<b>To</b>", body_bold), ""],
-        [Paragraph("Name:", body_style), Paragraph(str(data.get("to", "")), body_bold)],
-        [Paragraph("Phone No.:", body_style), Paragraph(str(data.get("contact", "")), body_style)],
-        [Paragraph("Address:", body_style), Paragraph(str(data.get("address", "")), body_style)]
+        [Paragraph("Name:", body_style), Paragraph(str(data.get("to", "")).strip(), body_bold)],
+        [Paragraph("Phone No.:", body_style), Paragraph(str(data.get("contact", "")).strip(), body_style)],
+        [Paragraph("Address:", body_style), Paragraph(str(data.get("address", "")).strip(), body_style)]
     ]
 
     to_table = Table(to_box, colWidths=[45, 140])
@@ -1571,11 +1579,11 @@ def generate_do_a5_pdf(data):
     # --------------------------------------------------------------------------
     meta_box = [
         [Paragraph("<b>DELIVERY ORDER</b>", ParagraphStyle("DO", fontName="Helvetica-Bold", fontSize=8, alignment=1, textColor=colors.HexColor("#1a365d"))), ""],
-        [Paragraph("No. DO:", body_bold), Paragraph(str(data.get("no_do", "")), body_bold)],
-        [Paragraph("Date:", body_style), Paragraph(str(data.get("date", "")), body_style)],
-        [Paragraph("EPC:", body_style), Paragraph(str(data.get("epc", "")), body_style)],
-        [Paragraph("Charging Type:", body_style), Paragraph(str(data.get("charging_type", "-")), body_style)],
-        [Paragraph("Expedition:", body_style), Paragraph(str(data.get("expedition", "-")), body_style)]
+        [Paragraph("No. DO:", body_bold), Paragraph(str(data.get("no_do", "")).strip(), body_bold)],
+        [Paragraph("Date:", body_style), Paragraph(str(data.get("date", "")).strip(), body_style)],
+        [Paragraph("EPC:", body_style), Paragraph(str(data.get("epc", "")).strip(), body_style)],
+        [Paragraph("Charging Type:", body_style), Paragraph(str(data.get("charging_type", "-")).strip(), body_style)],
+        [Paragraph("Expedition:", body_style), Paragraph(str(data.get("expedition", "-")).strip(), body_style)]
     ]
 
     meta_table = Table(meta_box, colWidths=[65, 135])
@@ -1608,34 +1616,41 @@ def generate_do_a5_pdf(data):
 
     materials = data.get("materials", [])
     for idx, item in enumerate(materials, start=1):
-        code = item.get("Material Code", item.get("code", ""))
-        name = item.get("Material Name", item.get("name", ""))
+        # Penggunaan .strip() memastikan tidak ada spasi gaib yang membuat teks turun ke baris baru
+        code = str(item.get("Material Code", item.get("code", ""))).strip()
+        name = str(item.get("Material Name", item.get("name", ""))).strip()
+        
         uom = get_uom_from_row(item, default="")
         if not uom:
             uom = get_master_uom(code, default="Pcs")
+        uom = str(uom).strip()
             
         site = item.get("Site Alocation")
         if site is None:
             site = item.get("Site Allocation", "")
         if site is None:
             site = ""
+        site = str(site).strip()
 
         qty = safe_qty(item.get("Qty", 0), default=0)
+        qty_str = str(qty).strip()
+
         remarks = item.get("Remarks", "")
         if remarks is None:
             remarks = ""
+        remarks = str(remarks).strip()
 
         mat_rows.append([
             Paragraph(str(idx), center_style),
-            Paragraph(str(code), body_style),
-            Paragraph(str(name), body_style),
-            Paragraph(str(qty), center_style),
-            Paragraph(str(uom), center_style),
-            Paragraph(str(site), body_style),
-            Paragraph(str(remarks), body_style)
+            Paragraph(code, body_style),
+            Paragraph(name, body_style),
+            Paragraph(qty_str, center_style),
+            Paragraph(uom, center_style),
+            Paragraph(site, body_style),
+            Paragraph(remarks, body_style)
         ])
 
-    # TOTAL SITE ROW - logic tidak diubah
+    # TOTAL SITE ROW
     site_values = []
     for material in materials:
         site = material.get("Site Alocation")
@@ -1656,11 +1671,11 @@ def generate_do_a5_pdf(data):
         ""
     ])
 
-    # Proporsi lebar kolom yang baru (Total = 385)
-    # No(15) | Code(45) | Name(115) | Qty(20) | UoM(28) | Site(100) | Remarks(62)
+    # Proporsi lebar kolom final (Total = 385 points)
+    # No & UoM diperlebar agar aman, Qty dibuat pas.
     materials_table = Table(
         mat_rows,
-        colWidths=[15, 45, 115, 20, 28, 100, 62]
+        colWidths=[20, 46, 105, 23, 35, 94, 62]
     )
     materials_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a365d")),
@@ -1668,12 +1683,15 @@ def generate_do_a5_pdf(data):
         ("SPAN", (0, -1), (4, -1)),
         ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#edf2f7")),
         ("BOX", (0, -1), (-1, -1), 0.5, colors.HexColor("#1a365d")),
-        # Padding di-press seminimal mungkin agar isi compact & tinggi baris mengecil
+        
+        # Padding di-press seminimal mungkin (1 point) agar baris tidak boros kertas
         ("TOPPADDING", (0, 0), (-1, -1), 1),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
         ("LEFTPADDING", (0, 0), (-1, -1), 2),
         ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"), # Top align agar teks panjang turunnya rapi
+        
+        # Penyelarasan teks ke atas agar rapi jika ada sel yang beda jumlah barisnya
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ]))
     elements.append(materials_table)
     elements.append(Spacer(1, 8))
@@ -1708,7 +1726,6 @@ def generate_do_a5_pdf(data):
     buffer.seek(0)
     
     return buffer.getvalue()
-    )
 
     # --------------------------------------------------------------------------
     # MATERIAL TABLE
