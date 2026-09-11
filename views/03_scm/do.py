@@ -1488,342 +1488,226 @@ def ensure_relocation_columns(df):
 def generate_do_a5_pdf(data):
 
     if not REPORTLAB_AVAILABLE:
-
-        raise RuntimeError(
-            "ReportLab belum terpasang."
-        )
+        raise RuntimeError("ReportLab belum terpasang.")
 
     buffer = io.BytesIO()
 
     doc = SimpleDocTemplate(
-
         buffer,
-
         pagesize=portrait(A5),
-
         rightMargin=15,
-
         leftMargin=15,
-
         topMargin=15,
-
         bottomMargin=15
-
     )
 
     elements = []
-
     styles = getSampleStyleSheet()
 
+    # Font styles dibuat lebih compact (leading diperkecil)
     title_style = ParagraphStyle(
-        "T",
-        fontName="Helvetica-Bold",
-        fontSize=10,
-        textColor=colors.HexColor("#1a365d")
+        "T", fontName="Helvetica-Bold", fontSize=10, textColor=colors.HexColor("#1a365d")
     )
-
     subtitle_style = ParagraphStyle(
-        "ST",
-        fontName="Helvetica",
-        fontSize=6,
-        textColor=colors.HexColor("#4a5568"),
-        leading=7
+        "ST", fontName="Helvetica", fontSize=6, textColor=colors.HexColor("#4a5568"), leading=7
     )
-
     body_style = ParagraphStyle(
-        "B",
-        fontName="Helvetica",
-        fontSize=6.5,
-        leading=8,
-        textColor=colors.HexColor("#2d3748")
+        "B", fontName="Helvetica", fontSize=6.5, leading=7.5, textColor=colors.HexColor("#2d3748")
     )
-
     body_bold = ParagraphStyle(
-        "BB",
-        fontName="Helvetica-Bold",
-        fontSize=6.5,
-        leading=8,
-        textColor=colors.HexColor("#1a365d")
+        "BB", fontName="Helvetica-Bold", fontSize=6.5, leading=7.5, textColor=colors.HexColor("#1a365d")
     )
-
     header_table_style = ParagraphStyle(
-        "HT",
-        fontName="Helvetica-Bold",
-        fontSize=6.5,
-        textColor=colors.white,
-        alignment=1
+        "HT", fontName="Helvetica-Bold", fontSize=6.5, leading=7.5, textColor=colors.white, alignment=1
+    )
+    center_style = ParagraphStyle(
+        "C", fontName="Helvetica", fontSize=6.5, leading=7.5, textColor=colors.HexColor("#2d3748"), alignment=1
     )
 
     # --------------------------------------------------------------------------
-    # LOGO
+    # LOGO & COMPANY INFO
     # --------------------------------------------------------------------------
-
     logo_path = "assets/logo.png"
-
     if os.path.exists(logo_path):
-
-        logo_img = RLImage(
-            logo_path,
-            width=90,
-            height=25
-        )
-
+        logo_img = RLImage(logo_path, width=90, height=25)
     else:
-
-        logo_img = Paragraph(
-            "<b>PT. CLX</b>",
-            title_style
-        )
+        logo_img = Paragraph("<b>PT. CLX</b>", title_style)
 
     company_info = [
-
-        Paragraph(
-            "<b>PT. Connectivity Leads excellence</b>",
-            title_style
-        ),
-
-        Paragraph(
-            "Jl. M Ali 2 No. 19 RT 007 RW 004 Tanah Baru, "
-            "Beji, Kota Depok, Jawa barat 16426",
-            subtitle_style
-        ),
-
-        Paragraph(
-            "E: clx.central@gmail.com | T: +62 821-4858-1879",
-            subtitle_style
-        )
-
+        Paragraph("<b>PT. Connectivity Leads excellence</b>", title_style),
+        Paragraph("Jl. M Ali 2 No. 19 RT 007 RW 004 Tanah Baru, Beji, Kota Depok, Jawa barat 16426", subtitle_style),
+        Paragraph("E: clx.central@gmail.com | T: +62 821-4858-1879", subtitle_style)
     ]
 
-    head_table = Table(
-        [[logo_img, company_info]],
-        colWidths=[95, 295]
-    )
-
-    head_table.setStyle(
-        TableStyle([
-            (
-                "VALIGN",
-                (0, 0),
-                (-1, -1),
-                "MIDDLE"
-            ),
-            (
-                "LINEBELOW",
-                (0, 0),
-                (-1, -1),
-                1,
-                colors.HexColor("#1a365d")
-            ),
-            (
-                "BOTTOMPADDING",
-                (0, 0),
-                (-1, -1),
-                4
-            )
-        ])
-    )
-
+    head_table = Table([[logo_img, company_info]], colWidths=[95, 290])
+    head_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LINEBELOW", (0, 0), (-1, -1), 1, colors.HexColor("#1a365d")),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4)
+    ]))
     elements.append(head_table)
-
-    elements.append(
-        Spacer(1, 5)
-    )
+    elements.append(Spacer(1, 5))
 
     # --------------------------------------------------------------------------
     # TO BOX
     # --------------------------------------------------------------------------
-
     to_box = [
-
-        [
-            Paragraph("<b>To</b>", body_bold),
-            ""
-        ],
-
-        [
-            Paragraph("Name:", body_style),
-            Paragraph(
-                str(data.get("to", "")),
-                body_bold
-            )
-        ],
-
-        [
-            Paragraph("Phone No.:", body_style),
-            Paragraph(
-                str(data.get("contact", "")),
-                body_style
-            )
-        ],
-
-        [
-            Paragraph("Address:", body_style),
-            Paragraph(
-                str(data.get("address", "")),
-                body_style
-            )
-        ]
-
+        [Paragraph("<b>To</b>", body_bold), ""],
+        [Paragraph("Name:", body_style), Paragraph(str(data.get("to", "")), body_bold)],
+        [Paragraph("Phone No.:", body_style), Paragraph(str(data.get("contact", "")), body_style)],
+        [Paragraph("Address:", body_style), Paragraph(str(data.get("address", "")), body_style)]
     ]
 
-    to_table = Table(
-        to_box,
-        colWidths=[45, 140]
-    )
-
-    to_table.setStyle(
-        TableStyle([
-            (
-                "BOX",
-                (0, 0),
-                (-1, -1),
-                0.5,
-                colors.HexColor("#cbd5e0")
-            ),
-            (
-                "BACKGROUND",
-                (0, 0),
-                (-1, 0),
-                colors.HexColor("#edf2f7")
-            ),
-            (
-                "TOPPADDING",
-                (0, 0),
-                (-1, -1),
-                2
-            ),
-            (
-                "BOTTOMPADDING",
-                (0, 0),
-                (-1, -1),
-                2
-            )
-        ])
-    )
+    to_table = Table(to_box, colWidths=[45, 140])
+    to_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#edf2f7")),
+        ("TOPPADDING", (0, 0), (-1, -1), 1.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5)
+    ]))
 
     # --------------------------------------------------------------------------
     # META BOX
     # --------------------------------------------------------------------------
-
     meta_box = [
-
-        [
-            Paragraph(
-                "<b>DELIVERY ORDER</b>",
-                ParagraphStyle(
-                    "DO",
-                    fontName="Helvetica-Bold",
-                    fontSize=8,
-                    alignment=1,
-                    textColor=colors.HexColor("#1a365d")
-                )
-            ),
-            ""
-        ],
-
-        [
-            Paragraph("No. DO:", body_bold),
-            Paragraph(
-                str(data.get("no_do", "")),
-                body_bold
-            )
-        ],
-
-        [
-            Paragraph("Date:", body_style),
-            Paragraph(
-                str(data.get("date", "")),
-                body_style
-            )
-        ],
-
-        [
-            Paragraph("EPC:", body_style),
-            Paragraph(
-                str(data.get("epc", "")),
-                body_style
-            )
-        ],
-
-        [
-            Paragraph("Charging Type:", body_style),
-            Paragraph(
-                str(data.get("charging_type", "-")),
-                body_style
-            )
-        ],
-
-        [
-            Paragraph("Expedition:", body_style),
-            Paragraph(
-                str(data.get("expedition", "-")),
-                body_style
-            )
-        ]
-
+        [Paragraph("<b>DELIVERY ORDER</b>", ParagraphStyle("DO", fontName="Helvetica-Bold", fontSize=8, alignment=1, textColor=colors.HexColor("#1a365d"))), ""],
+        [Paragraph("No. DO:", body_bold), Paragraph(str(data.get("no_do", "")), body_bold)],
+        [Paragraph("Date:", body_style), Paragraph(str(data.get("date", "")), body_style)],
+        [Paragraph("EPC:", body_style), Paragraph(str(data.get("epc", "")), body_style)],
+        [Paragraph("Charging Type:", body_style), Paragraph(str(data.get("charging_type", "-")), body_style)],
+        [Paragraph("Expedition:", body_style), Paragraph(str(data.get("expedition", "-")), body_style)]
     ]
 
-    meta_table = Table(
-        meta_box,
-        colWidths=[65, 140]
-    )
+    meta_table = Table(meta_box, colWidths=[65, 135])
+    meta_table.setStyle(TableStyle([
+        ("SPAN", (0, 0), (1, 0)),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e0")),
+        ("BACKGROUND", (0, 0), (1, 0), colors.HexColor("#e2e8f0")),
+        ("TOPPADDING", (0, 0), (-1, -1), 1.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5)
+    ]))
 
-    meta_table.setStyle(
-        TableStyle([
-            (
-                "SPAN",
-                (0, 0),
-                (1, 0)
-            ),
-            (
-                "BOX",
-                (0, 0),
-                (-1, -1),
-                0.5,
-                colors.HexColor("#cbd5e0")
-            ),
-            (
-                "BACKGROUND",
-                (0, 0),
-                (1, 0),
-                colors.HexColor("#e2e8f0")
-            ),
-            (
-                "TOPPADDING",
-                (0, 0),
-                (-1, -1),
-                2
-            ),
-            (
-                "BOTTOMPADDING",
-                (0, 0),
-                (-1, -1),
-                2
-            )
-        ])
-    )
-
-    top_info_table = Table(
-        [[to_table, meta_table]],
-        colWidths=[190, 200]
-    )
-
-    top_info_table.setStyle(
-        TableStyle([
-            (
-                "VALIGN",
-                (0, 0),
-                (-1, -1),
-                "TOP"
-            )
-        ])
-    )
-
+    top_info_table = Table([[to_table, meta_table]], colWidths=[185, 200])
+    top_info_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
     elements.append(top_info_table)
+    elements.append(Spacer(1, 5))
 
-    elements.append(
-        Spacer(1, 5)
+    # --------------------------------------------------------------------------
+    # MATERIAL TABLE
+    # --------------------------------------------------------------------------
+    mat_headers = [
+        Paragraph("No", header_table_style),
+        Paragraph("Material Code", header_table_style),
+        Paragraph("Material Name", header_table_style),
+        Paragraph("Qty", header_table_style),
+        Paragraph("UoM", header_table_style),
+        Paragraph("Site Allocation", header_table_style),
+        Paragraph("Remarks", header_table_style)
+    ]
+    mat_rows = [mat_headers]
+
+    materials = data.get("materials", [])
+    for idx, item in enumerate(materials, start=1):
+        code = item.get("Material Code", item.get("code", ""))
+        name = item.get("Material Name", item.get("name", ""))
+        uom = get_uom_from_row(item, default="")
+        if not uom:
+            uom = get_master_uom(code, default="Pcs")
+            
+        site = item.get("Site Alocation")
+        if site is None:
+            site = item.get("Site Allocation", "")
+        if site is None:
+            site = ""
+
+        qty = safe_qty(item.get("Qty", 0), default=0)
+        remarks = item.get("Remarks", "")
+        if remarks is None:
+            remarks = ""
+
+        mat_rows.append([
+            Paragraph(str(idx), center_style),
+            Paragraph(str(code), body_style),
+            Paragraph(str(name), body_style),
+            Paragraph(str(qty), center_style),
+            Paragraph(str(uom), center_style),
+            Paragraph(str(site), body_style),
+            Paragraph(str(remarks), body_style)
+        ])
+
+    # TOTAL SITE ROW - logic tidak diubah
+    site_values = []
+    for material in materials:
+        site = material.get("Site Alocation")
+        if site is None:
+            site = material.get("Site Allocation", "")
+        if site is None:
+            site = ""
+        site = str(site).strip()
+        if site:
+            site_values.append(site)
+            
+    site_allocated_count = data.get("site_count", len(set(site_values)))
+    
+    mat_rows.append([
+        Paragraph("<b>TOTAL SITE</b>", ParagraphStyle("R", fontName="Helvetica-Bold", fontSize=6.5, leading=7.5, alignment=2)),
+        "", "", "", "",
+        Paragraph(f"<b>{site_allocated_count} Site Allocated</b>", ParagraphStyle("L", fontName="Helvetica-Bold", fontSize=6.5, leading=7.5)),
+        ""
+    ])
+
+    # Proporsi lebar kolom yang baru (Total = 385)
+    # No(15) | Code(45) | Name(115) | Qty(20) | UoM(28) | Site(100) | Remarks(62)
+    materials_table = Table(
+        mat_rows,
+        colWidths=[15, 45, 115, 20, 28, 100, 62]
+    )
+    materials_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a365d")),
+        ("GRID", (0, 0), (-1, -2), 0.5, colors.HexColor("#cbd5e0")),
+        ("SPAN", (0, -1), (4, -1)),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#edf2f7")),
+        ("BOX", (0, -1), (-1, -1), 0.5, colors.HexColor("#1a365d")),
+        # Padding di-press seminimal mungkin agar isi compact & tinggi baris mengecil
+        ("TOPPADDING", (0, 0), (-1, -1), 1),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"), # Top align agar teks panjang turunnya rapi
+    ]))
+    elements.append(materials_table)
+    elements.append(Spacer(1, 8))
+
+    # --------------------------------------------------------------------------
+    # SIGNATURE
+    # --------------------------------------------------------------------------
+    sign_title = ParagraphStyle("SIGN", fontName="Helvetica-Bold", fontSize=6.5, alignment=1)
+    sign_data = [
+        [
+            Paragraph("Prepared By,", sign_title),
+            Paragraph("Approved By,", sign_title),
+            Paragraph("Received By,", sign_title)
+        ],
+        ["", "", ""],
+        [
+            "( ____________________ )",
+            "( ____________________ )",
+            "( ____________________ )"
+        ]
+    ]
+
+    sign_table = Table(sign_data, colWidths=[128, 129, 128])
+    sign_table.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 20),
+        ("TOPPADDING", (0, 0), (-1, -1), 1)
+    ]))
+    elements.append(sign_table)
+
+    doc.build(elements)
+    buffer.seek(0)
+    
+    return buffer.getvalue()
     )
 
     # --------------------------------------------------------------------------
