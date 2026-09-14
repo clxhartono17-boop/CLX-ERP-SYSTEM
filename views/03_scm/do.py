@@ -743,8 +743,28 @@ def refresh_master_data():
 # ==============================================================================
 # COLUMN DETECTION
 # ==============================================================================
-
 def detect_query_columns(df):
+    """
+    Struktur Sheet Query yang digunakan oleh DO:
+
+        B = EPC Name
+        C = Charging Type
+        D = Project Status
+        F = Project / Location Name / Site
+
+    PENTING:
+    Filter utama DO menggunakan POSISI KOLOM agar tidak bergantung
+    pada nama header Google Sheet.
+
+    Mapping:
+        B -> index 1
+        C -> index 2
+        D -> index 3
+        F -> index 5
+
+    Jika header tersedia, nama header tetap dikembalikan sebagai
+    informasi kolom DataFrame.
+    """
 
     if df is None or df.empty:
 
@@ -757,64 +777,46 @@ def detect_query_columns(df):
 
     columns = list(df.columns)
 
-    def find_column(candidates):
+    # --------------------------------------------------------------------------
+    # Query column position
+    #
+    # Google Sheet:
+    #
+    # A = index 0
+    # B = index 1 -> EPC Name
+    # C = index 2 -> Charging Type
+    # D = index 3 -> Project Status
+    # E = index 4
+    # F = index 5 -> Project / Location Name
+    # --------------------------------------------------------------------------
 
-        for candidate in candidates:
+    def get_column_by_position(position):
 
-            if candidate in columns:
+        if len(columns) > position:
 
-                return candidate
-
-        lower_map = {
-            str(c).strip().lower(): c
-            for c in columns
-        }
-
-        for candidate in candidates:
-
-            key = (
-                str(candidate)
-                .strip()
-                .lower()
-            )
-
-            if key in lower_map:
-
-                return lower_map[key]
+            return columns[position]
 
         return None
 
     return {
 
-        "epc": find_column([
-            "EPC Name",
-            "EPC",
-            "epc",
-            "EPC name"
-        ]),
+        # B = EPC Name
+        "epc":
+            get_column_by_position(1),
 
-        "charging": find_column([
-            "Charging Type",
-            "charging",
-            "Charging"
-        ]),
+        # C = Charging Type
+        "charging":
+            get_column_by_position(2),
 
-        "status": find_column([
-            "Project Status",
-            "status",
-            "Status"
-        ]),
+        # D = Project Status
+        "status":
+            get_column_by_position(3),
 
-        "site": find_column([
-            "Project / Location Name",
-            "Site Name",
-            "Site",
-            "Location",
-            "site"
-        ])
+        # F = Project / Location Name
+        "site":
+            get_column_by_position(5)
 
     }
-
 
 # ==============================================================================
 # EPC LIST
@@ -917,11 +919,28 @@ def get_used_sites():
 # ==============================================================================
 # FILTER SITE
 # ==============================================================================
-
 def load_filtered_sites(
     epc,
     charging_type
 ):
+    """
+    Mengambil Site dari Sheet Query berdasarkan:
+
+        B = EPC Name
+        C = Charging Type
+        D = Project Status
+            -> selain DROP
+            -> selain CANCEL
+        F = Project / Location Name / Site
+
+    Filter dilakukan secara:
+        - case-insensitive
+        - trim whitespace
+        - status DROP/CANCEL dikeluarkan
+
+    Site yang sudah pernah digunakan pada DB Material Out
+    tetap dikeluarkan sesuai logic lama.
+    """
 
     df_query = fetch_raw_query_data_cached()
 
@@ -938,6 +957,10 @@ def load_filtered_sites(
     col_status = columns["status"]
     col_site = columns["site"]
 
+    # --------------------------------------------------------------------------
+    # VALIDASI STRUKTUR QUERY
+    # --------------------------------------------------------------------------
+
     if not all([
         col_epc,
         col_charging,
@@ -946,12 +969,22 @@ def load_filtered_sites(
     ]):
 
         st.warning(
-            "⚠️ Struktur kolom Sheet Query tidak sesuai. "
-            "Pastikan terdapat EPC Name, Charging Type, "
-            "Project Status, dan Project / Location Name."
+            """
+            ⚠️ Struktur kolom Sheet Query tidak sesuai.
+
+            Sistem DO mengharapkan:
+            - Kolom B = EPC Name
+            - Kolom C = Charging Type
+            - Kolom D = Project Status
+            - Kolom F = Project / Location Name
+            """
         )
 
         return []
+
+    # --------------------------------------------------------------------------
+    # CLEAN TARGET VALUE
+    # --------------------------------------------------------------------------
 
     target_epc = (
         str(epc).strip().lower()
@@ -965,13 +998,27 @@ def load_filtered_sites(
         else ""
     )
 
+    # --------------------------------------------------------------------------
+    # SITE YANG SUDAH PERNAH DIGUNAKAN
+    #
+    # LOGIC LAMA TETAP DIPERTAHANKAN
+    # --------------------------------------------------------------------------
+
     used_sites = set(
-        x.strip()
+        str(x).strip()
         for x in get_used_sites()
         if str(x).strip()
     )
 
+    # --------------------------------------------------------------------------
+    # COPY DATA
+    # --------------------------------------------------------------------------
+
     working_df = df_query.copy()
+
+    # --------------------------------------------------------------------------
+    # CLEAN KOLOM B - EPC NAME
+    # --------------------------------------------------------------------------
 
     working_df["_epc_clean"] = (
         working_df[col_epc]
@@ -981,6 +1028,10 @@ def load_filtered_sites(
         .str.lower()
     )
 
+    # --------------------------------------------------------------------------
+    # CLEAN KOLOM C - CHARGING TYPE
+    # --------------------------------------------------------------------------
+
     working_df["_charging_clean"] = (
         working_df[col_charging]
         .fillna("")
@@ -988,6 +1039,10 @@ def load_filtered_sites(
         .str.strip()
         .str.lower()
     )
+
+    # --------------------------------------------------------------------------
+    # CLEAN KOLOM D - PROJECT STATUS
+    # --------------------------------------------------------------------------
 
     working_df["_status_clean"] = (
         working_df[col_status]
@@ -997,6 +1052,10 @@ def load_filtered_sites(
         .str.lower()
     )
 
+    # --------------------------------------------------------------------------
+    # CLEAN KOLOM F - SITE
+    # --------------------------------------------------------------------------
+
     working_df["_site_clean"] = (
         working_df[col_site]
         .fillna("")
@@ -1004,8 +1063,21 @@ def load_filtered_sites(
         .str.strip()
     )
 
+    # --------------------------------------------------------------------------
+    # FILTER
+    #
+    # B = EPC
+    # C = Charging Type
+    # D != DROP
+    # D != CANCEL
+    # F != kosong
+    # --------------------------------------------------------------------------
+
     mask = (
 
+        # --------------------------------------------------------------
+        # B = EPC Name
+        # --------------------------------------------------------------
         (
             working_df["_epc_clean"]
             ==
@@ -1014,6 +1086,9 @@ def load_filtered_sites(
 
         &
 
+        # --------------------------------------------------------------
+        # C = Charging Type
+        # --------------------------------------------------------------
         (
             working_df["_charging_clean"]
             ==
@@ -1022,10 +1097,23 @@ def load_filtered_sites(
 
         &
 
+        # --------------------------------------------------------------
+        # D = Project Status
+        #
+        # DROP dan CANCEL tidak boleh masuk.
+        #
+        # Menggunakan contains agar:
+        # "DROP"
+        # "DROP PROJECT"
+        # "CANCEL"
+        # "CANCELLED"
+        #
+        # semuanya tetap dikeluarkan.
+        # --------------------------------------------------------------
         (
             ~working_df["_status_clean"]
             .str.contains(
-                "drop|cancel",
+                r"drop|cancel",
                 regex=True,
                 na=False
             )
@@ -1033,6 +1121,9 @@ def load_filtered_sites(
 
         &
 
+        # --------------------------------------------------------------
+        # F = Site
+        # --------------------------------------------------------------
         (
             working_df["_site_clean"]
             != ""
@@ -1044,20 +1135,42 @@ def load_filtered_sites(
         mask
     ]
 
+    # --------------------------------------------------------------------------
+    # BUILD SITE LIST
+    #
+    # Tetap mempertahankan logic lama:
+    # Site yang sudah ada di DB Material Out tidak ditampilkan.
+    # --------------------------------------------------------------------------
+
     sites = []
 
     for site in filtered[
         "_site_clean"
     ].tolist():
 
-        if site not in used_sites:
+        site = str(site).strip()
 
-            if site not in sites:
+        if not site:
 
-                sites.append(site)
+            continue
+
+        # --------------------------------------------------------------
+        # Jangan tampilkan site yang sudah digunakan.
+        # --------------------------------------------------------------
+
+        if site in used_sites:
+
+            continue
+
+        # --------------------------------------------------------------
+        # Hilangkan duplicate site.
+        # --------------------------------------------------------------
+
+        if site not in sites:
+
+            sites.append(site)
 
     return sites
-
 
 # ==============================================================================
 # AVAILABLE RELOCATION SITE
