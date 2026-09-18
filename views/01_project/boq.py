@@ -6,1991 +6,895 @@ import sys
 
 import pandas as pd
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, A5, portrait
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, Image
 import streamlit as st
 
 
 # ==============================================================================
-# SAFE IMPORT FOR SERVICES & ROOT DIR CONFIGURATION
+# SAFE IMPORT / ROOT CONFIGURATION
 # ==============================================================================
-
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
-
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
-
 CWD = os.getcwd()
-
 if CWD not in sys.path:
     sys.path.insert(0, CWD)
 
 try:
     from services.gsheet import get_google_sheet_connection
 except ModuleNotFoundError:
-
     def get_google_sheet_connection():
         return None
 
 
 # ==============================================================================
-# TEMPLATE CONFIGURATION
+# TEMPLATE CONSTANTS
 # ==============================================================================
-
 OLD_TEMPLATE_FILENAME = "Template BOQ Vgreen.xlsx"
-
 NEW_TEMPLATE_FILENAME = "New Template BOQ Sept 2026 All Charger.xlsx"
-
 TEMPLATE_OPTIONS = {
     "Template BOQ Vgreen Lama": OLD_TEMPLATE_FILENAME,
     "New Template BOQ Sept 2026": NEW_TEMPLATE_FILENAME,
 }
-
 TEMPLATE_DB_VALUES = {
     "Template BOQ Vgreen Lama": "BOQ LAMA",
     "New Template BOQ Sept 2026": "BOQ BARU",
 }
+DB_TEMPLATE_VALUES = ["BOQ LAMA", "BOQ BARU"]
 
-DB_TEMPLATE_VALUES = [
-    "BOQ LAMA",
-    "BOQ BARU",
+DB_BOQ_SHEET = "DB BOQ"
+DB_BOQ_MS_SHEET = "DB BOQ MS"
+QUERY_SHEET = "Query"
+SUM_PROJECT_SHEET = "Sum Project"
+
+BOQ_MS_HEADERS = [
+    "No", "Date", "No. BOQ", "SN Machine", "Site Name",
+    "Charging Type", "Item Name", "Price", "Periode"
 ]
+BOQ_MS_HELPER_HEADERS = ["Qty", "Template", "Region", "Issue Note", "Photo Evident 1", "Photo Evident 2"]
 
 
 # ==============================================================================
-# HELPER FUNCTIONS
+# GENERIC HELPERS
 # ==============================================================================
-
 def parse_price(val):
-    """
-    Mengubah berbagai format nominal menjadi float.
-
-    Contoh:
-        Rp. 1.000.000 -> 1000000
-        1,000,000     -> 1000000
-        1.000.000     -> 1000000
-        -             -> 0
-    """
-
-    if pd.isna(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return 0.0
-
-    if isinstance(val, str):
-
-        if val.strip() == "":
-            return 0.0
-
-        if val.strip().lower() in [
-            "nan",
-            "none",
-            "-",
-        ]:
-            return 0.0
-
     if isinstance(val, (int, float)):
-        try:
-            return float(val)
-        except Exception:
-            return 0.0
-
+        return float(val)
     s = str(val).strip()
-
-    s = (
-        s.replace("Rp.", "")
-        .replace("Rp", "")
-        .replace("IDR", "")
-        .replace("idr", "")
-        .strip()
-    )
-
-    if s in ["", "-", "nan", "None"]:
+    if not s:
         return 0.0
-
-    # Indonesia:
-    # 1.234.567,89
+    s = s.replace("Rp", "").replace("rp", "").replace(" ", "")
     if "," in s and "." in s:
-
+        # Indonesian convention: 1.234.567,89
         if s.rfind(",") > s.rfind("."):
-            s = (
-                s.replace(".", "")
-                .replace(",", ".")
-            )
+            s = s.replace(".", "").replace(",", ".")
         else:
             s = s.replace(",", "")
-
     elif "," in s:
-
-        parts = s.split(",")
-
-        if len(parts) == 2 and len(parts[1]) <= 2:
-            s = s.replace(",", ".")
+        tail = s.rsplit(",", 1)[-1]
+        if len(tail) <= 2:
+            s = s.replace(".", "").replace(",", ".")
         else:
             s = s.replace(",", "")
-
-    elif "." in s:
-
-        # Nominal seperti:
-        # 1.000.000
-        s = s.replace(".", "")
-
+    else:
+        # A single dot followed by 1-2 digits is usually decimal; otherwise
+        # treat dots as thousands separators.
+        if s.count(".") > 1 or (s.count(".") == 1 and len(s.rsplit(".", 1)[-1]) == 3):
+            s = s.replace(".", "")
     try:
         return float(s)
-
     except Exception:
-        return 0.0
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+        return float(m.group()) if m else 0.0
 
 
 def parse_qty_num(val):
-    """
-    Parse Qty / Volume menjadi numeric.
-    """
-
-    if pd.isna(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return 0.0
-
     if isinstance(val, (int, float)):
-        try:
-            return float(val)
-        except Exception:
-            return 0.0
-
-    s = str(val).strip()
-
-    if s.lower() in [
-        "",
-        "-",
-        "nan",
-        "none",
-    ]:
+        return float(val)
+    s = str(val).strip().replace(" ", "")
+    if not s:
         return 0.0
-
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
     try:
-
-        if "," in s and "." in s:
-
-            if s.rfind(",") > s.rfind("."):
-
-                return float(
-                    s.replace(".", "")
-                    .replace(",", ".")
-                )
-
-            return float(
-                s.replace(",", "")
-            )
-
-        if "," in s:
-
-            parts = s.split(",")
-
-            if (
-                len(parts) == 2
-                and len(parts[1]) <= 3
-            ):
-
-                return float(
-                    s.replace(",", ".")
-                )
-
-            return float(
-                s.replace(",", "")
-            )
-
         return float(s)
-
     except Exception:
-
-        match = re.search(
-            r"^-?[\d.,]+",
-            s,
-        )
-
-        if match:
-
-            raw = match.group(0)
-
-            try:
-
-                if "," in raw and "." not in raw:
-                    return float(
-                        raw.replace(",", ".")
-                    )
-
-                if "." in raw and "," not in raw:
-
-                    # Jika ada lebih dari satu titik,
-                    # anggap thousands separator.
-                    if raw.count(".") > 1:
-                        return float(
-                            raw.replace(".", "")
-                        )
-
-                    # Satu titik bisa decimal.
-                    return float(raw)
-
-            except Exception:
-                pass
-
-    return 0.0
+        return 0.0
 
 
 def format_currency(value):
-    """
-    Format nominal untuk tampilan Streamlit/PDF.
-    """
+    try:
+        return f"Rp. {float(value):,.0f}".replace(",", ".")
+    except Exception:
+        return "Rp. 0"
 
-    value = parse_price(value)
 
-    return (
-        f"Rp. {value:,.0f}"
-        .replace(",", ".")
-    )
+def clean_text(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    return str(value).strip()
 
 
 def map_to_standard_province(raw_province):
+    """Map Query-sheet province values to the exact template region.
 
-    if not raw_province or pd.isna(raw_province):
+    This function is intentionally strict about the island groups used by the
+    BOQ templates.  The Create BOQ screen must derive the template region from
+    the selected site's Province in Query, not from a manually guessed value.
+    """
+    s = clean_text(raw_province).upper()
+    s = re.sub(r"\s+", " ", s).strip()
+
+    if not s or s in {"-", "N/A", "NA", "NONE", "NULL", "UNKNOWN"}:
         return "JAVA"
 
-    p = str(raw_province).strip().upper()
-
-    java_keywords = [
-        "JAVA",
-        "JAWA",
-        "BANTEN",
-        "DKI",
+    # JAVA
+    java_terms = {
+        "JAVA", "JAWA", "JABAR", "JATENG", "JATIM", "DIY", "DKI",
+        "JAWA BARAT", "JAWA TENGAH", "JAWA TIMUR",
+        "DAERAH KHUSUS IBUKOTA JAKARTA", "DKI JAKARTA",
+        "DAERAH ISTIMEWA YOGYAKARTA", "DI YOGYAKARTA", "YOGYAKARTA",
+        "BANTEN", "WEST JAVA", "CENTRAL JAVA", "EAST JAVA",
         "JAKARTA",
-        "JABODETABEK",
-        "YOGYAKARTA",
-        "DIY",
-        "WEST JAVA",
-        "EAST JAVA",
-        "CENTRAL JAVA",
-    ]
-
-    sumatera_keywords = [
-        "SUMATERA",
-        "SUMATRA",
-        "ACEH",
-        "MEDAN",
-        "RIU",
-        "RIAU",
-        "JAMBI",
-        "LAMPUNG",
-        "BENGKULU",
-        "PALEMBANG",
-        "PADANG",
-        "BABEL",
-        "BANGKA",
-    ]
-
-    kalimantan_keywords = [
-        "KALIMANTAN",
-        "BORNEO",
-        "PONTIANAK",
-        "BANJARMASIN",
-        "BALIKPAPAN",
-        "SAMARINDA",
-    ]
-
-    sulawesi_keywords = [
-        "SULAWESI",
-        "CELEBES",
-        "MAKASSAR",
-        "MANADO",
-        "PALU",
-        "GORONTALO",
-        "MAMUJU",
-        "POLEWALI",
-    ]
-
-    bali_nusa_keywords = [
-        "BALI",
-        "NUSA",
-        "NTB",
-        "NTT",
-        "LOMBOK",
-        "DENPASAR",
-        "SUMBAWA",
-        "FLORES",
-    ]
-
-    if any(k in p for k in java_keywords):
+    }
+    if s in java_terms or any(term in s for term in [
+        "JAWA BARAT", "JAWA TENGAH", "JAWA TIMUR", "WEST JAVA",
+        "CENTRAL JAVA", "EAST JAVA", "YOGYAKARTA", "JAKARTA", "BANTEN",
+    ]):
         return "JAVA"
 
-    elif any(k in p for k in sumatera_keywords):
+    # SUMATERA
+    sumatera_terms = [
+        "SUMATERA", "SUMATRA", "ACEH", "NANGGROE ACEH", "RIAU",
+        "RIAU ISLAND", "KEPULAUAN RIAU", "JAMBI", "BENGKULU", "LAMPUNG",
+        "SUMATERA BARAT", "SUMATERA UTARA", "SUMATERA SELATAN",
+        "BANGKA", "BELITUNG", "KEPULAUAN BANGKA BELITUNG",
+        "WEST SUMATRA", "NORTH SUMATRA", "SOUTH SUMATRA",
+    ]
+    if any(term in s for term in sumatera_terms):
         return "SUMATERA"
 
-    elif any(k in p for k in kalimantan_keywords):
-        return "KALIMANTAN"
-
-    elif any(k in p for k in sulawesi_keywords):
-        return "SULAWESI"
-
-    elif any(k in p for k in bali_nusa_keywords):
+    # BALI / NUSA TENGGARA
+    bali_terms = [
+        "BALI", "NUSA TENGGARA", "NTB", "NTT",
+        "NUSA TENGGARA BARAT", "NUSA TENGGARA TIMUR",
+        "WEST NUSA TENGGARA", "EAST NUSA TENGGARA",
+    ]
+    if any(term in s for term in bali_terms):
         return "BALI NUSATENGGARA"
 
-    return "JAVA"
+    # KALIMANTAN
+    if any(term in s for term in [
+        "KALIMANTAN", "BORNEO", "WEST KALIMANTAN", "CENTRAL KALIMANTAN",
+        "SOUTH KALIMANTAN", "EAST KALIMANTAN", "NORTH KALIMANTAN",
+    ]):
+        return "KALIMANTAN"
+
+    # SULAWESI
+    if any(term in s for term in [
+        "SULAWESI", "CELEBES", "GORONTALO", "NORTH SULAWESI",
+        "CENTRAL SULAWESI", "SOUTH SULAWESI", "SOUTHEAST SULAWESI",
+        "WEST SULAWESI",
+    ]):
+        return "SULAWESI"
+
+    # The old code incorrectly classified Papua/Maluku as Sulawesi.  There is
+    # no dedicated Papua/Maluku template in the current workbook, so keep them
+    # outside Java and let the template selector use the NON JAVA sheet.
+    if any(term in s for term in ["PAPUA", "MALUKU", "MALUKU UTARA", "WEST PAPUA"]):
+        return "NON JAVA"
+
+    # Unknown values must NOT silently become a Java province.  They are treated
+    # as non-Java so a DC20/DC30/DC60 BOQ cannot accidentally use the Java sheet.
+    return "NON JAVA"
+
+
+def normalize_charger_type(charging_type):
+    s = clean_text(charging_type).upper().replace(" ", "")
+    aliases = {
+        "20KW": "DC20", "DC20KW": "DC20", "DC20": "DC20",
+        "30KW": "DC30", "DC30KW": "DC30", "DC30": "DC30",
+        "60KW": "DC60", "DC60KW": "DC60", "DC60": "DC60",
+        "6S1P": "6S1P", "BSS6S1P": "6S1P",
+        "12S1P": "12S1P", "BSS12S1P": "12S1P",
+        "12S3P": "12S3P", "BSS12S3P": "12S3P",
+        "7KW": "7KW", "AC7": "7KW", "22KW": "22KW", "AC22": "22KW",
+        "DC120": "DC120", "120KW": "DC120",
+    }
+    return aliases.get(s, clean_text(charging_type).strip())
 
 
 def generate_boq_number(sequence_num=1):
-
     now = datetime.datetime.now()
-
-    roman_months = [
-        "I",
-        "II",
-        "III",
-        "IV",
-        "V",
-        "VI",
-        "VII",
-        "VIII",
-        "IX",
-        "X",
-        "XI",
-        "XII",
-    ]
-
-    month_roman = roman_months[now.month - 1]
-
-    return (
-        f"{sequence_num:04d}/CLX/BOQ/"
-        f"{month_roman}/{now.year}"
-    )
+    roman = {1:"I",2:"II",3:"III",4:"IV",5:"V",6:"VI",7:"VII",8:"VIII",9:"IX",10:"X",11:"XI",12:"XII"}[now.month]
+    return f"{int(sequence_num):04d}/CLX/BOQ/{roman}/{now.year}"
 
 
-# ==============================================================================
-# TEMPLATE PATH FINDER
-# ==============================================================================
+def generate_boq_ms_number(sequence_num=1, date_obj=None):
+    now = date_obj or datetime.datetime.now()
+    roman = {1:"I",2:"II",3:"III",4:"IV",5:"V",6:"VI",7:"VII",8:"VIII",9:"IX",10:"X",11:"XI",12:"XII"}[now.month]
+    return f"{int(sequence_num):04d}/CLX/BOQ/MS/{roman}/{now.year}"
+
 
 def get_template_path(filename):
-
-    possible_paths = [
-        os.path.join(
-            ROOT_DIR,
-            "assets",
-            "templates",
-            filename,
-        ),
-        os.path.join(
-            CWD,
-            "assets",
-            "templates",
-            filename,
-        ),
-        os.path.join(
-            os.path.dirname(CURRENT_DIR),
-            "assets",
-            "templates",
-            filename,
-        ),
-        os.path.join(
-            CURRENT_DIR,
-            "assets",
-            "templates",
-            filename,
-        ),
+    candidates = [
+        os.path.join(CURRENT_DIR, "assets", "templates", filename),
+        os.path.join(ROOT_DIR, "assets", "templates", filename),
+        os.path.join(CWD, "assets", "templates", filename),
+        os.path.join(CWD, "assets", "templates", "boq", filename),
     ]
-
-    for path in possible_paths:
-
+    for path in candidates:
         if os.path.exists(path):
             return path
+    return candidates[0]
 
-    template_dirs = [
-        os.path.join(
-            ROOT_DIR,
-            "assets",
-            "templates",
-        ),
-        os.path.join(
-            CWD,
-            "assets",
-            "templates",
-        ),
-        os.path.join(
-            os.path.dirname(CURRENT_DIR),
-            "assets",
-            "templates",
-        ),
-        os.path.join(
-            CURRENT_DIR,
-            "assets",
-            "templates",
-        ),
+
+def get_logo_path():
+    candidates = [
+        os.path.join(CURRENT_DIR, "assets", "templates", "CLX.png"),
+        os.path.join(ROOT_DIR, "assets", "templates", "CLX.png"),
+        os.path.join(CWD, "assets", "templates", "CLX.png"),
     ]
-
-    target_lower = filename.strip().lower()
-
-    for directory in template_dirs:
-
-        if not os.path.isdir(directory):
-            continue
-
-        try:
-
-            for file_name in os.listdir(directory):
-
-                if (
-                    file_name.strip().lower()
-                    == target_lower
-                ):
-
-                    return os.path.join(
-                        directory,
-                        file_name,
-                    )
-
-        except Exception:
-            continue
-
+    for path in candidates:
+        if os.path.exists(path):
+            return path
     return None
-
-
-# ==============================================================================
-# TEMPLATE / CHARGER NORMALIZATION
-# ==============================================================================
-
-def normalize_charger_type(charging_type):
-
-    raw = (
-        str(charging_type or "")
-        .strip()
-        .upper()
-    )
-
-    charger_map = {
-
-        "20 KW": "DC20",
-        "20KW": "DC20",
-        "DC20": "DC20",
-
-        "30 KW": "DC30",
-        "30KW": "DC30",
-        "DC30": "DC30",
-
-        "60 KW": "DC60",
-        "60KW": "DC60",
-        "DC60": "DC60",
-
-        "120 KW": "DC120",
-        "120KW": "DC120",
-        "DC120": "DC120",
-
-        "6S1P": "6S1P",
-        "12S1P": "12S1P",
-        "12S3P": "12S3P",
-
-        "7KW": "7KW",
-        "7 KW": "7KW",
-
-        "22KW": "22KW",
-        "22 KW": "22KW",
-    }
-
-    return charger_map.get(
-        raw,
-        raw,
-    )
-
-
-def get_new_template_sheet_name(
-    charging_type,
-    province_str,
-):
-
-    charger_key = normalize_charger_type(
-        charging_type
-    )
-
-    region = map_to_standard_province(
-        province_str
-    )
-
-    # BSS
-    if charger_key in [
-        "6S1P",
-        "12S1P",
-        "12S3P",
-    ]:
-        return charger_key
-
-    # EVCS
-    if charger_key in [
-        "DC20",
-        "DC30",
-        "DC60",
-    ]:
-
-        if region == "JAVA":
-            return charger_key
-
-        return f"{charger_key} (NON JAVA)"
-
-    return charger_key
 
 
 def template_db_value(template_name):
-
-    return TEMPLATE_DB_VALUES.get(
-        template_name,
-        "BOQ LAMA",
-    )
+    return TEMPLATE_DB_VALUES.get(template_name, template_name)
 
 
 def template_name_from_db_value(value):
-
-    value = str(
-        value or ""
-    ).strip().upper()
-
-    if value == "BOQ BARU":
-        return "New Template BOQ Sept 2026"
-
-    return "Template BOQ Vgreen Lama"
+    v = clean_text(value).upper()
+    return "Template BOQ Vgreen Lama" if v == "BOQ LAMA" else "New Template BOQ Sept 2026"
 
 
-# ==============================================================================
-# TEMPLATE HEADER DETECTION
-# ==============================================================================
-
-def detect_template_header(
-    df_raw,
-    max_rows=30,
-):
-
-    max_check = min(
-        len(df_raw),
-        max_rows,
-    )
-
-    best_idx = None
-    best_score = -1
-
-    for idx in range(max_check):
-
-        values = [
-            str(v)
-            .strip()
-            .upper()
-            for v in df_raw.iloc[idx].tolist()
-        ]
-
-        score = 0
-
-        if "NO" in values:
-            score += 5
-
-        if any(
-            "ITEM" in v
-            for v in values
-        ):
-            score += 5
-
-        if any(
-            "VOLUME" in v
-            or "QTY" in v
-            or "QUANTITY" in v
-            for v in values
-        ):
-            score += 3
-
-        if any(
-            "UNIT PRICE" in v
-            for v in values
-        ):
-            score += 3
-
-        if any(
-            "TOTAL PRICE" in v
-            for v in values
-        ):
-            score += 3
-
-        if score > best_score:
-
-            best_score = score
-            best_idx = idx
-
-    return best_idx
+def get_new_template_sheet_name(charging_type, province_str):
+    c = normalize_charger_type(charging_type)
+    region = map_to_standard_province(province_str)
+    if c in {"6S1P", "12S1P", "12S3P"}:
+        return c
+    if c in {"DC20", "DC30", "DC60"}:
+        return c if region == "JAVA" else f"{c} (NON JAVA)"
+    return c
 
 
-def find_column_by_keywords(
-    header_values,
-    keywords,
-    exclude_indices=None,
-):
+def detect_template_header(raw, keywords=("NO", "ITEM")):
+    for i in range(min(30, len(raw))):
+        row = [clean_text(x).upper() for x in raw.iloc[i].tolist()]
+        if all(any(k in cell for cell in row) for k in keywords):
+            return i
+    return 0
 
-    exclude_indices = (
-        exclude_indices
-        or set()
-    )
 
-    for idx, value in enumerate(
-        header_values
-    ):
-
-        if idx in exclude_indices:
-            continue
-
-        text = (
-            str(value)
-            .strip()
-            .upper()
-        )
-
-        for keyword in keywords:
-
-            if keyword in text:
-                return idx
-
+def find_column_by_keywords(columns, keywords):
+    for c in columns:
+        s = clean_text(c).upper()
+        if any(k in s for k in keywords):
+            return c
     return None
 
 
-def build_new_template_column_mapping(
-    df_raw,
-    header_row_idx,
-):
+def build_new_template_column_mapping(columns):
+    cols = list(columns)
+    mapping = {}
+    mapping["NO"] = find_column_by_keywords(cols, ["NO"])
+    mapping["ITEM"] = find_column_by_keywords(cols, ["ITEM", "DESCRIPTION", "MATERIAL"])
 
-    header_values = [
-        str(v)
-        .strip()
-        .upper()
-        for v in df_raw.iloc[
-            header_row_idx
-        ].tolist()
-    ]
-
-    used = set()
-
-    no_idx = find_column_by_keywords(
-        header_values,
-        ["NO"],
-        used,
+    # IMPORTANT:
+    # Jangan gunakan keyword generik "UNIT" untuk mencari Satuan/Uom.
+    # Pada template baru terdapat kolom "Unit/Volume" dan "Satuan/Uom".
+    # Jika "UNIT" ikut dicari untuk SATUAN, fungsi lama dapat menemukan
+    # "Unit/Volume" lebih dulu sehingga nilai Qty/Volume masuk ke kolom
+    # Satuan dan kolom Qty/Volume menjadi kosong.
+    mapping["UNIT_VOLUME"] = find_column_by_keywords(
+        cols, ["UNIT/VOL", "UNIT VOL", "QTY/VOL", "QTY", "VOLUME"]
+    )
+    mapping["SATUAN"] = find_column_by_keywords(
+        cols, ["SATUAN/UOM", "SATUAN", "UOM"]
     )
 
-    if no_idx is not None:
-        used.add(no_idx)
+    # Pada template BOQ baru September 2026, kolom satuan ditulis sebagai
+    # "Lot" (contoh: Pcs, Unit, Mtr, m3, md, Lot).  Jangan mencari keyword
+    # generik "UNIT" karena itu bisa menangkap kolom "Unit/Volume".
+    if mapping["SATUAN"] is None:
+        for c in cols:
+            if clean_text(c).upper() in {"LOT", "UNIT", "UOM"}:
+                mapping["SATUAN"] = c
+                break
 
-    item_idx = find_column_by_keywords(
-        header_values,
-        ["ITEM"],
-        used,
-    )
-
-    if item_idx is not None:
-        used.add(item_idx)
-
-    volume_idx = find_column_by_keywords(
-        header_values,
-        [
-            "VOLUME",
-            "QTY",
-            "QUANTITY",
-        ],
-        used,
-    )
-
-    if volume_idx is not None:
-        used.add(volume_idx)
-
-    # Cari SATUAN/UOM secara spesifik terlebih dahulu
-    satuan_idx = None
-
-    for idx, value in enumerate(
-        header_values
-    ):
-
-        if idx in used:
-            continue
-
-        text = str(value).strip().upper()
-
-        if text in [
-            "SATUAN",
-            "UOM",
-            "UNIT",
-        ]:
-
-            satuan_idx = idx
-            break
-
-    if satuan_idx is not None:
-        used.add(satuan_idx)
-
-    merk_idx = find_column_by_keywords(
-        header_values,
-        [
-            "MERK",
-            "BRAND",
-        ],
-        used,
-    )
-
-    if merk_idx is not None:
-        used.add(merk_idx)
-
-    # UNIT PRICE harus dicari sebelum TOTAL
-    unit_price_idx = None
-
-    for idx, value in enumerate(
-        header_values
-    ):
-
-        if idx in used:
-            continue
-
-        text = str(value).strip().upper()
-
-        if text == "UNIT PRICE":
-            unit_price_idx = idx
-            break
-
-    if unit_price_idx is None:
-
-        unit_price_idx = find_column_by_keywords(
-            header_values,
-            ["UNIT PRICE"],
-            used,
-        )
-
-    if unit_price_idx is not None:
-        used.add(unit_price_idx)
-
-    total_price_idx = None
-
-    for idx, value in enumerate(
-        header_values
-    ):
-
-        if idx in used:
-            continue
-
-        text = str(value).strip().upper()
-
-        if text == "TOTAL PRICE":
-            total_price_idx = idx
-            break
-
-    if total_price_idx is None:
-
-        total_price_idx = find_column_by_keywords(
-            header_values,
-            ["TOTAL PRICE"],
-            used,
-        )
-
-    # ==========================================================================
-    # FALLBACK
-    # ==========================================================================
-
-    if no_idx is None:
-        no_idx = 0
-
-    if item_idx is None:
-        item_idx = 1
-
-    if volume_idx is None:
-
-        if df_raw.shape[1] >= 8:
-            volume_idx = 3
-        else:
-            volume_idx = 2
-
-    if satuan_idx is None:
-
-        if df_raw.shape[1] >= 8:
-            satuan_idx = 4
-        else:
-            satuan_idx = 3
-
-    if merk_idx is None:
-
-        if df_raw.shape[1] >= 8:
-            merk_idx = 5
-        else:
-            merk_idx = 4
-
-    if unit_price_idx is None:
-
-        if df_raw.shape[1] >= 8:
-            unit_price_idx = 6
-        else:
-            unit_price_idx = 5
-
-    if total_price_idx is None:
-
-        if df_raw.shape[1] >= 8:
-            total_price_idx = 7
-        else:
-            total_price_idx = 6
-
-    return [
-        no_idx,
-        item_idx,
-        volume_idx,
-        satuan_idx,
-        merk_idx,
-        unit_price_idx,
-        total_price_idx,
-    ]
+    mapping["MERK"] = find_column_by_keywords(cols, ["MERK", "BRAND"])
+    mapping["UNIT_PRICE"] = find_column_by_keywords(cols, ["UNIT PRICE", "UNIT PRICE (", "PRICE"])
+    mapping["TOTAL_PRICE"] = find_column_by_keywords(cols, ["TOTAL PRICE", "TOTAL"])
+    return mapping
 
 
 # ==============================================================================
-# CACHED DATA FETCHING
+# GOOGLE SHEETS HELPERS
 # ==============================================================================
+def _get_book():
+    try:
+        return get_google_sheet_connection()
+    except Exception:
+        return None
 
-@st.cache_data(
-    ttl=120,
-    show_spinner=False,
-)
+
+def _get_ws(sheet_name):
+    book = _get_book()
+    if book is None:
+        return None
+    try:
+        return book.worksheet(sheet_name)
+    except Exception:
+        try:
+            return book.open_worksheet(sheet_name)
+        except Exception:
+            return None
+
+
+def _values_to_df(values):
+    if not values:
+        return pd.DataFrame()
+    header = list(values[0])
+    width = len(header)
+    rows = []
+    for r in values[1:]:
+        rr = list(r) + [""] * max(0, width - len(r))
+        rows.append(rr[:width])
+    return pd.DataFrame(rows, columns=header)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def read_sheet_df(sheet_name):
+    ws = _get_ws(sheet_name)
+    if ws is None:
+        return pd.DataFrame()
+    try:
+        return _values_to_df(ws.get_all_values())
+    except Exception:
+        return pd.DataFrame()
+
+
+# ==============================================================================
+# DB BOQ (EXISTING)
+# ==============================================================================
+def ensure_db_boq_headers(worksheet):
+    headers = ["No", "BOQ No.", "Site Name", "Charger Type", "BOQ Amount Exc. PPN", "BOQ Amount inc. PPN", "EPC Name", "Template"]
+    try:
+        vals = worksheet.get_all_values()
+        first = vals[0] if vals else []
+        if first[:len(headers)] != headers:
+            worksheet.update("A1:H1", [headers])
+    except Exception:
+        pass
+    return headers
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def get_all_saved_boq():
-
-    try:
-
-        sh = get_google_sheet_connection()
-
-        if not sh:
-            return []
-
-        worksheet = sh.worksheet(
-            "DB BOQ"
-        )
-
-        rows = worksheet.get_all_values()
-
-        if len(rows) <= 1:
-            return []
-
-        headers = [
-            str(h).strip()
-            for h in rows[0]
-        ]
-
-        data = []
-
-        for idx, r in enumerate(
-            rows[1:],
-            start=2,
-        ):
-
-            if any(r):
-
-                item = {
-                    "row_idx": idx
-                }
-
-                for h_idx, h in enumerate(
-                    headers
-                ):
-
-                    item[h] = (
-                        r[h_idx]
-                        if h_idx < len(r)
-                        else ""
-                    )
-
-                data.append(item)
-
-        return data
-
-    except Exception as e:
-
-        st.error(
-            f"Gagal mengambil data DB BOQ: {e}"
-        )
-
+    df = read_sheet_df(DB_BOQ_SHEET)
+    if df.empty:
         return []
+    cols = list(df.columns)
+    def col(letter, fallback):
+        idx = ord(letter) - 65
+        return cols[idx] if idx < len(cols) else fallback
+    no_c, boq_c, site_c, charger_c, dpp_c, inc_c, epc_c, temp_c = [col(chr(65+i), "") for i in range(8)]
+    out = []
+    for idx, row in df.iterrows():
+        if not any(clean_text(v) for v in row.tolist()):
+            continue
+        out.append({
+            "row_idx": idx + 2,
+            "No": clean_text(row.get(no_c, "")),
+            "BOQ No.": clean_text(row.get(boq_c, "")),
+            "Site Name": clean_text(row.get(site_c, "")),
+            "Charger Type": clean_text(row.get(charger_c, "")),
+            "BOQ Amount Exc. PPN": parse_price(row.get(dpp_c, 0)),
+            "BOQ Amount inc. PPN": parse_price(row.get(inc_c, 0)),
+            "EPC Name": clean_text(row.get(epc_c, "")),
+            "Template": clean_text(row.get(temp_c, "")),
+        })
+    return out
 
 
-@st.cache_data(
-    ttl=120,
-    show_spinner=False,
-)
+@st.cache_data(ttl=120, show_spinner=False)
 def get_existing_saved_site_charger_pairs():
-
-    saved_boqs = (
-        get_all_saved_boq()
-    )
-
-    saved_pairs = set()
-
-    for item in saved_boqs:
-
-        site_name = (
-            str(
-                item.get(
-                    "Site Name",
-                    "",
-                )
-            )
-            .strip()
-            .lower()
-        )
-
-        charger_type = (
-            str(
-                item.get(
-                    "Charger Type",
-                    "",
-                )
-            )
-            .strip()
-            .lower()
-        )
-
-        if site_name and charger_type:
-
-            saved_pairs.add(
-                (
-                    site_name,
-                    charger_type,
-                )
-            )
-
-    return saved_pairs
+    return {(x["Site Name"].strip().lower(), normalize_charger_type(x["Charger Type"])) for x in get_all_saved_boq() if x["Site Name"]}
 
 
-@st.cache_data(
-    ttl=120,
-    show_spinner=False,
-)
-def fetch_query_site_options(
-    exclude_saved=True,
-):
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_query_site_options(exclude_saved=True):
+    """Return site options and metadata from Query.
 
-    site_options = []
-    site_data_map = {}
+    The site-to-template mapping is driven by the Province belonging to the
+    selected site.  Header-name detection is preferred, with the established
+    B/C/D/F/G/I positions kept as a fallback for the existing Query layout.
+    """
+    df = read_sheet_df(QUERY_SHEET)
+    if df.empty:
+        return [], {}
 
-    existing_saved_pairs = (
-        get_existing_saved_site_charger_pairs()
-        if exclude_saved
-        else set()
-    )
+    def norm_header(value):
+        return re.sub(r"[^A-Z0-9]", "", clean_text(value).upper())
 
-    try:
+    def find_header(*names):
+        wanted = {norm_header(x) for x in names}
+        for col in df.columns:
+            if norm_header(col) in wanted:
+                return col
+        return None
 
-        sh = get_google_sheet_connection()
+    # Prefer explicit headers if the Query sheet exposes them.
+    epc_c = find_header("EPC", "EPC Name", "EPC NAME")
+    charger_c = find_header("Charger", "Charging Type", "Charger Type", "CHARGER")
+    status_c = find_header("Status")
+    site_c = find_header("Site", "Site Name", "SiteName")
+    addr_c = find_header("Address", "Site Address", "Location")
+    province_c = find_header("Province", "Provinsi", "Province Standar", "Standard Province")
 
-        if sh:
+    # Existing Query layout: B EPC, C Charger, D Status, F Site, G Address, I Province.
+    def at(pos):
+        return df.columns[pos] if pos < len(df.columns) else None
 
-            worksheet = sh.worksheet(
-                "Query"
-            )
+    epc_c = epc_c or at(1)
+    charger_c = charger_c or at(2)
+    status_c = status_c or at(3)
+    site_c = site_c or at(5)
+    addr_c = addr_c or at(6)
+    province_c = province_c or at(8)
 
-            data_query = (
-                worksheet.get_all_values()
-            )
+    if site_c is None:
+        return [], {}
 
-            if len(data_query) > 1:
+    saved = get_existing_saved_site_charger_pairs() if exclude_saved else set()
+    options, data = [], {}
 
-                for row in data_query[1:]:
+    for _, r in df.iterrows():
+        site = clean_text(r.get(site_c, ""))
+        charger = normalize_charger_type(r.get(charger_c, ""))
+        status = clean_text(r.get(status_c, "")).upper() if status_c else ""
+        raw_province = clean_text(r.get(province_c, "")) if province_c else ""
 
-                    if len(row) <= 5:
-                        continue
+        if not site or status in {"DROP", "CANCEL"}:
+            continue
 
-                    epc_val = (
-                        str(row[1]).strip()
-                        if len(row) > 1
-                        else "-"
-                    )
+        key = (site.lower(), charger)
+        if exclude_saved and key in saved:
+            continue
 
-                    charger_val = (
-                        str(row[2]).strip()
-                        if len(row) > 2
-                        else "DC20"
-                    )
-
-                    status_val = (
-                        str(row[3]).strip()
-                        if len(row) > 3
-                        else ""
-                    )
-
-                    site_val = (
-                        str(row[5]).strip()
-                        if len(row) > 5
-                        else ""
-                    )
-
-                    address_val = (
-                        str(row[6]).strip()
-                        if len(row) > 6
-                        else "-"
-                    )
-
-                    raw_prov_val = (
-                        str(row[8]).strip()
-                        if len(row) > 8
-                        else ""
-                    )
-
-                    status_upper = (
-                        status_val.upper()
-                    )
-
-                    if (
-                        "DROP"
-                        in status_upper
-                        or "CANCEL"
-                        in status_upper
-                    ):
-                        continue
-
-                    pair_key = (
-                        site_val.strip().lower(),
-                        charger_val.strip().lower(),
-                    )
-
-                    if (
-                        exclude_saved
-                        and pair_key
-                        in existing_saved_pairs
-                    ):
-                        continue
-
-                    if (
-                        site_val
-                        and site_val.lower()
-                        not in [
-                            "nan",
-                            "",
-                            "none",
-                            "project / location name",
-                        ]
-                    ):
-
-                        std_province = (
-                            map_to_standard_province(
-                                raw_prov_val
-                            )
-                        )
-
-                        display_label = (
-                            f"{site_val} "
-                            f"({charger_val})"
-                        )
-
-                        if (
-                            display_label
-                            not in site_data_map
-                        ):
-
-                            site_options.append(
-                                display_label
-                            )
-
-                        site_data_map[
-                            display_label
-                        ] = {
-                            "site_name": site_val,
-                            "epc": (
-                                epc_val
-                                if epc_val
-                                else "-"
-                            ),
-                            "address": (
-                                address_val
-                                if address_val
-                                else "-"
-                            ),
-                            "charger": (
-                                charger_val
-                                if charger_val
-                                else "DC20"
-                            ),
-                            "province": std_province,
-                            "raw_province": (
-                                raw_prov_val
-                                if raw_prov_val
-                                else "-"
-                            ),
-                            "status": status_val,
-                        }
-
-    except Exception as e:
-
-        st.sidebar.warning(
-            "⚠️ Gagal membaca sheet "
-            f"'Query': {e}"
-        )
-
-    if not site_options:
-
-        placeholder = (
-            "(Semua kombinasi Site & "
-            "Charger telah dibuatkan BOQ)"
-        )
-
-        site_options = [
-            placeholder
-        ]
-
-        site_data_map = {
-            placeholder: {
-                "site_name": "-",
-                "epc": "-",
-                "address": "-",
-                "charger": "-",
-                "province": "JAVA",
-                "raw_province": "-",
-                "status": "-",
+        display = f"{site} ({charger})"
+        if display not in data:
+            region = map_to_standard_province(raw_province)
+            data[display] = {
+                "Site Name": site,
+                "Charging Type": charger,
+                "Address": clean_text(r.get(addr_c, "")) if addr_c else "",
+                "Province": raw_province,
+                "Region": region,
+                "EPC Name": clean_text(r.get(epc_c, "")) if epc_c else "",
             }
-        }
+            options.append(display)
 
-    return (
-        site_options,
-        site_data_map,
-    )
+    return options, data
 
 
-# ==============================================================================
-# BOQ CALCULATION ENGINE
-# ==============================================================================
-
-def calculate_detail_total(
-    quantity,
-    unit_price,
+def save_to_db_boq(
+    site_name, charger_capacity, sub_total, grand_total, epc_name="-", template_name="Template BOQ Vgreen Lama"
 ):
-    """
-    Kalkulasi TOTAL PRICE detail.
+    try:
+        sh = get_google_sheet_connection()
+        if not sh:
+            return None
+        try:
+            worksheet = sh.worksheet("DB BOQ")
+        except Exception:
+            worksheet = sh.add_worksheet(title="DB BOQ", rows=1000, cols=10)
+        ensure_db_boq_headers(worksheet)
+        existing_rows = worksheet.get_all_values()
+        no_urut = len([r for r in existing_rows[1:] if any(r)]) + 1 if len(existing_rows) > 1 else 1
+        boq_no = generate_boq_number(sequence_num=no_urut)
+        new_row = [no_urut, boq_no, str(site_name), str(charger_capacity), sub_total, grand_total, str(epc_name), template_db_value(template_name)]
+        worksheet.append_row(new_row)
+        return boq_no
+    except Exception as e:
+        st.error(f"❌ Gagal menyimpan ke DB BOQ: {e}")
+        return None
 
-    TOTAL PRICE selalu:
-        Quantity / Volume x Unit Price
-    """
-
-    qty = parse_qty_num(quantity)
-    price = parse_price(unit_price)
-
-    return qty * price
-
-
-def recalculate_boq_totals(
-    df_boq,
+def update_db_boq_row(
+    row_idx, old_site_name, new_site_name, charger_capacity, sub_total, grand_total, epc_name, template_name=None
 ):
+    try:
+        sh = get_google_sheet_connection()
+        if not sh:
+            return False
+        worksheet = sh.worksheet("DB BOQ")
+        ensure_db_boq_headers(worksheet)
+        worksheet.update_cell(row_idx,3,new_site_name)
+        worksheet.update_cell(row_idx,4,charger_capacity)
+        worksheet.update_cell(row_idx,5,sub_total)
+        worksheet.update_cell(row_idx,6,grand_total)
+        worksheet.update_cell(row_idx,7,epc_name)
+        if template_name:
+            worksheet.update_cell(row_idx,8,template_db_value(template_name))
+        update_google_sheet_summary(old_site_name,new_site_name,sub_total,grand_total)
+        return True
+    except Exception as e:
+        st.error(f"❌ Gagal memperbarui DB BOQ: {e}")
+        return False
+
+def update_google_sheet_summary(old_site_name,new_site_name,sub_total,grand_total):
+    try:
+        sh=get_google_sheet_connection()
+        if not sh: return False
+        try:
+            worksheet=sh.worksheet("Sum Project")
+        except Exception:
+            return False
+        data_sum=worksheet.get_all_values()
+        for idx,row in enumerate(data_sum[1:],start=2):
+            if len(row)>2 and str(row[2]).strip().lower()==str(old_site_name).strip().lower():
+                worksheet.update_cell(idx,3,new_site_name)
+                if len(row)>=19:
+                    worksheet.update_cell(idx,18,sub_total)
+                    worksheet.update_cell(idx,19,grand_total)
+                return True
+    except Exception as e:
+        st.caption(f"ℹ️ Info: Sheet 'Sum Project' belum ter-update ({e})")
+    return False
+
+def calculate_detail_total(quantity, unit_price):
+    return parse_qty_num(quantity) * parse_price(unit_price)
+
+
+def recalculate_boq_totals(df_boq):
+    """Recalculate BOQ totals using the template's DPP total row.
+
+    IMPORTANT:
+    - The Excel template contains the BOQ amount as DPP (before VAT).
+    - Row ``I / Total`` is the authoritative DPP total when it exists.
+    - VAT is calculated afterwards: DPP * 11%.
+    - Grand Total / Total Contractor Price Inc. VAT = DPP + VAT.
+    - Section totals (A-H) are never added together with their detail rows.
     """
-    ENGINE KALKULASI BOQ FINAL.
-
-    RULE:
-
-    1. DETAIL:
-       TOTAL PRICE = Unit/Volume x UNIT PRICE
-
-    2. PARENT:
-       Jika Parent mempunyai Volume > 0
-       DAN UNIT PRICE > 0:
-           TOTAL PRICE = Volume x UNIT PRICE
-
-       Jika tidak:
-           TOTAL PRICE = SUM seluruh detail
-           sampai Parent berikutnya.
-
-    3. SUB TOTAL:
-       SUM seluruh Parent A-H yang tersedia.
-
-    4. VAT:
-       11%
-
-    5. GRAND TOTAL:
-       Sub Total + VAT
-    """
-
-    if (
-        df_boq is None
-        or df_boq.empty
-    ):
-
-        return (
-            df_boq,
-            0.0,
-            0.0,
-            0.0,
-        )
+    if df_boq is None or df_boq.empty:
+        return df_boq, 0.0, 0.0, 0.0
 
     df = df_boq.copy()
+    required = ["NO", "Item", "Unit/Volume", "Satuan/Uom", "MERK", "UNIT PRICE", "TOTAL PRICE"]
+    for c in required:
+        if c not in df.columns:
+            df[c] = ""
 
-    required_columns = [
-        "NO",
-        "Item",
-        "Unit/Volume",
-        "Satuan/Uom",
-        "MERK",
-        "UNIT PRICE",
-        "TOTAL PRICE",
-    ]
+    # Preserve the TOTAL PRICE values that came from the Excel template.
+    # In particular, the template's ``I / Total`` row contains the DPP.
+    original_total_price = df["TOTAL PRICE"].copy()
 
-    for col in required_columns:
+    parent_labels = {"A", "B", "C", "D", "E", "F", "G", "H"}
+    totals = [0.0] * len(df)
+    parent_positions = []
+    dpp_total_row_positions = []
 
-        if col not in df.columns:
-            df[col] = ""
+    for pos, (_, r) in enumerate(df.iterrows()):
+        no = clean_text(r["NO"]).upper()
+        item_name = clean_text(r["Item"]).upper()
 
-    parent_headers = [
-        "A",
-        "B",
-        "C",
-        "D",
-        "E",
-        "F",
-        "G",
-        "H",
-    ]
-
-    # --------------------------------------------------------------------------
-    # NORMALISASI UNIT PRICE
-    # --------------------------------------------------------------------------
-
-    for idx in df.index:
-
-        df.loc[
-            idx,
-            "UNIT PRICE",
-        ] = parse_price(
-            df.loc[
-                idx,
-                "UNIT PRICE",
-            ]
-        )
-
-    # --------------------------------------------------------------------------
-    # PASS 1 - DETAIL
-    # --------------------------------------------------------------------------
-
-    parent_indices = []
-
-    for idx, row in df.iterrows():
-
-        no_val = (
-            str(
-                row.get(
-                    "NO",
-                    "",
-                )
-            )
-            .strip()
-            .upper()
-        )
-
-        if no_val in parent_headers:
-
-            parent_indices.append(idx)
-
+        # The template's final Total row is DPP. Never replace it with
+        # qty * unit price (which would normally be zero on this row).
+        if no == "I" or item_name in {"TOTAL", "SUB TOTAL", "SUBTOTAL"}:
+            template_total = parse_price(original_total_price.iloc[pos])
+            totals[pos] = template_total
+            if template_total != 0:
+                dpp_total_row_positions.append(pos)
             continue
 
-        qty = parse_qty_num(
-            row.get(
-                "Unit/Volume",
-                0,
-            )
-        )
-
-        unit_price = parse_price(
-            row.get(
-                "UNIT PRICE",
-                0,
-            )
-        )
-
-        detail_total = (
-            qty * unit_price
-        )
-
-        df.loc[
-            idx,
-            "TOTAL PRICE",
-        ] = detail_total
-
-    # --------------------------------------------------------------------------
-    # PASS 2 - PARENT
-    # --------------------------------------------------------------------------
-
-    for parent_position, parent_idx in enumerate(
-        parent_indices
-    ):
-
-        parent_row = df.loc[
-            parent_idx
-        ]
-
-        parent_qty = parse_qty_num(
-            parent_row.get(
-                "Unit/Volume",
-                0,
-            )
-        )
-
-        parent_unit_price = parse_price(
-            parent_row.get(
-                "UNIT PRICE",
-                0,
-            )
-        )
-
-        if (
-            parent_position
-            + 1
-            < len(parent_indices)
-        ):
-
-            next_parent_idx = (
-                parent_indices[
-                    parent_position + 1
-                ]
-            )
-
-            section_detail_indices = (
-                df.index[
-                    (
-                        df.index
-                        > parent_idx
-                    )
-                    & (
-                        df.index
-                        < next_parent_idx
-                    )
-                ]
-            )
-
+        if no in parent_labels:
+            parent_positions.append(pos)
+            totals[pos] = 0.0
         else:
-
-            section_detail_indices = (
-                df.index[
-                    df.index
-                    > parent_idx
-                ]
+            totals[pos] = calculate_detail_total(
+                r["Unit/Volume"],
+                r["UNIT PRICE"],
             )
 
-        if (
-            parent_qty != 0
-            and parent_unit_price != 0
-        ):
+    # Calculate each section total from its detail rows. A section row is
+    # already a subtotal, so it must not be added again to its detail rows.
+    for parent_idx, parent_pos in enumerate(parent_positions):
+        next_parent_pos = (
+            parent_positions[parent_idx + 1]
+            if parent_idx + 1 < len(parent_positions)
+            else len(df)
+        )
 
-            parent_total = (
-                parent_qty
-                * parent_unit_price
-            )
+        qty = parse_qty_num(df.iloc[parent_pos]["Unit/Volume"])
+        price = parse_price(df.iloc[parent_pos]["UNIT PRICE"])
 
+        if qty != 0 and price != 0:
+            section_total = qty * price
         else:
-
-            parent_total = 0.0
-
-            for detail_idx in (
-                section_detail_indices
-            ):
-
-                detail_no = (
-                    str(
-                        df.loc[
-                            detail_idx,
-                            "NO",
-                        ]
-                    )
-                    .strip()
-                    .upper()
-                )
-
-                if detail_no in parent_headers:
-                    continue
-
-                parent_total += parse_price(
-                    df.loc[
-                        detail_idx,
-                        "TOTAL PRICE",
-                    ]
-                )
-
-        df.loc[
-            parent_idx,
-            "TOTAL PRICE",
-        ] = parent_total
-
-    # --------------------------------------------------------------------------
-    # SUB TOTAL
-    # --------------------------------------------------------------------------
-
-    sub_total = 0.0
-
-    for idx in parent_indices:
-
-        sub_total += parse_price(
-            df.loc[
-                idx,
-                "TOTAL PRICE",
-            ]
-        )
-
-    # --------------------------------------------------------------------------
-    # VAT
-    # --------------------------------------------------------------------------
-
-    vat_amount = (
-        sub_total * 0.11
-    )
-
-    # --------------------------------------------------------------------------
-    # GRAND TOTAL
-    # --------------------------------------------------------------------------
-
-    grand_total = (
-        sub_total
-        + vat_amount
-    )
-
-    return (
-        df,
-        sub_total,
-        vat_amount,
-        grand_total,
-    )
-
-
-# ==============================================================================
-# BOQ LOADER
-# ==============================================================================
-
-@st.cache_data(
-    ttl=600,
-    show_spinner=False,
-)
-def load_boq_dataframe(
-    charging_type,
-    province_str,
-    template_name="Template BOQ Vgreen Lama",
-):
-
-    region_normalized = (
-        map_to_standard_province(
-            province_str
-        )
-    )
-
-    raw_charging_key = (
-        str(
-            charging_type or ""
-        )
-        .upper()
-        .strip()
-    )
-
-    normalized_charger = (
-        normalize_charger_type(
-            raw_charging_key
-        )
-    )
-
-    # ==========================================================================
-    # VALIDASI TEMPLATE
-    # ==========================================================================
-
-    if (
-        template_name
-        not in TEMPLATE_OPTIONS
-    ):
-
-        template_name = (
-            "Template BOQ Vgreen Lama"
-        )
-
-    template_filename = (
-        TEMPLATE_OPTIONS[
-            template_name
-        ]
-    )
-
-    excel_path = get_template_path(
-        template_filename
-    )
-
-    if not excel_path:
-
-        st.error(
-            "⚠️ File template Excel "
-            "tidak ditemukan!\n\n"
-            f"Template yang dipilih: "
-            f"`{template_name}`\n"
-            f"Nama file: "
-            f"`{template_filename}`"
-        )
-
-        return (
-            None,
-            normalized_charger,
-            region_normalized,
-        )
-
-    # ==========================================================================
-    # TARGET SHEET
-    # ==========================================================================
-
-    if (
-        template_name
-        == "Template BOQ Vgreen Lama"
-    ):
-
-        sheet_map = {
-
-            "20 KW": "DC20",
-            "20KW": "DC20",
-            "DC20": "DC20",
-
-            "30 KW": "DC30",
-            "30KW": "DC30",
-            "DC30": "DC30",
-
-            "60 KW": "DC60",
-            "60KW": "DC60",
-            "DC60": "DC60",
-
-            "120 KW": "DC120",
-            "120KW": "DC120",
-            "DC120": "DC120",
-
-            "6S1P": "6S1P",
-            "12S1P": "12S1P",
-            "12S3P": "12S3P",
-
-            "7KW": "7KW",
-            "7 KW": "7KW",
-
-            "22KW": "22KW",
-            "22 KW": "22KW",
-        }
-
-        target_sheet = sheet_map.get(
-            raw_charging_key,
-            normalized_charger,
-        )
-
-        region_col_indices = {
-            "JAVA": 0,
-            "SUMATERA": 8,
-            "BALI NUSATENGGARA": 16,
-            "BALI NUSA TENGGARA": 16,
-            "KALIMANTAN": 25,
-            "SULAWESI": 33,
-        }
-
-        start_idx = (
-            region_col_indices.get(
-                region_normalized,
-                0,
+            section_total = sum(
+                totals[p]
+                for p in range(parent_pos + 1, next_parent_pos)
+                if p not in dpp_total_row_positions
             )
-        )
 
+        totals[parent_pos] = section_total
+
+    df["TOTAL PRICE"] = totals
+
+    # ================================================================
+    # DPP
+    # ================================================================
+    # Prefer the explicit ``I / Total`` value from the template. This is
+    # exactly what the Excel BOQ provides and avoids double counting.
+    if dpp_total_row_positions:
+        subtotal = parse_price(
+            original_total_price.iloc[dpp_total_row_positions[-1]]
+        )
+    elif parent_positions:
+        # Fallback only when the template has no explicit I/Total row.
+        subtotal = sum(totals[p] for p in parent_positions)
     else:
+        # Final fallback for templates without section rows.
+        subtotal = 0.0
+        for pos, (_, r) in enumerate(df.iterrows()):
+            no = clean_text(r["NO"]).upper()
+            item_name = clean_text(r["Item"]).upper()
+            if no == "I" or item_name in {"TOTAL", "GRAND TOTAL", "SUB TOTAL", "SUBTOTAL"}:
+                continue
+            subtotal += totals[pos]
 
-        target_sheet = (
-            get_new_template_sheet_name(
-                normalized_charger,
-                region_normalized,
-            )
-        )
+    # ================================================================
+    # VAT / GRAND TOTAL
+    # ================================================================
+    vat = subtotal * 0.11
+    grand = subtotal + vat
 
-        start_idx = 0
+    return df, subtotal, vat, grand
 
-    # ==========================================================================
-    # READ EXCEL
-    # ==========================================================================
+
+def _old_template_offsets(region):
+    return {"JAVA":0, "SUMATERA":8, "BALI NUSATENGGARA":16, "KALIMANTAN":25, "SULAWESI":33}.get(region, 0)
+
+
+def _first_series_by_header(data, source):
+    """Return exactly one Series even when Excel contains duplicate headers."""
+    if source is None or data is None or data.empty:
+        return None
+
+    # IMPORTANT: data[source] returns a DataFrame when Excel has duplicate
+    # headers.  Select by position so assignment to one output column is safe.
+    try:
+        positions = [i for i, col in enumerate(data.columns) if col == source]
+        if positions:
+            return data.iloc[:, positions[0]]
+    except Exception:
+        pass
 
     try:
+        value = data[source]
+        if isinstance(value, pd.DataFrame):
+            return value.iloc[:, 0]
+        return value
+    except Exception:
+        return None
 
-        xls = pd.ExcelFile(
-            excel_path
-        )
 
-        sheet_found = next(
-            (
-                s
-                for s in xls.sheet_names
-                if s.strip().lower()
-                == target_sheet.strip().lower()
-            ),
-            None,
-        )
+def _standardize_template_df(raw, header_row=None):
+    if raw.empty:
+        return pd.DataFrame(columns=["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"])
 
-        if not sheet_found:
+    raw = raw.copy()
+    if header_row is None:
+        header_row = detect_template_header(raw)
 
-            st.error(
-                f"⚠️ Sheet `{target_sheet}` "
-                "tidak ditemukan di file "
-                f"`{template_filename}`."
-            )
+    headers = [clean_text(x) for x in raw.iloc[header_row].tolist()]
+    data = raw.iloc[header_row+1:].copy()
+    data.columns = headers
 
-            st.info(
-                "Sheet yang tersedia:\n\n"
-                + ", ".join(
-                    xls.sheet_names
-                )
-            )
+    # Keep blank-header columns out, but DO NOT deduplicate/rename the real
+    # headers here because the mapping below intentionally uses the original
+    # template names.
+    data = data.loc[:, [c != "" for c in data.columns]]
 
-            return (
-                None,
-                target_sheet,
-                region_normalized,
-            )
+    mapping = build_new_template_column_mapping(data.columns)
+    out = pd.DataFrame(index=data.index)
 
-        df_raw = pd.read_excel(
-            xls,
-            sheet_name=sheet_found,
-            header=None,
-        )
+    for target, source in mapping.items():
+        if source is None:
+            continue
+        series = _first_series_by_header(data, source)
+        if series is not None:
+            out[target] = series.to_numpy()
 
-        # ==========================================================================
-        # DETECT HEADER
-        # ==========================================================================
+    rename = {
+        "NO":"NO",
+        "ITEM":"Item",
+        "UNIT_VOLUME":"Unit/Volume",
+        "SATUAN":"Satuan/Uom",
+        "MERK":"MERK",
+        "UNIT_PRICE":"UNIT PRICE",
+        "TOTAL_PRICE":"TOTAL PRICE",
+    }
+    out = out.rename(columns=rename)
 
-        header_row_idx = (
-            detect_template_header(
-                df_raw
-            )
-        )
+    for c in ["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"]:
+        if c not in out.columns:
+            out[c] = ""
 
-        if header_row_idx is None:
-            header_row_idx = 5
+    out = out[["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"]]
+    return out.reset_index(drop=True)
 
-        data_start_idx = (
-            header_row_idx + 1
-        )
 
-        # ==========================================================================
-        # COLUMN MAPPING
-        # ==========================================================================
-
-        if (
-            template_name
-            == "Template BOQ Vgreen Lama"
-        ):
-
-            if (
-                start_idx + 6
-                >= df_raw.shape[1]
-            ):
-
-                start_idx = 0
-
-            col_indices = [
-                start_idx + i
-                for i in range(7)
-            ]
-
+@st.cache_data(ttl=600, show_spinner=False)
+def load_boq_dataframe(charging_type, province_str, template_name="Template BOQ Vgreen Lama"):
+    filename = TEMPLATE_OPTIONS.get(template_name, template_name)
+    path = get_template_path(filename)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Template tidak ditemukan: {path}")
+    c = normalize_charger_type(charging_type)
+    region = map_to_standard_province(province_str)
+    if template_name == "Template BOQ Vgreen Lama":
+        sheet_map = {"DC20":"DC20","DC30":"DC30","DC60":"DC60","DC120":"DC120","6S1P":"6S1P","12S1P":"12S1P","12S3P":"12S3P","7KW":"7KW","22KW":"22KW"}
+        sheet = sheet_map.get(c, c)
+        raw = pd.read_excel(path, sheet_name=sheet, header=None)
+        off = _old_template_offsets(region)
+        # Existing old template stores regional price blocks. Keep the first
+        # seven columns and shift rows according to the established region offset.
+        if off and len(raw) > off:
+            raw = raw.iloc[off:].reset_index(drop=True)
+        header_row = detect_template_header(raw)
+        # Old template commonly has a fixed 7-column structure.
+        if header_row == 0 and raw.shape[1] >= 7:
+            first = [clean_text(x).upper() for x in raw.iloc[0].tolist()]
+            if not any("ITEM" in x for x in first):
+                raw.columns = ["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"] + list(raw.columns[7:])
+                df = raw.iloc[:, :7].copy()
+                df.columns = ["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"]
+            else:
+                df = _standardize_template_df(raw, header_row)
         else:
+            df = _standardize_template_df(raw, header_row)
+    else:
+        sheet = get_new_template_sheet_name(c, province_str)
+        xl = pd.ExcelFile(path)
+        if sheet not in xl.sheet_names:
+            # Fall back to normalized charger sheet if the exact regional sheet
+            # is not present.
+            alternatives = [c, c.upper(), c.replace("DC", "")]
+            sheet = next((x for x in alternatives if x in xl.sheet_names), xl.sheet_names[0])
+        raw = pd.read_excel(path, sheet_name=sheet, header=None)
+        df = _standardize_template_df(raw)
+    # IMPORTANT: Jangan mengubah Unit/Volume template menjadi numeric secara
+    # paksa. Template dapat berisi nilai seperti "30kw dc", "Lot", atau
+    # angka biasa. Jika dipaksa parse_qty_num(), nilai non-numeric akan menjadi
+    # 0 dan BOQ yang tampil tidak lagi sama dengan template asli.
+    for col in ["NO", "Item", "Unit/Volume", "Satuan/Uom", "MERK"]:
+        df[col] = df[col].apply(clean_text)
 
-            col_indices = (
-                build_new_template_column_mapping(
-                    df_raw,
-                    header_row_idx,
-                )
-            )
-
-        if any(
-            i >= df_raw.shape[1]
-            for i in col_indices
-        ):
-
-            st.error(
-                "⚠️ Struktur kolom template "
-                f"`{sheet_found}` tidak sesuai."
-            )
-
-            return (
-                None,
-                target_sheet,
-                region_normalized,
-            )
-
-        # ==========================================================================
-        # EXTRACT
-        # ==========================================================================
-
-        df_boq = df_raw.iloc[
-            data_start_idx:,
-            col_indices,
-        ].copy()
-
-        df_boq.columns = [
-            "NO",
-            "Item",
-            "Unit/Volume",
-            "Satuan/Uom",
-            "MERK",
-            "UNIT PRICE",
-            "TOTAL PRICE",
-        ]
-
-        # ==========================================================================
-        # CLEAN ITEM
-        # ==========================================================================
-
-        df_boq["Item"] = (
-            df_boq["Item"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-        )
-
-        df_boq = df_boq[
-            (
-                df_boq["Item"]
-                != ""
-            )
-            &
-            (
-                df_boq["Item"]
-                .str.lower()
-                != "nan"
-            )
-        ].reset_index(
-            drop=True
-        )
-
-        # ==========================================================================
-        # CLEAN PRICE
-        # ==========================================================================
-
-        for c in [
-            "UNIT PRICE",
-            "TOTAL PRICE",
-        ]:
-
-            df_boq[c] = (
-                df_boq[c]
-                .apply(parse_price)
-            )
-
-        # ==========================================================================
-        # CLEAN OTHER
-        # ==========================================================================
-
-        for c in [
-            "NO",
-            "Unit/Volume",
-            "Satuan/Uom",
-            "MERK",
-        ]:
-
-            df_boq[c] = (
-                df_boq[c]
-                .fillna("-")
-                .astype(str)
-                .str.strip()
-            )
-
-            df_boq[c] = (
-                df_boq[c]
-                .replace(
-                    {
-                        "nan": "-",
-                        "NaN": "-",
-                        "None": "-",
-                    }
-                )
-            )
-
-        # ==========================================================================
-        # INITIAL AUTO CALCULATION
-        # ==========================================================================
-
-        (
-            df_boq,
-            _sub_total,
-            _vat,
-            _grand_total,
-        ) = recalculate_boq_totals(
-            df_boq
-        )
-
-        return (
-            df_boq,
-            target_sheet,
-            region_normalized,
-        )
-
-    except Exception as e:
-
-        st.error(
-            "Gagal membaca Excel Template: "
-            f"{e}"
-        )
-
-        return (
-            None,
-            target_sheet,
-            region_normalized,
-        )
+    # Unit/Volume dibiarkan mengikuti nilai asli template. Engine kalkulasi
+    # tetap menggunakan parse_qty_num() saat menghitung TOTAL PRICE.
+    df["UNIT PRICE"] = df["UNIT PRICE"].apply(parse_price)
+    df["TOTAL PRICE"] = df["TOTAL PRICE"].apply(parse_price)
+    df, _, _, _ = recalculate_boq_totals(df)
+    return df.reset_index(drop=True), sheet, region
 
 
 # ==============================================================================
-# EDITABLE SECTION DETECTION
+# EXISTING SECTION EDITOR
 # ==============================================================================
+def get_section_indices(df_boq, section_no):
+    """
+    Ambil seluruh baris dalam satu Point/section, bukan hanya header Point.
 
-def get_section_indices(
-    df_boq,
-    section_no,
-):
+    Contoh Point A:
+        A
+        1
+        2
+        3
+        -
 
-    if (
-        df_boq is None
-        or df_boq.empty
-    ):
+    Akan dikembalikan seluruh baris tersebut sampai sebelum Point berikutnya.
+    Ini penting supaya nilai Qty/Volume dari template tetap terlihat pada
+    editor BOQ biasa.
+    """
+    if df_boq is None or df_boq.empty or "NO" not in df_boq.columns:
         return []
 
-    parent_headers = [
-        "A",
-        "B",
-        "C",
-        "D",
-        "E",
-        "F",
-        "G",
-        "H",
-    ]
-
-    section_no = (
-        str(section_no)
-        .strip()
-        .upper()
-    )
-
+    parent_labels = {"A", "B", "C", "D", "E", "F", "G", "H"}
+    target = clean_text(section_no).upper()
     indices = []
-
     active = False
 
-    for idx, row in df_boq.iterrows():
+    for i, v in df_boq["NO"].items():
+        no = clean_text(v).upper()
 
-        no_val = (
-            str(
-                row.get(
-                    "NO",
-                    "",
-                )
-            )
-            .strip()
-            .upper()
-        )
-
-        if no_val == section_no:
-
+        if no == target:
             active = True
-            indices.append(idx)
-
+            indices.append(i)
             continue
 
-        if (
-            active
-            and no_val in parent_headers
-        ):
-
+        if active and no in parent_labels:
             break
 
         if active:
-            indices.append(idx)
+            indices.append(i)
 
     return indices
 
 
-def get_editable_sections(
-    charger_type,
-):
-
-    charger_key = normalize_charger_type(
-        charger_type
-    )
-
-    # ==========================================================================
-    # BSS
-    # ==========================================================================
-
-    if charger_key in [
-        "6S1P",
-        "12S1P",
-        "12S3P",
-    ]:
-
-        return [
-            "A",
-            "D",
-        ]
-
-    # ==========================================================================
-    # EVCS
-    # ==========================================================================
-
-    if charger_key in [
-        "DC20",
-        "DC30",
-        "DC60",
-    ]:
-
-        return [
-            "A",
-            "G",
-        ]
-
+def get_editable_sections(charger_type):
+    c = normalize_charger_type(charger_type)
+    if c in {"6S1P", "12S1P", "12S3P"}:
+        return ["A", "D"]
+    if c in {"DC20", "DC30", "DC60"}:
+        return ["A", "G"]
     return []
 
-
-# ==============================================================================
-# EDIT BOQ SECTIONS
-# ==============================================================================
 
 def edit_boq_sections(
     df_boq,
     charger_type,
     widget_prefix,
 ):
+    """
+    Editor BOQ TEMPLATE BARU.
 
-    if (
-        df_boq is None
-        or df_boq.empty
-    ):
+    PENTING:
+    - Hanya Point tertentu yang boleh mengubah Qty/Volume:
+        EVCS (DC20/DC30/DC60) -> Point A dan G
+        BSS  (6S1P/12S1P/12S3P) -> Point A dan D
+    - Item, Satuan, MERK, dan UNIT PRICE tetap mengikuti template.
+    - TOTAL PRICE dihitung otomatis dari Qty x Unit Price.
+    - BOQ MS TIDAK menggunakan function ini.
+    """
+    if df_boq is None or df_boq.empty:
         return df_boq
 
-    editable_sections = (
-        get_editable_sections(
-            charger_type
-        )
-    )
-
+    editable_sections = get_editable_sections(charger_type)
     if not editable_sections:
         return df_boq
 
     df = df_boq.copy()
 
-    st.markdown(
-        "### ✏️ Edit Detail BOQ"
-    )
+    # Pandas 3 / ArrowStringArray dapat membaca kolom template sebagai dtype
+    # string. Kolom berikut memang akan menerima hasil kalkulasi numeric saat
+    # editor dikembalikan, sehingga gunakan object dtype agar aman menerima
+    # string maupun float tanpa mengubah nilai/logika BOQ.
+    for _col in ["Unit/Volume", "UNIT PRICE", "TOTAL PRICE"]:
+        if _col in df.columns:
+            df[_col] = df[_col].astype(object)
 
+    st.markdown("### ✏️ Edit Qty / Volume BOQ")
     st.info(
-        "💡 Ubah **Item, Volume, Satuan, "
-        "MERK, atau UNIT PRICE**. "
-        "**TOTAL PRICE otomatis dihitung "
-        "= Volume × UNIT PRICE**."
+        "💡 Hanya **Qty / Volume** pada Point yang ditentukan yang dapat diubah. "
+        "Item, Satuan, MERK, dan UNIT PRICE tetap mengikuti template. "
+        "TOTAL PRICE otomatis dihitung = Qty × UNIT PRICE."
     )
 
     for section_no in editable_sections:
-
-        section_indices = (
-            get_section_indices(
-                df,
-                section_no,
-            )
-        )
-
+        section_indices = get_section_indices(df, section_no)
         if not section_indices:
             continue
 
-        section_df = (
-            df.loc[
-                section_indices
-            ].copy()
-        )
+        section_df = df.loc[section_indices].copy()
+        st.markdown(f"#### Point {section_no}")
 
-        st.markdown(
-            f"#### Point {section_no}"
-        )
-
+        # Hanya Qty/Volume yang editable. Kolom lain readonly agar nilai
+        # bawaan template tidak berubah ketika membuat BOQ biasa.
         editor_columns = [
             "NO",
             "Item",
@@ -2000,55 +904,54 @@ def edit_boq_sections(
             "UNIT PRICE",
             "TOTAL PRICE",
         ]
+        editor_df = section_df[editor_columns].copy()
 
-        editor_df = (
-            section_df[
-                editor_columns
-            ].copy()
+        # Pastikan dtype cocok dengan NumberColumn Streamlit.
+        # Pertahankan nilai Qty/Volume persis seperti yang ada di template.
+        # Jangan cast ke float karena template dapat mempunyai value seperti
+        # "30kw dc". parse_qty_num() hanya digunakan oleh calculation engine.
+        editor_df["Unit/Volume"] = (
+            editor_df["Unit/Volume"]
+            .apply(clean_text)
+        )
+        editor_df["UNIT PRICE"] = (
+            editor_df["UNIT PRICE"]
+            .apply(parse_price)
+            .astype(float)
+        )
+        editor_df["TOTAL PRICE"] = (
+            editor_df["TOTAL PRICE"]
+            .apply(parse_price)
+            .astype(float)
         )
 
-        # ----------------------------------------------------------------------
-        # COLUMN CONFIG
-        #
-        # NO dan TOTAL PRICE readonly.
-        # Semua bagian lainnya editable.
-        # ----------------------------------------------------------------------
-
         column_config = {
-
             "NO": st.column_config.TextColumn(
                 "NO",
                 disabled=True,
             ),
-
             "Item": st.column_config.TextColumn(
                 "Item",
-                disabled=False,
+                disabled=True,
             ),
-
             "Unit/Volume": st.column_config.TextColumn(
-                "Volume",
+                "Qty / Volume",
                 disabled=False,
+                help="Nilai Qty/Volume mengikuti template. Hanya kolom ini yang dapat diubah pada Point yang ditentukan.",
             ),
-
             "Satuan/Uom": st.column_config.TextColumn(
                 "Satuan",
-                disabled=False,
+                disabled=True,
             ),
-
             "MERK": st.column_config.TextColumn(
                 "MERK",
-                disabled=False,
+                disabled=True,
             ),
-
             "UNIT PRICE": st.column_config.NumberColumn(
                 "UNIT PRICE",
-                min_value=0.0,
-                step=1.0,
                 format="%.0f",
-                disabled=False,
+                disabled=True,
             ),
-
             "TOTAL PRICE": st.column_config.NumberColumn(
                 "TOTAL PRICE",
                 format="%.0f",
@@ -2062,2265 +965,839 @@ def edit_boq_sections(
             use_container_width=True,
             num_rows="fixed",
             column_config=column_config,
-            key=(
-                f"{widget_prefix}_"
-                f"section_{section_no}"
-            ),
+            key=f"{widget_prefix}_section_{section_no}",
         )
 
-        # ----------------------------------------------------------------------
-        # COPY EDIT HASIL USER
-        # ----------------------------------------------------------------------
-
-        for position, idx in enumerate(
-            section_indices
-        ):
-
-            if position >= len(
-                edited_section
-            ):
+        for position, idx in enumerate(section_indices):
+            if position >= len(edited_section):
                 continue
 
-            edited_row = (
-                edited_section.iloc[
-                    position
-                ]
+            edited_row = edited_section.iloc[position]
+
+            # HANYA Qty yang diambil dari hasil editor.
+            # Item/Satuan/MERK/UNIT PRICE tetap dari template asli.
+            new_qty = parse_qty_num(
+                edited_row["Unit/Volume"]
             )
 
-            for col in [
-                "Item",
-                "Unit/Volume",
-                "Satuan/Uom",
-                "MERK",
-                "UNIT PRICE",
-            ]:
+            df.loc[idx, "Unit/Volume"] = new_qty
 
-                df.loc[
-                    idx,
-                    col,
-                ] = edited_row[
-                    col
-                ]
-
-            # ------------------------------------------------------------------
-            # DETAIL TOTAL
-            # ------------------------------------------------------------------
-
-            no_val = (
-                str(
-                    df.loc[
-                        idx,
-                        "NO",
-                    ]
-                )
-                .strip()
-                .upper()
+            df.loc[idx, "TOTAL PRICE"] = calculate_detail_total(
+                new_qty,
+                df.loc[idx, "UNIT PRICE"],
             )
 
-            if no_val not in [
-                "A",
-                "B",
-                "C",
-                "D",
-                "E",
-                "F",
-                "G",
-                "H",
-            ]:
-
-                df.loc[
-                    idx,
-                    "TOTAL PRICE",
-                ] = calculate_detail_total(
-                    df.loc[
-                        idx,
-                        "Unit/Volume",
-                    ],
-                    df.loc[
-                        idx,
-                        "UNIT PRICE",
-                    ],
-                )
-
-    # --------------------------------------------------------------------------
-    # FINAL RECALCULATION
-    # --------------------------------------------------------------------------
-
-    (
-        df,
-        _sub_total,
-        _vat,
-        _grand_total,
-    ) = recalculate_boq_totals(
-        df
-    )
-
+    # Final calculation tetap menggunakan engine BOQ existing.
+    df, _, _, _ = recalculate_boq_totals(df)
     return df
 
+def generate_boq_pdf(site_name,site_location,charger_capacity,region,df_boq,sub_total,vat,grand_total):
+    buffer=io.BytesIO()
+    doc=SimpleDocTemplate(buffer,pagesize=A4,rightMargin=10,leftMargin=10,topMargin=10,bottomMargin=10)
+    elements=[]; styles=getSampleStyleSheet()
+    title_style=ParagraphStyle("DocTitle",parent=styles["Heading1"],fontSize=9,leading=10,fontName="Helvetica-Bold",spaceAfter=1)
+    sub_style=ParagraphStyle("DocSub",parent=styles["Normal"],fontSize=7,leading=8,fontName="Helvetica",spaceAfter=0)
+    table_text=ParagraphStyle("TableText",parent=styles["Normal"],fontSize=5.5,leading=6.5,fontName="Helvetica")
+    table_text_bold=ParagraphStyle("TableTextBold",parent=table_text,fontName="Helvetica-Bold")
+    table_header=ParagraphStyle("TableHeader",parent=styles["Normal"],fontSize=6,leading=7.5,fontName="Helvetica-Bold",textColor=colors.white)
+    elements.append(Paragraph(f"CHARGING WORK {charger_capacity}",title_style))
+    elements.append(Paragraph(f"<b>Site Name:</b> {site_name}",sub_style))
+    elements.append(Paragraph(f"<b>Site Location:</b> {site_location}",sub_style))
+    elements.append(Paragraph(f"<b>NEW PLAN BOQ VGREEN - {region} ISLAND</b>",ParagraphStyle("SubHeader",parent=title_style,fontSize=7.5,leading=8.5,spaceAfter=2,spaceBefore=1)))
+    table_data=[[Paragraph(x,table_header) for x in ["NO","Item","Unit/Vol","Satuan","MERK","UNIT PRICE","TOTAL PRICE"]]]
+    parents={"A","B","C","D","E","F","G","H"}; pdf_df,_,_,_=recalculate_boq_totals(df_boq)
+    for _,row in pdf_df.iterrows():
+        no=str(row.get("NO","")).strip().upper(); parent=no in parents; sty=table_text_bold if parent else table_text
+        up=parse_price(row.get("UNIT PRICE",0)); tp=parse_price(row.get("TOTAL PRICE",0))
+        up_str=format_currency(up) if up!=0 else ("-" if not parent else "")
+        tp_str=format_currency(tp) if tp!=0 else "-"
+        table_data.append([Paragraph(no,sty),Paragraph(str(row.get("Item","")),sty),Paragraph(str(row.get("Unit/Volume","")),sty),Paragraph(str(row.get("Satuan/Uom","")),sty),Paragraph(str(row.get("MERK","")),sty),Paragraph(up_str,sty),Paragraph(tp_str,sty)])
+    table_data += [["","",Paragraph("<b>Sub Total:</b>",table_text_bold),"","","",Paragraph(f"<b>{format_currency(sub_total)}</b>",table_text_bold)], ["","",Paragraph("<b>VAT 11%</b>",table_text_bold),"","","",Paragraph(f"<b>{format_currency(vat)}</b>",table_text_bold)], ["","",Paragraph("<b>Total Contractor Price</b>",table_text_bold),"","","",Paragraph(f"<b>{format_currency(grand_total)}</b>",table_text_bold)]]
+    t=Table(table_data,colWidths=[18,260,45,45,67,70,70])
+    t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#2C3E50")),("ALIGN",(0,0),(-1,-1),"LEFT"),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("GRID",(0,0),(-1,-4),0.3,colors.HexColor("#CCCCCC")),("BACKGROUND",(0,-3),(-1,-1),colors.HexColor("#F8F9F9")),("LINEABOVE",(0,-3),(-1,-3),0.8,colors.HexColor("#2C3E50")),("TOPPADDING",(0,0),(-1,-1),0.5),("BOTTOMPADDING",(0,0),(-1,-1),0.5),("LEFTPADDING",(0,0),(-1,-1),2),("RIGHTPADDING",(0,0),(-1,-1),2)]))
+    elements.append(t); doc.build(elements); buffer.seek(0); return buffer.getvalue()
 
-# ==============================================================================
-# DATABASE BOQ
-# ==============================================================================
+def _period_text(date_obj):
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"]
+    d = date_obj.date() if isinstance(date_obj, datetime.datetime) else date_obj
+    if d.day >= 16:
+        m1, y1 = d.month, d.year
+        m2 = m1 + 1
+        y2 = y1
+        if m2 == 13:
+            m2, y2 = 1, y1 + 1
+    else:
+        m2, y2 = d.month, d.year
+        m1 = m2 - 1
+        y1 = y2
+        if m1 == 0:
+            m1, y1 = 12, y2 - 1
+    return f"{months[m1-1]}-{months[m2-1]} {y2}"
 
-def ensure_db_boq_headers(
-    worksheet,
-):
 
-    rows = worksheet.get_all_values()
+def _ensure_boq_ms_headers(ws):
+    headers = BOQ_MS_HEADERS + BOQ_MS_HELPER_HEADERS
+    try:
+        vals = ws.get_all_values()
+        first = vals[0] if vals else []
+        if first[:9] != BOQ_MS_HEADERS:
+            ws.update("A1:I1", [BOQ_MS_HEADERS])
+        # Add helper columns without disturbing A:I.
+        vals = ws.get_all_values()
+        first = vals[0] if vals else []
+        full = BOQ_MS_HEADERS + BOQ_MS_HELPER_HEADERS
+        for col_idx, header in enumerate(full[9:], start=10):
+            if len(first) < col_idx or str(first[col_idx-1]).strip() != header:
+                ws.update_cell(1, col_idx, header)
+    except Exception:
+        ws.update("A1:O1", [headers])
+    return headers
 
-    headers = (
-        rows[0]
-        if rows
-        else []
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_boq_ms_records():
+    df = read_sheet_df(DB_BOQ_MS_SHEET)
+    if df.empty:
+        return []
+    cols=list(df.columns)
+    def get(row,idx,default=""):
+        c=cols[idx] if idx<len(cols) else None
+        return row.get(c,default) if c else default
+    out=[]
+    for i,row in df.iterrows():
+        if not any(clean_text(v) for v in row.tolist()): continue
+        out.append({
+            "row_idx":i+2,"No":clean_text(get(row,0)),"Date":clean_text(get(row,1)),"No. BOQ":clean_text(get(row,2)),
+            "SN Machine":clean_text(get(row,3)),"Site Name":clean_text(get(row,4)),"Charging Type":normalize_charger_type(get(row,5)),
+            "Item Name":clean_text(get(row,6)),"Price":parse_price(get(row,7)),"Periode":clean_text(get(row,8)),
+            "Qty":parse_qty_num(get(row,9)),"Template":clean_text(get(row,10)),"Region":clean_text(get(row,11)),
+            "Issue Note":clean_text(get(row,12)),"Photo Evident 1":clean_text(get(row,13)),"Photo Evident 2":clean_text(get(row,14)),
+        })
+    return out
+
+def _next_boq_ms_sequence():
+    max_no = 0
+    for r in _read_boq_ms_records():
+        m = re.match(r"^(\d+)", r["No"])
+        if m:
+            max_no = max(max_no, int(m.group(1)))
+        m2 = re.match(r"^(\d+)/CLX/BOQ/MS/", r["No. BOQ"].upper())
+        if m2:
+            max_no = max(max_no, int(m2.group(1)))
+    return max_no + 1
+
+
+def _material_rows_for_ms(df):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Source Row","NO","Item Name","Satuan","Merk","Unit Price"])
+    parents = {"A","B","C","D","E","F","G","H"}
+    rows = []
+    for i, r in df.iterrows():
+        no = clean_text(r.get("NO", ""))
+        item = clean_text(r.get("Item", ""))
+        # A replacement-material picker must not offer section headers or blank rows.
+        if not item or no.upper() in parents:
+            continue
+        rows.append({
+            "Source Row": i,
+            "NO": no,
+            "Item Name": item,
+            "Satuan": clean_text(r.get("Satuan/Uom", "")),
+            "Merk": clean_text(r.get("MERK", "")),
+            "Unit Price": parse_price(r.get("UNIT PRICE", 0)),
+        })
+    return pd.DataFrame(rows)
+
+
+def _boq_ms_picker(material_df, selected_keys=None, key="boq_ms_picker"):
+    work = material_df.copy()
+    work.insert(0, "Pilih", False)
+    work.insert(7, "Qty", 1.0)
+    work["Total DPP"] = work["Unit Price"] * work["Qty"]
+    if selected_keys is not None:
+        selected_keys = set(selected_keys)
+        work["Pilih"] = work["Source Row"].isin(selected_keys)
+    view = work[["Pilih","NO","Item Name","Satuan","Merk","Unit Price","Qty","Total DPP"]].copy()
+    view["Unit Price"] = view["Unit Price"].astype(float)
+    view["Total DPP"] = view["Total DPP"].astype(float)
+    edited = st.data_editor(
+        view,
+        key=key,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Pilih": st.column_config.CheckboxColumn("Pilih", help="Pilih material pengganti"),
+            "NO": st.column_config.TextColumn("NO", disabled=True),
+            "Item Name": st.column_config.TextColumn("Item Name", disabled=True),
+            "Satuan": st.column_config.TextColumn("Satuan", disabled=True),
+            "Merk": st.column_config.TextColumn("Merk", disabled=True),
+            "Unit Price": st.column_config.NumberColumn("Unit Price", format="Rp %.0f", disabled=True),
+            "Qty": st.column_config.NumberColumn("Qty", min_value=0, step=1, format="%.2f"),
+            "Total DPP": st.column_config.NumberColumn("Total DPP", format="Rp %.0f", disabled=True),
+        },
+        disabled=["NO","Item Name","Satuan","Merk","Unit Price","Total DPP"],
     )
+    edited = edited.copy()
+    edited["Qty"] = edited["Qty"].apply(parse_qty_num)
+    edited["Total DPP"] = edited["Unit Price"] * edited["Qty"]
+    # Map edited rows back to source rows using positional alignment.
+    selected = []
+    for i, r in edited.iterrows():
+        if bool(r["Pilih"]):
+            src = material_df.iloc[i]
+            selected.append({
+                "Source Row": int(src["Source Row"]),
+                "NO": clean_text(src["NO"]),
+                "Item Name": clean_text(src["Item Name"]),
+                "Satuan": clean_text(src["Satuan"]),
+                "Merk": clean_text(src["Merk"]),
+                "Unit Price": parse_price(src["Unit Price"]),
+                "Qty": parse_qty_num(r["Qty"]),
+                "Total DPP": calculate_detail_total(r["Qty"], src["Unit Price"]),
+            })
+    return pd.DataFrame(selected)
 
-    required_headers = [
-        "No",
-        "BOQ No.",
-        "Site Name",
-        "Charger Type",
-        "BOQ Amount Exc. PPN",
-        "BOQ Amount inc. PPN",
-        "EPC Name",
-        "Template",
+
+def _get_pdf_asset_path(filename):
+    """Cari asset PDF pada assets/templates di beberapa root yang digunakan app."""
+    candidates = [
+        os.path.join(CURRENT_DIR, "assets", "templates", filename),
+        os.path.join(ROOT_DIR, "assets", "templates", filename),
+        os.path.join(CWD, "assets", "templates", filename),
     ]
-
-    if not headers:
-
-        worksheet.update(
-            "A1:H1",
-            [required_headers],
-        )
-
-        return required_headers
-
-    current_headers = [
-        str(h).strip()
-        for h in headers
-    ]
-
-    if len(current_headers) < 8:
-
-        worksheet.update_cell(
-            1,
-            8,
-            "Template",
-        )
-
-    elif (
-        current_headers[7]
-        != "Template"
-    ):
-
-        worksheet.update_cell(
-            1,
-            8,
-            "Template",
-        )
-
-    return required_headers
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
 
 
-def save_to_db_boq(
-    site_name,
-    charger_capacity,
-    sub_total,
-    grand_total,
-    epc_name="-",
-    template_name="Template BOQ Vgreen Lama",
-):
-
+def _draw_pdf_asset(canvas, path, x, y_top, max_width, max_height):
+    """Draw image proportionally without stretching."""
+    if not path or not os.path.exists(path):
+        return
     try:
-
-        sh = get_google_sheet_connection()
-
-        if not sh:
-            return None
-
-        try:
-
-            worksheet = sh.worksheet(
-                "DB BOQ"
-            )
-
-        except Exception:
-
-            worksheet = sh.add_worksheet(
-                title="DB BOQ",
-                rows=1000,
-                cols=10,
-            )
-
-        ensure_db_boq_headers(
-            worksheet
-        )
-
-        existing_rows = (
-            worksheet.get_all_values()
-        )
-
-        no_urut = (
-            len(
-                [
-                    r
-                    for r in existing_rows[1:]
-                    if any(r)
-                ]
-            )
-            + 1
-            if len(existing_rows) > 1
-            else 1
-        )
-
-        boq_no = generate_boq_number(
-            sequence_num=no_urut
-        )
-
-        db_template = (
-            template_db_value(
-                template_name
-            )
-        )
-
-        new_row = [
-            no_urut,
-            boq_no,
-            str(site_name),
-            str(charger_capacity),
-            sub_total,
-            grand_total,
-            str(epc_name),
-            db_template,
-        ]
-
-        worksheet.append_row(
-            new_row
-        )
-
-        return boq_no
-
-    except Exception as e:
-
-        st.error(
-            "❌ Gagal menyimpan ke DB BOQ: "
-            f"{e}"
-        )
-
-        return None
+        from reportlab.lib.utils import ImageReader
+        reader = ImageReader(path)
+        iw, ih = reader.getSize()
+        if not iw or not ih:
+            return
+        scale = min(float(max_width) / float(iw), float(max_height) / float(ih))
+        width = iw * scale
+        height = ih * scale
+        x_draw = x + (max_width - width) / 2.0
+        y_draw = y_top - height
+        canvas.drawImage(reader, x_draw, y_draw, width=width, height=height, preserveAspectRatio=True, mask="auto")
+    except Exception:
+        pass
 
 
-def update_db_boq_row(
-    row_idx,
-    old_site_name,
-    new_site_name,
-    charger_capacity,
-    sub_total,
-    grand_total,
-    epc_name,
-    template_name=None,
-):
+def _boq_ms_pdf_header_footer(canvas, doc):
+    """Header/Footer khusus PDF BOQ MS. Tidak mempengaruhi PDF BOQ biasa."""
+    canvas.saveState()
+    page_width, page_height = portrait(A5)
+    left = 10
+    usable_width = page_width - 20
 
-    try:
+    # Prioritas 1: header/footer image yang sudah disiapkan.
+    header_path = _get_pdf_asset_path("header.png")
+    footer_path = _get_pdf_asset_path("Footer.png")
 
-        sh = get_google_sheet_connection()
+    if header_path:
+        _draw_pdf_asset(canvas, header_path, left, page_height - 4, usable_width, 42)
+    else:
+        # Fallback agar header TETAP muncul walaupun header.png tidak ditemukan.
+        logo_path = _get_pdf_asset_path("CLX.png") or get_logo_path()
+        if logo_path:
+            _draw_pdf_asset(canvas, logo_path, left, page_height - 7, 95, 34)
+        canvas.setFont("Helvetica-Bold", 8)
+        canvas.drawRightString(page_width - 10, page_height - 18, "BOQ MS / REPLACEMENT MATERIAL")
+        canvas.setFont("Helvetica", 6)
+        canvas.drawRightString(page_width - 10, page_height - 28, "PT. Connectivity Leads eXcellence")
+        canvas.setLineWidth(0.5)
+        canvas.line(left, page_height - 40, page_width - 10, page_height - 40)
 
-        if not sh:
-            return False
+    if footer_path:
+        _draw_pdf_asset(canvas, footer_path, left, 34, usable_width, 30)
+    else:
+        # Fallback footer agar footer TETAP muncul walaupun Footer.png tidak ada.
+        canvas.setLineWidth(0.5)
+        canvas.line(left, 34, page_width - 10, 34)
+        canvas.setFont("Helvetica", 6)
+        canvas.drawString(left, 22, "PT. Connectivity Leads eXcellence")
+        canvas.drawRightString(page_width - 10, 22, f"Page {doc.page}")
 
-        worksheet = sh.worksheet(
-            "DB BOQ"
-        )
+    canvas.restoreState()
 
-        ensure_db_boq_headers(
-            worksheet
-        )
-
-        worksheet.update_cell(
-            row_idx,
-            3,
-            new_site_name,
-        )
-
-        worksheet.update_cell(
-            row_idx,
-            4,
-            charger_capacity,
-        )
-
-        worksheet.update_cell(
-            row_idx,
-            5,
-            sub_total,
-        )
-
-        worksheet.update_cell(
-            row_idx,
-            6,
-            grand_total,
-        )
-
-        worksheet.update_cell(
-            row_idx,
-            7,
-            epc_name,
-        )
-
-        if template_name:
-
-            worksheet.update_cell(
-                row_idx,
-                8,
-                template_db_value(
-                    template_name
-                ),
-            )
-
-        update_google_sheet_summary(
-            old_site_name,
-            new_site_name,
-            sub_total,
-            grand_total,
-        )
-
-        return True
-
-    except Exception as e:
-
-        st.error(
-            "❌ Gagal memperbarui DB BOQ: "
-            f"{e}"
-        )
-
-        return False
-
-
-def update_google_sheet_summary(
-    old_site_name,
-    new_site_name,
-    sub_total,
-    grand_total,
-):
-
-    try:
-
-        sh = get_google_sheet_connection()
-
-        if not sh:
-            return False
-
-        sheet_names = [
-            ws.title
-            for ws in sh.worksheets()
-        ]
-
-        if (
-            "Sum Project"
-            not in sheet_names
-        ):
-            return False
-
-        worksheet = sh.worksheet(
-            "Sum Project"
-        )
-
-        data_sum = (
-            worksheet.get_all_values()
-        )
-
-        for idx, row in enumerate(
-            data_sum[1:],
-            start=2,
-        ):
-
-            if (
-                len(row) > 2
-                and str(row[2])
-                .strip()
-                .lower()
-                ==
-                str(old_site_name)
-                .strip()
-                .lower()
-            ):
-
-                worksheet.update_cell(
-                    idx,
-                    3,
-                    new_site_name,
-                )
-
-                if len(row) >= 19:
-
-                    worksheet.update_cell(
-                        idx,
-                        18,
-                        sub_total,
-                    )
-
-                    worksheet.update_cell(
-                        idx,
-                        19,
-                        grand_total,
-                    )
-
-                return True
-
-    except Exception as e:
-
-        st.caption(
-            "ℹ️ Info: Sheet 'Sum Project' "
-            f"belum ter-update ({e})"
-        )
-
-    return False
-
-
-# ==============================================================================
-# PDF GENERATOR
-# ==============================================================================
-
-def generate_boq_pdf(
-    site_name,
-    site_location,
-    charger_capacity,
-    region,
-    df_boq,
-    sub_total,
-    vat,
-    grand_total,
-):
-
-    buffer = io.BytesIO()
-
+def generate_boq_ms_pdf(records, boq_no, sn_machine, site_name, charging_type, period, template_name, region, issue_note="", photo_bytes=None, date_obj=None):
+    # Margin atas/bawah dibuat cukup agar header/footer tidak bertabrakan dengan isi.
+    buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
+        buf,
+        pagesize=portrait(A5),
         rightMargin=10,
         leftMargin=10,
-        topMargin=10,
-        bottomMargin=10,
+        topMargin=52,
+        bottomMargin=42,
     )
-
-    elements = []
 
     styles = getSampleStyleSheet()
-
-    title_style = ParagraphStyle(
-        "DocTitle",
-        parent=styles["Heading1"],
-        fontSize=9,
-        leading=10,
-        fontName="Helvetica-Bold",
-        textColor=colors.HexColor(
-            "#111111"
-        ),
-        spaceAfter=1,
+    title = ParagraphStyle(
+        "ms_title",
+        parent=styles["Title"],
+        fontSize=12,
+        leading=14,
+        alignment=1,
+        spaceAfter=4,
     )
-
-    sub_style = ParagraphStyle(
-        "DocSub",
+    small = ParagraphStyle(
+        "ms_small",
         parent=styles["Normal"],
-        fontSize=7,
+        fontSize=6.5,
         leading=8,
-        fontName="Helvetica",
-        textColor=colors.HexColor(
-            "#333333"
-        ),
-        spaceAfter=0,
     )
-
-    table_text = ParagraphStyle(
-        "TableText",
-        parent=styles["Normal"],
-        fontSize=5.5,
-        leading=6.5,
-        fontName="Helvetica",
-    )
-
-    table_text_bold = ParagraphStyle(
-        "TableTextBold",
-        parent=table_text,
+    bold = ParagraphStyle(
+        "ms_bold",
+        parent=small,
         fontName="Helvetica-Bold",
     )
-
-    table_header = ParagraphStyle(
-        "TableHeader",
-        parent=styles["Normal"],
+    cell = ParagraphStyle(
+        "ms_cell",
+        parent=small,
         fontSize=6,
-        leading=7.5,
+        leading=7,
+    )
+    table_header = ParagraphStyle(
+        "ms_table_header",
+        parent=small,
         fontName="Helvetica-Bold",
+        fontSize=6,
+        leading=7,
+        alignment=1,
         textColor=colors.white,
     )
 
-    elements.append(
-        Paragraph(
-            f"CHARGING WORK {charger_capacity}",
-            title_style,
-        )
-    )
+    story = []
+    dt = date_obj or datetime.datetime.now()
 
-    elements.append(
-        Paragraph(
-            f"<b>Site Name:</b> "
-            f"{site_name}",
-            sub_style,
-        )
-    )
+    # Judul tetap dipertahankan, sedangkan logo CLX lama tidak lagi diperlukan
+    # karena header.png menjadi header utama dokumen.
+    story.append(Paragraph("BOQ MS / REPLACEMENT MATERIAL", title))
 
-    elements.append(
-        Paragraph(
-            f"<b>Site Location:</b> "
-            f"{site_location}",
-            sub_style,
-        )
-    )
-
-    elements.append(
-        Paragraph(
-            f"<b>NEW PLAN BOQ VGREEN - "
-            f"{region} ISLAND</b>",
-            ParagraphStyle(
-                "SubHeader",
-                parent=title_style,
-                fontSize=7.5,
-                leading=8.5,
-                spaceAfter=2,
-                spaceBefore=1,
-            ),
-        )
-    )
-
-    table_data = [
-        [
-            Paragraph(
-                "NO",
-                table_header,
-            ),
-            Paragraph(
-                "Item",
-                table_header,
-            ),
-            Paragraph(
-                "Unit/Vol",
-                table_header,
-            ),
-            Paragraph(
-                "Satuan",
-                table_header,
-            ),
-            Paragraph(
-                "MERK",
-                table_header,
-            ),
-            Paragraph(
-                "UNIT PRICE",
-                table_header,
-            ),
-            Paragraph(
-                "TOTAL PRICE",
-                table_header,
-            ),
-        ]
+    # --------------------------------------------------------------------------
+    # INFORMASI DOKUMEN
+    # Template dan Region sengaja TIDAK ditampilkan di PDF sesuai permintaan.
+    # --------------------------------------------------------------------------
+    info = [
+        [Paragraph("No. BOQ", bold), Paragraph(clean_text(boq_no), small)],
+        [Paragraph("Date", bold), Paragraph(dt.strftime("%d-%m-%Y"), small)],
+        [Paragraph("SN Machine", bold), Paragraph(clean_text(sn_machine), small)],
+        [Paragraph("Site Name", bold), Paragraph(clean_text(site_name), small)],
+        [Paragraph("Charging Type", bold), Paragraph(clean_text(charging_type), small)],
+        [Paragraph("Periode", bold), Paragraph(clean_text(period), small)],
     ]
-
-    parent_headers = [
-        "A",
-        "B",
-        "C",
-        "D",
-        "E",
-        "F",
-        "G",
-        "H",
-    ]
-
-    # Pastikan PDF menggunakan kalkulasi terbaru
-    (
-        pdf_df,
-        _,
-        _,
-        _,
-    ) = recalculate_boq_totals(
-        df_boq
+    ti = Table(info, colWidths=[65, 315])
+    ti.setStyle(
+        TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 1.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+        ])
     )
+    story += [ti, Spacer(1, 4)]
 
-    for _, row in pdf_df.iterrows():
+    # --------------------------------------------------------------------------
+    # DETAIL MATERIAL
+    # Semua judul kolom dibuat center + putih.
+    # --------------------------------------------------------------------------
+    data = [[
+        Paragraph("No", table_header),
+        Paragraph("Item Name", table_header),
+        Paragraph("Qty", table_header),
+        Paragraph("Unit Price", table_header),
+        Paragraph("DPP", table_header),
+    ]]
+    total = 0.0
 
-        no_str = (
-            str(
-                row.get(
-                    "NO",
-                    "",
-                )
-            )
-            .strip()
-            .upper()
-        )
+    for i, r in enumerate(records, 1):
+        qty = parse_qty_num(r.get("Qty", 0))
+        up = parse_price(r.get("Unit Price", 0))
+        dpp = calculate_detail_total(qty, up)
+        total += dpp
+        data.append([
+            Paragraph(str(i), cell),
+            Paragraph(clean_text(r.get("Item Name", "")), cell),
+            Paragraph(f"{qty:g}", cell),
+            Paragraph(format_currency(up), cell),
+            Paragraph(format_currency(dpp), cell),
+        ])
 
-        is_parent = (
-            no_str
-            in parent_headers
-        )
+    table = Table(
+        data,
+        colWidths=[22, 171, 35, 76, 76],
+        repeatRows=1,
+    )
+    table.setStyle(
+        TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2C3E50")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            # Header: seluruh kolom center.
+            ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+            # Body: No dan Qty center, angka nominal kanan.
+            ("ALIGN", (0, 1), (0, -1), "CENTER"),
+            ("ALIGN", (2, 1), (2, -1), "CENTER"),
+            ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ])
+    )
+    story += [table, Spacer(1, 4)]
 
-        up_val = parse_price(
-            row.get(
-                "UNIT PRICE",
-                0,
-            )
-        )
-
-        tp_val = parse_price(
-            row.get(
-                "TOTAL PRICE",
-                0,
-            )
-        )
-
-        up_str = (
-            format_currency(
-                up_val
-            )
-            if up_val != 0
-            else (
-                "-"
-                if not is_parent
-                else ""
-            )
-        )
-
-        tp_str = (
-            format_currency(
-                tp_val
-            )
-            if tp_val != 0
-            else "-"
-        )
-
-        style_to_use = (
-            table_text_bold
-            if is_parent
-            else table_text
-        )
-
-        table_data.append(
-            [
-                Paragraph(
-                    no_str,
-                    style_to_use,
-                ),
-
-                Paragraph(
-                    str(
-                        row.get(
-                            "Item",
-                            "",
-                        )
-                    ),
-                    style_to_use,
-                ),
-
-                Paragraph(
-                    str(
-                        row.get(
-                            "Unit/Volume",
-                            "",
-                        )
-                    ),
-                    style_to_use,
-                ),
-
-                Paragraph(
-                    str(
-                        row.get(
-                            "Satuan/Uom",
-                            "",
-                        )
-                    ),
-                    style_to_use,
-                ),
-
-                Paragraph(
-                    str(
-                        row.get(
-                            "MERK",
-                            "",
-                        )
-                    ),
-                    style_to_use,
-                ),
-
-                Paragraph(
-                    up_str,
-                    style_to_use,
-                ),
-
-                Paragraph(
-                    tp_str,
-                    style_to_use,
-                ),
-            ]
-        )
-
-    table_data.append(
+    # --------------------------------------------------------------------------
+    # TOTAL
+    # --------------------------------------------------------------------------
+    vat = total * 0.11
+    grand = total + vat
+    sm = Table(
         [
-            "",
-            "",
-            Paragraph(
-                "<b>Sub Total:</b>",
-                table_text_bold,
-            ),
-            "",
-            "",
-            "",
-            Paragraph(
-                f"<b>{format_currency(sub_total)}</b>",
-                table_text_bold,
-            ),
-        ]
+            [Paragraph("DPP", bold), Paragraph(format_currency(total), bold)],
+            [Paragraph("PPN 11%", small), Paragraph(format_currency(vat), small)],
+            [Paragraph("Grand Total", bold), Paragraph(format_currency(grand), bold)],
+        ],
+        colWidths=[285, 95],
     )
+    sm.setStyle(
+        TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ])
+    )
+    story.append(sm)
 
-    table_data.append(
+    # --------------------------------------------------------------------------
+    # ISSUE NOTE - dibuat table agar lebih rapi.
+    # --------------------------------------------------------------------------
+    story.append(Spacer(1, 5))
+    issue_text = clean_text(issue_note).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    issue_text = issue_text.replace("\n", "<br/>") or "-"
+    issue_table = Table(
         [
-            "",
-            "",
-            Paragraph(
-                "<b>VAT 11%</b>",
-                table_text_bold,
-            ),
-            "",
-            "",
-            "",
-            Paragraph(
-                f"<b>{format_currency(vat)}</b>",
-                table_text_bold,
-            ),
-        ]
+            [Paragraph("ISSUE NOTE", table_header)],
+            [Paragraph(issue_text, cell)],
+        ],
+        colWidths=[380],
     )
-
-    table_data.append(
-        [
-            "",
-            "",
-            Paragraph(
-                "<b>Total Contractor Price</b>",
-                table_text_bold,
-            ),
-            "",
-            "",
-            "",
-            Paragraph(
-                f"<b>{format_currency(grand_total)}</b>",
-                table_text_bold,
-            ),
-        ]
+    issue_table.setStyle(
+        TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2C3E50")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ])
     )
+    story.append(issue_table)
 
-    col_widths = [
-        18,
-        260,
-        45,
-        45,
-        67,
-        70,
-        70,
-    ]
-
-    t = Table(
-        table_data,
-        colWidths=col_widths,
-    )
-
-    t.setStyle(
-        TableStyle(
-            [
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor(
-                        "#2C3E50"
-                    ),
-                ),
-
-                (
-                    "ALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "LEFT",
-                ),
-
-                (
-                    "VALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "MIDDLE",
-                ),
-
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -4),
-                    0.3,
-                    colors.HexColor(
-                        "#CCCCCC"
-                    ),
-                ),
-
-                (
-                    "BACKGROUND",
-                    (0, -3),
-                    (-1, -1),
-                    colors.HexColor(
-                        "#F8F9F9"
-                    ),
-                ),
-
-                (
-                    "LINEABOVE",
-                    (0, -3),
-                    (-1, -3),
-                    0.8,
-                    colors.HexColor(
-                        "#2C3E50"
-                    ),
-                ),
-
-                (
-                    "TOPPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    0.5,
-                ),
-
-                (
-                    "BOTTOMPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    0.5,
-                ),
-
-                (
-                    "LEFTPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    2,
-                ),
-
-                (
-                    "RIGHTPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    2,
-                ),
-            ]
+    # --------------------------------------------------------------------------
+    # FOTO EVIDENT - table 2 kolom, foto proporsional.
+    # --------------------------------------------------------------------------
+    photos = [x for x in (photo_bytes or []) if x]
+    if photos:
+        story.append(Spacer(1, 5))
+        photo_title = Table(
+            [[Paragraph("FOTO EVIDENT", table_header)]],
+            colWidths=[380],
         )
+        photo_title.setStyle(
+            TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2C3E50")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ])
+        )
+        story.append(photo_title)
+
+        photo_cells = []
+        for b in photos[:2]:
+            try:
+                from reportlab.lib.utils import ImageReader
+                reader = ImageReader(io.BytesIO(b))
+                iw, ih = reader.getSize()
+                max_w, max_h = 174, 115
+                scale = min(max_w / float(iw), max_h / float(ih)) if iw and ih else 1
+                w = iw * scale
+                h = ih * scale
+                photo_cells.append(Image(io.BytesIO(b), width=w, height=h))
+            except Exception:
+                photo_cells.append(Paragraph("Foto tidak dapat ditampilkan", cell))
+
+        while len(photo_cells) < 2:
+            photo_cells.append(Paragraph("", cell))
+
+        photo_table = Table(
+            [photo_cells[:2]],
+            colWidths=[190, 190],
+        )
+        photo_table.setStyle(
+            TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ])
+        )
+        story.append(photo_table)
+
+    doc.build(
+        story,
+        onFirstPage=_boq_ms_pdf_header_footer,
+        onLaterPages=_boq_ms_pdf_header_footer,
     )
+    buf.seek(0)
+    return buf.getvalue()
 
-    elements.append(t)
 
-    doc.build(elements)
+def _upload_boq_ms_photo(uploaded_file, boq_no):
+    """Upload evidence photo to Google Drive and return a shareable URL.
+    Falls back to an empty string if Drive API is not available.
+    """
+    if uploaded_file is None:
+        return ""
+    try:
+        sh=get_google_sheet_connection()
+        creds=getattr(sh,"auth",None) if sh else None
+        if creds is None:
+            return ""
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        drive=build("drive","v3",credentials=creds,cache_discovery=False)
+        q="name='BOQ MS Evidence' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        res=drive.files().list(q=q,spaces="drive",fields="files(id,name)",pageSize=10).execute()
+        files=res.get("files",[])
+        if files:
+            folder_id=files[0]["id"]
+        else:
+            folder=drive.files().create(body={"name":"BOQ MS Evidence","mimeType":"application/vnd.google-apps.folder"},fields="id").execute()
+            folder_id=folder["id"]
+        safe=re.sub(r'[^A-Za-z0-9._-]+','_',uploaded_file.name)
+        filename=f"{boq_no.replace('/','-')}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{safe}"
+        media=MediaIoBaseUpload(io.BytesIO(uploaded_file.getvalue()),mimetype=uploaded_file.type or "image/jpeg",resumable=False)
+        created=drive.files().create(body={"name":filename,"parents":[folder_id]},media_body=media,fields="id,webViewLink").execute()
+        file_id=created["id"]
+        try:
+            drive.permissions().create(fileId=file_id,body={"type":"anyone","role":"reader"}).execute()
+        except Exception:
+            pass
+        return created.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
+    except Exception as e:
+        st.warning(f"⚠️ Foto berhasil dibaca, tetapi upload ke Google Drive gagal: {e}")
+        return ""
 
-    buffer.seek(0)
+def _download_boq_ms_photo(url):
+    if not url:
+        return None
+    try:
+        sh=get_google_sheet_connection(); creds=getattr(sh,"auth",None) if sh else None
+        if creds is None: return None
+        m=re.search(r"/d/([A-Za-z0-9_-]+)",url) or re.search(r"[?&]id=([A-Za-z0-9_-]+)",url)
+        if not m: return None
+        from googleapiclient.discovery import build
+        drive=build("drive","v3",credentials=creds,cache_discovery=False)
+        from googleapiclient.http import MediaIoBaseDownload
+        req=drive.files().get_media(fileId=m.group(1)); fh=io.BytesIO(); downloader=MediaIoBaseDownload(fh,req)
+        done=False
+        while not done: _,done=downloader.next_chunk()
+        fh.seek(0); return fh.getvalue()
+    except Exception:
+        return None
 
-    return buffer.getvalue()
+def _save_boq_ms(records, sn_machine, site_name, charging_type, template_name, region, issue_note="", photo_files=None, date_obj=None):
+    ws=_get_ws(DB_BOQ_MS_SHEET)
+    if ws is None:
+        raise RuntimeError(f"Worksheet '{DB_BOQ_MS_SHEET}' tidak ditemukan. Buat worksheet tersebut terlebih dahulu.")
+    _ensure_boq_ms_headers(ws)
+    dt=date_obj or datetime.datetime.now(); seq=_next_boq_ms_sequence(); boq_no=generate_boq_ms_number(seq,dt); period=_period_text(dt)
+    photo_files=photo_files or []
+    photo_urls=[]
+    for f in photo_files[:2]:
+        u=_upload_boq_ms_photo(f,boq_no)
+        photo_urls.append(u)
+    while len(photo_urls)<2: photo_urls.append("")
+    rows=[]
+    for item in records:
+        rows.append([seq,dt.strftime("%d-%m-%Y"),boq_no,clean_text(sn_machine),clean_text(site_name),normalize_charger_type(charging_type),clean_text(item["Item Name"]),parse_price(item["Total DPP"]),period,parse_qty_num(item["Qty"]),template_db_value(template_name),clean_text(region),clean_text(issue_note),photo_urls[0],photo_urls[1]])
+    if rows: ws.append_rows(rows,value_input_option="USER_ENTERED")
+    return boq_no,period,seq,photo_urls
+
+def _update_boq_ms(boq_no, records, sn_machine, site_name, charging_type, template_name, region, issue_note="", photo_files=None, date_text=None, existing_photo_urls=None):
+    ws=_get_ws(DB_BOQ_MS_SHEET)
+    if ws is None: raise RuntimeError(f"Worksheet '{DB_BOQ_MS_SHEET}' tidak ditemukan.")
+    old=[r for r in _read_boq_ms_records() if r["No. BOQ"]==boq_no]
+    if not old: raise RuntimeError("BOQ MS tidak ditemukan.")
+    seq=parse_qty_num(old[0]["No"]); dt=datetime.datetime.now()
+    try:
+        if date_text: dt=datetime.datetime.strptime(date_text,"%d-%m-%Y")
+    except Exception: pass
+    period=_period_text(dt); existing_photo_urls=existing_photo_urls or [old[0].get("Photo Evident 1", ""),old[0].get("Photo Evident 2", "")]
+    uploaded_urls=[]
+    for f in (photo_files or [])[:2]:
+        u=_upload_boq_ms_photo(f,boq_no)
+        if u: uploaded_urls.append(u)
+    photos=(uploaded_urls + existing_photo_urls)[:2]
+    while len(photos)<2: photos.append("")
+    # Clear only the old BOQ rows; unrelated DB BOQ MS records are untouched.
+    for r in old:
+        ws.update(f"A{r['row_idx']}:O{r['row_idx']}", [[""]*15])
+    new_rows=[]
+    for item in records:
+        new_rows.append([int(seq),dt.strftime("%d-%m-%Y"),boq_no,clean_text(sn_machine),clean_text(site_name),normalize_charger_type(charging_type),clean_text(item["Item Name"]),parse_price(item["Total DPP"]),period,parse_qty_num(item["Qty"]),template_db_value(template_name),clean_text(region),clean_text(issue_note),photos[0],photos[1]])
+    if not new_rows: return period
+    ws.update(f"A{old[0]['row_idx']}:O{old[0]['row_idx']}",[new_rows[0]],value_input_option="USER_ENTERED")
+    if len(new_rows)>1: ws.insert_rows(new_rows[1:],row=old[0]['row_idx']+1,value_input_option="USER_ENTERED")
+    return period
+
+def _get_boq_ms_grouped():
+    records = _read_boq_ms_records()
+    groups = {}
+    for r in records:
+        groups.setdefault(r["No. BOQ"], []).append(r)
+    return groups
+
+
+def _records_to_pdf_items(records):
+    return [{
+        "Item Name": r["Item Name"], "Qty": r["Qty"], "Unit Price": r["Price"] / r["Qty"] if r["Qty"] else 0,
+        "Total DPP": r["Price"]
+    } for r in records]
 
 
 # ==============================================================================
-# MAIN RENDER
+# BOQ MS UI
 # ==============================================================================
+def render_boq_ms_create():
+    # Reset counter khusus CREATE BOQ MS.
+    # Setelah berhasil save, counter dinaikkan lalu st.rerun() sehingga
+    # seluruh widget Create BOQ MS dibuat ulang dalam kondisi default/blank.
+    reset_no = int(st.session_state.get("boq_ms_create_reset_no", 0))
+    key_suffix = f"_{reset_no}"
+
+    st.subheader("➕ Create BOQ MS / Replacement Material")
+    st.info("Pilih template, charging type, lalu pilih material replacement. Qty hanya berlaku untuk material yang dipilih.")
+    template_name=st.selectbox("Template",list(TEMPLATE_OPTIONS.keys()),index=1,key=f"ms_create_template{key_suffix}")
+    charging_type=st.selectbox("Charging Type",["6S1P","12S1P","DC20","DC30","DC60"],key=f"ms_create_charger{key_suffix}")
+    region=st.selectbox("Region / Island",["JAVA","SUMATERA","BALI NUSATENGGARA","KALIMANTAN","SULAWESI"],key=f"ms_create_region{key_suffix}")
+    c1,c2=st.columns(2); sn_machine=c1.text_input("SN Machine",key=f"ms_create_sn{key_suffix}"); site_name=c2.text_input("Site Name",key=f"ms_create_site{key_suffix}")
+    issue_note=st.text_area("Issue Note",placeholder="Tuliskan issue / alasan replacement material...",key=f"ms_create_issue_note{key_suffix}",height=90)
+    photos=st.file_uploader("📷 Foto Evident (Maks. 2 Foto)",type=["jpg","jpeg","png","webp"],accept_multiple_files=True,key=f"ms_create_photos{key_suffix}",help="Upload maksimal 2 foto evidence.")
+    if len(photos)>2:
+        st.error("❌ Maksimal 2 foto evident. Silakan hapus foto yang berlebih."); return
+    if not site_name: st.caption("Isi Site Name terlebih dahulu untuk melanjutkan."); return
+    df_template, _ms_sheet, _ms_region=load_boq_dataframe(charging_type,region,template_name)
+    if df_template is None or df_template.empty: return
+    materials=_material_rows_for_ms(df_template)
+    if materials.empty: st.warning("Tidak ada material detail yang ditemukan pada template/sheet tersebut."); return
+    st.markdown("#### Pilih Replacement Material")
+    selected_df=_boq_ms_picker(materials,key=f"boq_ms_create_picker{key_suffix}")
+    if selected_df.empty: st.warning("Belum ada material yang dipilih."); return
+    total_dpp=float(selected_df["Total DPP"].sum()); vat=total_dpp*0.11; grand=total_dpp+vat; today=datetime.datetime.now(); period=_period_text(today)
+    c1,c2,c3=st.columns(3); c1.metric("Item",len(selected_df)); c2.metric("DPP",format_currency(total_dpp)); c3.metric("Grand Total",format_currency(grand)); st.write(f"**Periode:** {period}")
+    preview_boq_no=generate_boq_ms_number(_next_boq_ms_sequence(),today)
+    pdf=generate_boq_ms_pdf(selected_df.to_dict("records"),preview_boq_no,sn_machine,site_name,charging_type,period,template_name,region,issue_note,[f.getvalue() for f in photos],today)
+    st.download_button("📄 Preview / Download PDF",pdf,file_name="BOQ_MS_PREVIEW.pdf",mime="application/pdf",key=f"ms_preview_pdf{key_suffix}")
+    if st.button("💾 Save BOQ MS",type="primary",key=f"ms_save{key_suffix}"):
+        try:
+            boq_no,period,seq,urls=_save_boq_ms(selected_df.to_dict("records"),sn_machine,site_name,charging_type,template_name,region,issue_note,photos,today)
+            pdf=generate_boq_ms_pdf(selected_df.to_dict("records"),boq_no,sn_machine,site_name,charging_type,period,template_name,region,issue_note,[f.getvalue() for f in photos],today)
+            st.cache_data.clear()
+            st.session_state["boq_ms_last_pdf"]=pdf; st.session_state["boq_ms_last_no"]=boq_no
+            st.session_state["boq_ms_create_reset_no"] = reset_no + 1
+            st.success(f"BOQ MS {boq_no} berhasil disimpan. Form Create BOQ MS dikosongkan kembali.")
+            st.rerun()
+        except Exception as e: st.error(f"Gagal menyimpan BOQ MS: {e}")
+
+def render_boq_ms_edit():
+    st.subheader("✏️ Edit / Re-Download BOQ MS")
+    groups=_get_boq_ms_grouped()
+    if not groups: st.info("Belum ada data pada DB BOQ MS."); return
+    keys=list(groups.keys()); labels=[f"{k} — {groups[k][0]['Site Name']} — {groups[k][0]['Charging Type']}" for k in keys]; label=st.selectbox("Pilih BOQ MS",labels,key="ms_edit_select"); boq_no=keys[labels.index(label)]; records=groups[boq_no]; first=records[0]
+    template_name=template_name_from_db_value(first.get("Template","BOQ BARU")); region=first.get("Region") or "JAVA"; charger=normalize_charger_type(first["Charging Type"])
+    sn=st.text_input("SN Machine",first.get("SN Machine",""),key="ms_edit_sn"); site=st.text_input("Site Name",first.get("Site Name",""),key="ms_edit_site")
+    template_name=st.selectbox("Template",list(TEMPLATE_OPTIONS.keys()),index=list(TEMPLATE_OPTIONS.keys()).index(template_name),key="ms_edit_template")
+    charger=st.selectbox("Charging Type",["6S1P","12S1P","DC20","DC30","DC60"],index=["6S1P","12S1P","DC20","DC30","DC60"].index(charger) if charger in ["6S1P","12S1P","DC20","DC30","DC60"] else 0,key="ms_edit_charger")
+    ropts=["JAVA","SUMATERA","BALI NUSATENGGARA","KALIMANTAN","SULAWESI"]; region=st.selectbox("Region / Island",ropts,index=ropts.index(region) if region in ropts else 0,key="ms_edit_region")
+    issue_note=st.text_area("Issue Note",first.get("Issue Note",""),key="ms_edit_issue_note",height=90)
+    existing_urls=[first.get("Photo Evident 1",""),first.get("Photo Evident 2","")]
+    active_existing=[u for u in existing_urls if u]
+    if active_existing: st.caption("📎 Existing Foto Evident: " + " | ".join(active_existing))
+    new_photos=st.file_uploader("📷 Ganti/Tambah Foto Evident (Maks. 2 Foto)",type=["jpg","jpeg","png","webp"],accept_multiple_files=True,key="ms_edit_photos")
+    if len(new_photos)>2: st.error("❌ Maksimal 2 foto evident."); return
+    df_template, _ms_sheet, _ms_region=load_boq_dataframe(charger,region,template_name)
+    if df_template is None or df_template.empty: return
+    materials=_material_rows_for_ms(df_template); existing_by_name={}
+    for r in records: existing_by_name.setdefault(r["Item Name"],[]).append(r)
+    selected_keys=[int(m["Source Row"]) for _,m in materials.iterrows() if m["Item Name"] in existing_by_name]
+    selected_df=_boq_ms_picker(materials,selected_keys=selected_keys,key=f"boq_ms_edit_picker_{boq_no}")
+    # Restore saved quantities after the picker while preserving the selected rows.
+    for i,r in selected_df.iterrows():
+        matches=existing_by_name.get(r["Item Name"],[])
+        if matches:
+            q=matches[0].get("Qty",0); selected_df.at[i,"Qty"]=q; selected_df.at[i,"Total DPP"]=calculate_detail_total(q,r["Unit Price"])
+    if selected_df.empty: st.warning("Belum ada material yang dipilih."); return
+    total_dpp=float(selected_df["Total DPP"].sum()); vat=total_dpp*0.11; grand=total_dpp+vat
+    c1,c2,c3=st.columns(3); c1.metric("Item",len(selected_df)); c2.metric("DPP",format_currency(total_dpp)); c3.metric("Grand Total",format_currency(grand))
+    try: dt=datetime.datetime.strptime(first.get("Date",""),"%d-%m-%Y")
+    except Exception: dt=datetime.datetime.now()
+    period=_period_text(dt)
+    # Existing evidence is loaded for PDF preview if available. New uploads replace/add to it.
+    photo_bytes=[f.getvalue() for f in new_photos[:2]]
+    if not photo_bytes:
+        for u in active_existing[:2]:
+            b=_download_boq_ms_photo(u)
+            if b: photo_bytes.append(b)
+    pdf=generate_boq_ms_pdf(selected_df.to_dict("records"),boq_no,sn,site,charger,period,template_name,region,issue_note,photo_bytes,dt)
+    a,b=st.columns(2)
+    with a:
+        if st.button("💾 Update BOQ MS",type="primary",key=f"ms_update_{boq_no}"):
+            try:
+                _update_boq_ms(boq_no,selected_df.to_dict("records"),sn,site,charger,template_name,region,issue_note,new_photos,first.get("Date",""),existing_urls)
+                st.cache_data.clear()
+                st.success(f"BOQ MS {boq_no} berhasil di-update."); st.rerun()
+            except Exception as e: st.error(f"Gagal update BOQ MS: {e}")
+    with b: st.download_button("⬇️ Re-Download PDF",pdf,file_name=f"{boq_no.replace('/','-')}.pdf",mime="application/pdf",key=f"ms_redownload_{boq_no}")
+
+def render_boq_ms():
+    st.header("🧰 BOQ MS — Replacement Material")
+    tab1, tab2 = st.tabs(["➕ Create BOQ MS", "✏️ Edit / Re-Download BOQ MS"])
+    with tab1:
+        render_boq_ms_create()
+    with tab2:
+        render_boq_ms_edit()
+
+
+# ==============================================================================
+# MAIN BOQ MANAGER (EXISTING FEATURES)
+# ==============================================================================
+def _render_boq_create():
+    st.subheader("➕ Buat BOQ Baru")
+    if st.session_state.pop("boq_saved_success", False): st.success("BOQ berhasil disimpan.")
+    site_options, site_data_map = fetch_query_site_options(exclude_saved=True)
+    PLACEHOLDER_OPTION="-- Pilih Site Name & Charger --"
+    template_name=st.selectbox("Template yang digunakan",list(TEMPLATE_OPTIONS.keys()),index=1,key="create_boq_template")
+    selected_label=st.selectbox("Pilih Site Name & Charger (Filtered: Drop/Cancel & Saved BOQ Pair Excluded)",[PLACEHOLDER_OPTION]+sorted(site_options),index=0,key="create_site_selector")
+    if selected_label==PLACEHOLDER_OPTION:
+        st.info("💡 Silakan pilih **Site Name & Charger** dari dropdown di atas."); return
+    meta=site_data_map[selected_label]; selected_site=meta.get("Site Name",selected_label)
+    c1,c2=st.columns(2)
+    site_address=c2.text_input("Address (Kolom G)",value=meta.get("Address","-"),key=f"address_{selected_label}")
+    c3,c4,c5=st.columns([1.5,1.5,1])
+    charging_type=c3.text_input("Charging Type (Kolom C)",value=meta.get("Charging Type","DC20"),key=f"charger_{selected_label}")
+
+    # IMPORTANT: Region is derived from the selected site's Province in Query.
+    # It must not be manually changed here, otherwise a Java site can be
+    # accidentally loaded from a NON JAVA template.
+    raw_province = clean_text(meta.get("Province", ""))
+    province = map_to_standard_province(raw_province)
+    c4.text_input(
+        "Region / Island (Auto dari Site)",
+        value=province,
+        disabled=True,
+        key=f"province_auto_{selected_label}",
+    )
+    c5.caption(f"Province Query: `{raw_province or '-'} → {province}`")
+    epc_name=st.text_input("EPC Name (Kolom B)",value=meta.get("EPC Name","-"),key=f"epc_{selected_label}")
+    saved_pairs=get_existing_saved_site_charger_pairs(); pair=(selected_site.strip().lower(),charging_type.strip().lower()); is_already_saved=pair in saved_pairs or selected_site=="-"
+    if is_already_saved and selected_site!="-": st.warning(f"⚠️ Kombinasi Site `{selected_site}` dengan Charger `{charging_type}` sudah pernah dibuatkan BOQ.")
+    df_boq,target_sheet,region_normalized=load_boq_dataframe(charging_type,province,template_name)
+    if df_boq is None or df_boq.empty: return
+    st.subheader(f"2. Table BOQ ({target_sheet} - {region_normalized})")
+    st.caption(f"📑 Template aktif: **{template_name}**")
+    if template_name=="Template BOQ Vgreen Lama":
+        st.info("💡 Khusus **CABLING AND ACCESSORIES INSTALLATION** (Poin 1-3), Qty/Volume dapat diubah. TOTAL PRICE akan otomatis mengikuti Qty × UNIT PRICE.")
+        e_start=False; editable_indices=[]
+        for idx,row in df_boq.iterrows():
+            no=str(row.get("NO","")).strip().upper(); item=str(row.get("Item","")).upper()
+            if "CABLING AND ACCESSORIES" in item or no=="E": e_start=True; continue
+            elif no in ["A","B","C","D","F"]: e_start=False
+            if e_start and no in ["1","2","3"]: editable_indices.append(idx)
+        cols=st.columns(3)
+        for idx in editable_indices:
+            no=str(df_boq.loc[idx,"NO"]); item=str(df_boq.loc[idx,"Item"]); q=parse_qty_num(df_boq.loc[idx,"Unit/Volume"]); target=cols[0 if no=="1" else 1 if no=="2" else 2]
+            with target:
+                nq=st.number_input(f"Qty Poin {no}: {item[:25]}...",min_value=0.0,value=float(q),step=1.0,key=f"qty_e_{no}_{selected_label}_{template_name}")
+                df_boq.loc[idx,"Unit/Volume"]=str(int(nq)) if nq.is_integer() else nq
+                df_boq.loc[idx,"TOTAL PRICE"]=calculate_detail_total(df_boq.loc[idx,"Unit/Volume"],df_boq.loc[idx,"UNIT PRICE"])
+    else:
+        df_boq=edit_boq_sections(df_boq,charging_type,f"create_new_template_{selected_label}_{normalize_charger_type(charging_type)}")
+    df_boq,sub_total,vat_amount,grand_total=recalculate_boq_totals(df_boq)
+    display=df_boq.copy()
+    for c in ["UNIT PRICE","TOTAL PRICE"]: display[c]=display[c].apply(lambda x:format_currency(x) if parse_price(x)!=0 else "-")
+    st.dataframe(display,use_container_width=True,hide_index=True)
+    c1,c2=st.columns([2,1]); c1.success(f"✅ Tabel BOQ Aktif: **{selected_site}** | Tipe Charger: **{charging_type}** | Wilayah: **{region_normalized}**"); c2.metric("Total Contractor Price (Inc. VAT 11%)",format_currency(grand_total))
+    pdf_bytes=generate_boq_pdf(selected_site,site_address,charging_type,region_normalized,df_boq,sub_total,vat_amount,grand_total)
+    safe_site=re.sub(r'[\\/*?:"<>|]','_',str(selected_site)); safe_charger=re.sub(r'[\\/*?:"<>|]','_',str(charging_type)); filename_pdf=f"BOQ_{safe_charger}_{region_normalized}_{safe_site}.pdf"
+    b1,b2=st.columns(2)
+    with b1:
+        if st.button("🚀 Simpan ke Database (DB BOQ)",type="primary",disabled=is_already_saved,key=f"btn_save_boq_{selected_label}_{template_name}"):
+            boq_no=save_to_db_boq(selected_site,charging_type,sub_total,grand_total,epc_name,template_name)
+            if boq_no:
+                update_google_sheet_summary(selected_site,selected_site,sub_total,grand_total); st.cache_data.clear(); st.session_state["last_saved_info"]={"boq_no":boq_no,"site_name":selected_site,"pdf_bytes":pdf_bytes,"filename":filename_pdf}; st.rerun()
+    with b2: st.download_button("📥 Download PDF BOQ (Draft Preview)",pdf_bytes,file_name=filename_pdf,mime="application/pdf",key=f"dl_active_{selected_site}_{template_name}")
+
+def _render_boq_edit():
+    st.subheader("✏️ Edit, Reuse, & Re-Download BOQ Tersimpan")
+    saved_boq_list=get_all_saved_boq()
+    if not saved_boq_list: st.info("ℹ️ Belum ada data BOQ yang tersimpan di `DB BOQ`."); return
+    options={f"{x.get('BOQ No.','-')}: {x.get('Site Name','-')} [{x.get('Charger Type','-')}]":x for x in saved_boq_list}
+    key=st.selectbox("Pilih Nomor BOQ yang Ingin Di-edit / Re-assign / Re-Download",sorted(options),key="edit_boq_selector"); data=options[key]
+    old_site=data.get("Site Name",""); old_charger=data.get("Charger Type",""); stored=data.get("Template",""); template_name=template_name_from_db_value(stored)
+    template_name=st.selectbox("Pilih Template untuk Edit / Re-Download PDF",list(TEMPLATE_OPTIONS.keys()),index=list(TEMPLATE_OPTIONS.keys()).index(template_name),key=f"edit_boq_template_{key}")
+    _,qmap=fetch_query_site_options(exclude_saved=False)
+    meta=next((v for v in qmap.values() if v.get("Site Name","").strip().lower()==old_site.strip().lower() and normalize_charger_type(v.get("Charging Type",""))==normalize_charger_type(old_charger)),{"Address":"-","Province":"JAVA","EPC Name":"-"})
+    site=st.text_input("Site Name",old_site,key=f"edit_site_{key}"); charger=st.text_input("Charger Type",old_charger,key=f"edit_charger_{key}"); epc=st.text_input("EPC Name",data.get("EPC Name","-"),key=f"edit_epc_{key}"); address=st.text_input("Address",meta.get("Address","-"),key=f"edit_address_{key}")
+    raw_province = clean_text(meta.get("Province", ""))
+    province = map_to_standard_province(raw_province)
+    st.text_input("Region / Island (Auto dari Site)",province,disabled=True,key=f"edit_province_auto_{key}")
+    df,target,region=load_boq_dataframe(charger,province,template_name)
+    if df is None or df.empty: return
+    df=edit_boq_sections(df,charger,f"edit_detail_{key}_{template_name}_{charger}"); df,sub,vat,grand=recalculate_boq_totals(df)
+    display=df.copy()
+    for c in ["UNIT PRICE","TOTAL PRICE"]: display[c]=display[c].apply(lambda x:format_currency(x) if parse_price(x)!=0 else "-")
+    st.dataframe(display,use_container_width=True,hide_index=True)
+    c1,c2,c3=st.columns(3); c1.metric("Sub Total / Exc. PPN",format_currency(sub)); c2.metric("PPN 11%",format_currency(vat)); c3.metric("Grand Total / Inc. PPN",format_currency(grand))
+    pdf=generate_boq_pdf(site,address,charger,region,df,sub,vat,grand)
+    a,b=st.columns(2)
+    with a:
+        if st.button("💾 Save & Update BOQ Database",type="primary",key=f"btn_update_boq_{key}"):
+            if update_db_boq_row(data["row_idx"],old_site,site,charger,sub,grand,epc,template_name): st.cache_data.clear(); st.rerun()
+    with b: st.download_button(f"📥 Re-Download PDF BOQ ({data.get('BOQ No.','-')})",pdf,file_name=f"BOQ_{str(data.get('BOQ No.','-')).replace('/','_')}.pdf",mime="application/pdf",key=f"download_edit_{key}_{template_name}")
+
 
 def render():
-
-    st.title(
-        "📝 Quotation & BOQ Manager"
-    )
-
-    tab_create, tab_edit = st.tabs(
-        [
-            "➕ Buat BOQ Baru",
-            "✏️ Edit / Reuse / Re-Download BOQ",
-        ]
-    )
-
-    # ==========================================================================
-    # FETCH SITE
-    # ==========================================================================
-
-    site_options, site_data_map = (
-        fetch_query_site_options(
-            exclude_saved=True
-        )
-    )
-
-    PLACEHOLDER_OPTION = (
-        "-- Pilih Site Name & Charger --"
-    )
-
-    dropdown_options = [
-        PLACEHOLDER_OPTION
-    ] + sorted(
-        list(site_options)
-    )
-
-    # ==========================================================================
-    # TAB CREATE
-    # ==========================================================================
-
+    st.title("📝 Quotation & BOQ Manager")
+    tab_create, tab_edit, tab_ms = st.tabs([
+        "➕ Buat BOQ Baru", "✏️ Edit / Reuse / Re-Download BOQ", "🧰 Create BOQ MS"
+    ])
     with tab_create:
-
-        st.subheader(
-            "1. Informasi Site & Spesifikasi"
-        )
-
-        # ----------------------------------------------------------------------
-        # LAST SAVED
-        # ----------------------------------------------------------------------
-
-        if (
-            "last_saved_info"
-            in st.session_state
-            and st.session_state[
-                "last_saved_info"
-            ]
-        ):
-
-            last_info = (
-                st.session_state[
-                    "last_saved_info"
-                ]
-            )
-
-            st.success(
-                f"🎉 **BOQ Berhasil Disimpan!** "
-                f"Nomor BOQ: "
-                f"`{last_info['boq_no']}` "
-                f"untuk "
-                f"**{last_info['site_name']}**"
-            )
-
-            st.download_button(
-                label=(
-                    "📥 Download PDF BOQ "
-                    "Terakhir Disimpan "
-                    f"({last_info['site_name']})"
-                ),
-                data=last_info[
-                    "pdf_bytes"
-                ],
-                file_name=last_info[
-                    "filename"
-                ],
-                mime="application/pdf",
-                key="btn_download_last_saved",
-            )
-
-            st.markdown("---")
-
-        # ----------------------------------------------------------------------
-        # TEMPLATE
-        # ----------------------------------------------------------------------
-
-        st.markdown(
-            "### 📑 Pilih Template BOQ"
-        )
-
-        template_name = st.selectbox(
-            "Template yang digunakan",
-            list(
-                TEMPLATE_OPTIONS.keys()
-            ),
-            index=1,
-            key="create_boq_template",
-        )
-
-        if (
-            template_name
-            == "New Template BOQ Sept 2026"
-        ):
-
-            st.info(
-                "🆕 Template September 2026 aktif. "
-                "EVCS DC20/DC30/DC60 akan otomatis "
-                "memilih sheet JAVA atau NON JAVA "
-                "berdasarkan Province."
-            )
-
-        else:
-
-            st.caption(
-                "Template lama menggunakan "
-                "struktur sheet dan mapping wilayah "
-                "seperti sebelumnya."
-            )
-
-        # ----------------------------------------------------------------------
-        # SITE
-        # ----------------------------------------------------------------------
-
-        col_s1, col_s2 = st.columns(2)
-
-        with col_s1:
-
-            selected_label = st.selectbox(
-                "Pilih Site Name & Charger "
-                "(Filtered: Drop/Cancel & "
-                "Saved BOQ Pair Excluded)",
-                dropdown_options,
-                index=0,
-                key="create_site_selector",
-            )
-
-        if (
-            selected_label
-            == PLACEHOLDER_OPTION
-        ):
-
-            st.info(
-                "💡 Silakan pilih "
-                "**Site Name & Charger** "
-                "dari dropdown di atas."
-            )
-
-        else:
-
-            current_meta = (
-                site_data_map.get(
-                    selected_label,
-                    {
-                        "site_name": selected_label,
-                        "epc": "-",
-                        "address": "-",
-                        "charger": "-",
-                        "province": "JAVA",
-                        "raw_province": "-",
-                    },
-                )
-            )
-
-            selected_site = (
-                current_meta.get(
-                    "site_name",
-                    selected_label,
-                )
-            )
-
-            with col_s2:
-
-                site_address = st.text_input(
-                    "Address (Kolom G)",
-                    value=current_meta[
-                        "address"
-                    ],
-                    key=(
-                        f"address_"
-                        f"{selected_label}"
-                    ),
-                )
-
-            col_s3, col_s4, col_s5 = (
-                st.columns(
-                    [1.5, 1.5, 1]
-                )
-            )
-
-            with col_s3:
-
-                charging_type = st.text_input(
-                    "Charging Type (Kolom C)",
-                    value=current_meta[
-                        "charger"
-                    ],
-                    key=(
-                        f"charger_"
-                        f"{selected_label}"
-                    ),
-                )
-
-            with col_s4:
-
-                province = st.text_input(
-                    "Province Standar "
-                    "(Kolom I Mapped)",
-                    value=current_meta[
-                        "province"
-                    ],
-                    key=(
-                        f"province_"
-                        f"{selected_label}"
-                    ),
-                )
-
-                st.caption(
-                    "📍 Raw Province Sheet: "
-                    f"`{current_meta.get('raw_province', '-')}`"
-                )
-
-            with col_s5:
-
-                epc_name = st.text_input(
-                    "EPC Name (Kolom B)",
-                    value=current_meta.get(
-                        "epc",
-                        "-",
-                    ),
-                    key=(
-                        f"epc_"
-                        f"{selected_label}"
-                    ),
-                )
-
-            saved_pairs = (
-                get_existing_saved_site_charger_pairs()
-            )
-
-            current_pair_key = (
-                selected_site.strip().lower(),
-                charging_type.strip().lower(),
-            )
-
-            is_already_saved = (
-                current_pair_key
-                in saved_pairs
-                or selected_site == "-"
-            )
-
-            if (
-                is_already_saved
-                and selected_site != "-"
-            ):
-
-                st.warning(
-                    f"⚠️ Kombinasi Site "
-                    f"`{selected_site}` dengan "
-                    f"Charger `{charging_type}` "
-                    "sudah pernah dibuatkan BOQ."
-                )
-
-            # ------------------------------------------------------------------
-            # LOAD TEMPLATE
-            # ------------------------------------------------------------------
-
-            (
-                df_boq,
-                target_sheet,
-                region_normalized,
-            ) = load_boq_dataframe(
-                charging_type,
-                province,
-                template_name,
-            )
-
-            if (
-                df_boq is not None
-                and not df_boq.empty
-            ):
-
-                st.subheader(
-                    f"2. Table BOQ "
-                    f"({target_sheet} - "
-                    f"{region_normalized})"
-                )
-
-                st.caption(
-                    f"📑 Template aktif: "
-                    f"**{template_name}**"
-                )
-
-                # ==================================================================
-                # TEMPLATE BOQ LAMA
-                #
-                # LOGIKA LAMA TETAP DIPERTAHANKAN.
-                #
-                # Hanya CABLING AND ACCESSORIES
-                # INSTALLATION Point 1-3 yang editable.
-                # ==================================================================
-
-                if (
-                    template_name
-                    == "Template BOQ Vgreen Lama"
-                ):
-
-                    st.info(
-                        "💡 Khusus "
-                        "**CABLING AND ACCESSORIES "
-                        "INSTALLATION** "
-                        "(Poin 1-3), Qty/Volume "
-                        "dapat diubah. "
-                        "TOTAL PRICE akan otomatis "
-                        "mengikuti Qty × UNIT PRICE."
-                    )
-
-                    e_start = False
-                    editable_indices = []
-
-                    for idx, row in df_boq.iterrows():
-
-                        no_val = (
-                            str(
-                                row.get(
-                                    "NO",
-                                    "",
-                                )
-                            )
-                            .strip()
-                            .upper()
-                        )
-
-                        item_text = (
-                            str(
-                                row.get(
-                                    "Item",
-                                    "",
-                                )
-                            ).upper()
-                        )
-
-                        if (
-                            "CABLING AND ACCESSORIES"
-                            in item_text
-                            or no_val == "E"
-                        ):
-
-                            e_start = True
-                            continue
-
-                        elif no_val in [
-                            "A",
-                            "B",
-                            "C",
-                            "D",
-                            "F",
-                        ]:
-
-                            e_start = False
-
-                        if (
-                            e_start
-                            and no_val
-                            in [
-                                "1",
-                                "2",
-                                "3",
-                            ]
-                        ):
-
-                            editable_indices.append(
-                                idx
-                            )
-
-                    col_e1, col_e2, col_e3 = (
-                        st.columns(3)
-                    )
-
-                    for idx in editable_indices:
-
-                        no_val = str(
-                            df_boq.loc[
-                                idx,
-                                "NO",
-                            ]
-                        )
-
-                        item_name = str(
-                            df_boq.loc[
-                                idx,
-                                "Item",
-                            ]
-                        )
-
-                        current_qty = (
-                            parse_qty_num(
-                                df_boq.loc[
-                                    idx,
-                                    "Unit/Volume",
-                                ]
-                            )
-                        )
-
-                        col_target = (
-                            col_e1
-                            if no_val == "1"
-                            else (
-                                col_e2
-                                if no_val == "2"
-                                else col_e3
-                            )
-                        )
-
-                        with col_target:
-
-                            new_qty = st.number_input(
-                                (
-                                    f"Qty Poin "
-                                    f"{no_val}: "
-                                    f"{item_name[:25]}..."
-                                ),
-                                min_value=0.0,
-                                value=float(
-                                    current_qty
-                                ),
-                                step=1.0,
-                                key=(
-                                    f"qty_e_"
-                                    f"{no_val}_"
-                                    f"{selected_label}_"
-                                    f"{template_name}"
-                                ),
-                            )
-
-                            df_boq.loc[
-                                idx,
-                                "Unit/Volume",
-                            ] = (
-                                str(
-                                    int(new_qty)
-                                )
-                                if new_qty.is_integer()
-                                else new_qty
-                            )
-
-                            df_boq.loc[
-                                idx,
-                                "TOTAL PRICE",
-                            ] = calculate_detail_total(
-                                df_boq.loc[
-                                    idx,
-                                    "Unit/Volume",
-                                ],
-                                df_boq.loc[
-                                    idx,
-                                    "UNIT PRICE",
-                                ],
-                            )
-
-                # ==================================================================
-                # TEMPLATE BOQ BARU
-                #
-                # PERUBAHAN UTAMA:
-                #
-                # EVCS:
-                #   A + G editable
-                #
-                # BSS:
-                #   A + D editable
-                #
-                # Berlaku untuk:
-                #   DC20
-                #   DC30
-                #   DC60
-                #   DC20 (NON JAVA)
-                #   DC30 (NON JAVA)
-                #   DC60 (NON JAVA)
-                #   6S1P
-                #   12S1P
-                #   12S3P
-                #
-                # TOTAL PRICE tetap readonly.
-                # ==================================================================
-
-                else:
-
-                    normalized_create_charger = (
-                        normalize_charger_type(
-                            charging_type
-                        )
-                    )
-
-                    if normalized_create_charger in [
-                        "DC20",
-                        "DC30",
-                        "DC60",
-                    ]:
-
-                        st.info(
-                            "🆕 **Template BOQ Baru - EVCS**\n\n"
-                            "Point **A dan G** dapat diedit "
-                            "secara penuh. Anda dapat mengubah "
-                            "**Item, Volume, Satuan, MERK, "
-                            "dan UNIT PRICE**. "
-                            "**TOTAL PRICE otomatis dihitung "
-                            "Volume × UNIT PRICE**."
-                        )
-
-                    elif normalized_create_charger in [
-                        "6S1P",
-                        "12S1P",
-                        "12S3P",
-                    ]:
-
-                        st.info(
-                            "🆕 **Template BOQ Baru - BSS**\n\n"
-                            "Point **A dan D** dapat diedit "
-                            "secara penuh. Anda dapat mengubah "
-                            "**Item, Volume, Satuan, MERK, "
-                            "dan UNIT PRICE**. "
-                            "**TOTAL PRICE otomatis dihitung "
-                            "Volume × UNIT PRICE**."
-                        )
-
-                    # --------------------------------------------------------------
-                    # PANGGIL EDITOR KHUSUS TEMPLATE BARU
-                    # --------------------------------------------------------------
-
-                    df_boq = edit_boq_sections(
-                        df_boq,
-                        charging_type,
-                        (
-                            f"create_new_template_"
-                            f"{selected_label}_"
-                            f"{normalized_create_charger}"
-                        ),
-                    )
-
-                # ------------------------------------------------------------------
-                # FINAL AUTO CALCULATION
-                # ------------------------------------------------------------------
-
-                (
-                    df_boq,
-                    sub_total,
-                    vat_amount,
-                    grand_total,
-                ) = recalculate_boq_totals(
-                    df_boq
-                )
-
-                # ------------------------------------------------------------------
-                # DISPLAY
-                # ------------------------------------------------------------------
-
-                display_df = (
-                    df_boq.copy()
-                )
-
-                for c in [
-                    "UNIT PRICE",
-                    "TOTAL PRICE",
-                ]:
-
-                    display_df[c] = (
-                        display_df[c]
-                        .apply(
-                            lambda x:
-                            format_currency(x)
-                            if parse_price(x)
-                            != 0
-                            else "-"
-                        )
-                    )
-
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                st.markdown("---")
-
-                c_res1, c_res2 = (
-                    st.columns(
-                        [2, 1]
-                    )
-                )
-
-                with c_res1:
-
-                    st.success(
-                        f"✅ Tabel BOQ Aktif: "
-                        f"**{selected_site}** | "
-                        f"Tipe Charger: "
-                        f"**{charging_type}** | "
-                        f"Wilayah: "
-                        f"**{region_normalized}**"
-                    )
-
-                    st.caption(
-                        f"Template: "
-                        f"**{template_name}** | "
-                        f"DB Value: "
-                        f"**{template_db_value(template_name)}** | "
-                        f"Sheet: "
-                        f"**{target_sheet}**"
-                    )
-
-                with c_res2:
-
-                    st.metric(
-                        label=(
-                            "Total Contractor Price "
-                            "(Inc. VAT 11%)"
-                        ),
-                        value=format_currency(
-                            grand_total
-                        ),
-                    )
-
-                # ------------------------------------------------------------------
-                # PDF
-                # ------------------------------------------------------------------
-
-                st.subheader(
-                    "3. Action & Generate PDF"
-                )
-
-                col_btn1, col_btn2 = (
-                    st.columns(2)
-                )
-
-                pdf_bytes = (
-                    generate_boq_pdf(
-                        selected_site,
-                        site_address,
-                        charging_type,
-                        region_normalized,
-                        df_boq,
-                        sub_total,
-                        vat_amount,
-                        grand_total,
-                    )
-                )
-
-                safe_site_name = re.sub(
-                    r'[\\/*?:"<>|]',
-                    "_",
-                    str(
-                        selected_site
-                    ),
-                )
-
-                safe_charger = re.sub(
-                    r'[\\/*?:"<>|]',
-                    "_",
-                    str(
-                        charging_type
-                    ),
-                )
-
-                filename_pdf = (
-                    f"BOQ_"
-                    f"{safe_charger}_"
-                    f"{region_normalized}_"
-                    f"{safe_site_name}.pdf"
-                )
-
-                # ------------------------------------------------------------------
-                # SAVE
-                # ------------------------------------------------------------------
-
-                with col_btn1:
-
-                    if st.button(
-                        "🚀 Simpan ke Database (DB BOQ)",
-                        type="primary",
-                        disabled=is_already_saved,
-                        key=(
-                            "btn_save_boq_"
-                            f"{selected_label}_"
-                            f"{template_name}"
-                        ),
-                    ):
-
-                        if is_already_saved:
-
-                            st.error(
-                                "❌ Gagal Simpan! "
-                                "Kombinasi Site + Charger "
-                                "sudah terdaftar."
-                            )
-
-                        else:
-
-                            with st.spinner(
-                                "Memproses penyimpanan..."
-                            ):
-
-                                boq_no = (
-                                    save_to_db_boq(
-                                        selected_site,
-                                        charging_type,
-                                        sub_total,
-                                        grand_total,
-                                        epc_name,
-                                        template_name,
-                                    )
-                                )
-
-                                if boq_no:
-
-                                    update_google_sheet_summary(
-                                        selected_site,
-                                        selected_site,
-                                        sub_total,
-                                        grand_total,
-                                    )
-
-                                    st.cache_data.clear()
-
-                                    st.session_state[
-                                        "last_saved_info"
-                                    ] = {
-                                        "boq_no": boq_no,
-                                        "site_name": selected_site,
-                                        "pdf_bytes": pdf_bytes,
-                                        "filename": filename_pdf,
-                                    }
-
-                                    st.rerun()
-
-                # ------------------------------------------------------------------
-                # DOWNLOAD
-                # ------------------------------------------------------------------
-
-                with col_btn2:
-
-                    st.download_button(
-                        label=(
-                            "📥 Download PDF BOQ "
-                            "(Draft Preview)"
-                        ),
-                        data=pdf_bytes,
-                        file_name=filename_pdf,
-                        mime="application/pdf",
-                        key=(
-                            "dl_active_"
-                            f"{selected_site}_"
-                            f"{template_name}"
-                        ),
-                    )
-
-    # ==========================================================================
-    # TAB EDIT
-    # ==========================================================================
-
+        _render_boq_create()
     with tab_edit:
+        _render_boq_edit()
+    with tab_ms:
+        render_boq_ms()
 
-        st.subheader(
-            "✏️ Edit, Reuse, & "
-            "Re-Download BOQ Tersimpan"
-        )
-
-        saved_boq_list = (
-            get_all_saved_boq()
-        )
-
-        if not saved_boq_list:
-
-            st.info(
-                "ℹ️ Belum ada data BOQ "
-                "yang tersimpan di "
-                "`DB BOQ`."
-            )
-
-        else:
-
-            boq_options = {
-
-                (
-                    f"{item.get('BOQ No.', '-')}: "
-                    f"{item.get('Site Name', '-')} "
-                    f"[{item.get('Charger Type', '-')}]"
-                ): item
-
-                for item in saved_boq_list
-            }
-
-            selected_boq_key = st.selectbox(
-                "Pilih Nomor BOQ yang Ingin "
-                "Di-edit / Re-assign / Re-Download",
-                sorted(
-                    list(
-                        boq_options.keys()
-                    )
-                ),
-                key="edit_boq_selector",
-            )
-
-            selected_data = (
-                boq_options[
-                    selected_boq_key
-                ]
-            )
-
-            st.markdown("---")
-
-            st.caption(
-                f"📌 Editing Row: "
-                f"`{selected_data['row_idx']}` | "
-                f"No. BOQ: "
-                f"`{selected_data.get('BOQ No.', '-')}`"
-            )
-
-            old_site_name = (
-                selected_data.get(
-                    "Site Name",
-                    "",
-                )
-            )
-
-            old_charger_type = (
-                selected_data.get(
-                    "Charger Type",
-                    "",
-                )
-            )
-
-            # ------------------------------------------------------------------
-            # TEMPLATE
-            # ------------------------------------------------------------------
-
-            stored_template_value = (
-                selected_data.get(
-                    "Template",
-                    "",
-                )
-            )
-
-            stored_template_value = (
-                str(
-                    stored_template_value
-                    or ""
-                )
-                .strip()
-                .upper()
-            )
-
-            if (
-                stored_template_value
-                == "BOQ BARU"
-            ):
-
-                default_template_index = 1
-
-            else:
-
-                default_template_index = 0
-
-            st.markdown(
-                "### 📑 Template BOQ"
-            )
-
-            edit_template_name = st.selectbox(
-                "Pilih Template untuk "
-                "Edit / Re-Download PDF",
-                list(
-                    TEMPLATE_OPTIONS.keys()
-                ),
-                index=default_template_index,
-                key=(
-                    f"edit_boq_template_"
-                    f"{selected_boq_key}"
-                ),
-            )
-
-            if stored_template_value:
-
-                st.caption(
-                    f"📌 Template tersimpan di "
-                    f"DB BOQ kolom H: "
-                    f"**{stored_template_value}**"
-                )
-
-            else:
-
-                st.caption(
-                    "ℹ️ BOQ lama belum memiliki "
-                    "record template di kolom H. "
-                    "Template dapat dipilih kembali."
-                )
-
-            # ------------------------------------------------------------------
-            # QUERY SITE
-            # ------------------------------------------------------------------
-
-            all_site_options, all_site_map = (
-                fetch_query_site_options(
-                    exclude_saved=False
-                )
-            )
-
-            matched_meta = next(
-                (
-                    meta
-
-                    for label, meta
-                    in all_site_map.items()
-
-                    if (
-                        meta[
-                            "site_name"
-                        ]
-                        .strip()
-                        .lower()
-                        ==
-                        old_site_name
-                        .strip()
-                        .lower()
-                    )
-
-                    and (
-                        meta[
-                            "charger"
-                        ]
-                        .strip()
-                        .lower()
-                        ==
-                        old_charger_type
-                        .strip()
-                        .lower()
-                    )
-                ),
-                {
-                    "address": "-",
-                    "province": "JAVA",
-                    "epc": "-",
-                },
-            )
-
-            edit_address = matched_meta[
-                "address"
-            ]
-
-            edit_province = matched_meta[
-                "province"
-            ]
-
-            # ------------------------------------------------------------------
-            # BASIC DETAILS
-            # ------------------------------------------------------------------
-
-            col_e1, col_e2 = (
-                st.columns(2)
-            )
-
-            with col_e1:
-
-                use_existing_query_site = (
-                    st.checkbox(
-                        "Ganti/Re-assign dengan "
-                        "Site Aktif dari Sheet Query",
-                        value=False,
-                        key=(
-                            f"use_query_site_"
-                            f"{selected_boq_key}"
-                        ),
-                    )
-                )
-
-                if use_existing_query_site:
-
-                    selected_reassign_label = (
-                        st.selectbox(
-                            "Pilih Site & Charger Pengganti",
-                            sorted(
-                                list(
-                                    all_site_options
-                                )
-                            ),
-                            key=(
-                                f"reassign_site_"
-                                f"{selected_boq_key}"
-                            ),
-                        )
-                    )
-
-                    reassign_meta = (
-                        all_site_map[
-                            selected_reassign_label
-                        ]
-                    )
-
-                    edit_site_name = (
-                        reassign_meta[
-                            "site_name"
-                        ]
-                    )
-
-                    edit_charger_type = (
-                        reassign_meta[
-                            "charger"
-                        ]
-                    )
-
-                    edit_epc_name = (
-                        reassign_meta[
-                            "epc"
-                        ]
-                    )
-
-                    edit_address = (
-                        reassign_meta[
-                            "address"
-                        ]
-                    )
-
-                    edit_province = (
-                        reassign_meta[
-                            "province"
-                        ]
-                    )
-
-                    st.info(
-                        "💡 Menimpa BOQ No. "
-                        f"`{selected_data.get('BOQ No.', '-')}` "
-                        "ke Site Baru: "
-                        f"**{edit_site_name} "
-                        f"({edit_charger_type})**"
-                    )
-
-                else:
-
-                    edit_site_name = (
-                        st.text_input(
-                            "Site Name",
-                            value=old_site_name,
-                            key=(
-                                f"edit_site_"
-                                f"{selected_boq_key}"
-                            ),
-                        )
-                    )
-
-                    edit_charger_type = (
-                        st.text_input(
-                            "Charger Type",
-                            value=old_charger_type,
-                            key=(
-                                f"edit_charger_"
-                                f"{selected_boq_key}"
-                            ),
-                        )
-                    )
-
-                    edit_epc_name = (
-                        st.text_input(
-                            "EPC Name",
-                            value=selected_data.get(
-                                "EPC Name",
-                                "-",
-                            ),
-                            key=(
-                                f"edit_epc_"
-                                f"{selected_boq_key}"
-                            ),
-                        )
-                    )
-
-            with col_e2:
-
-                edit_sub_total_manual = (
-                    parse_price(
-                        selected_data.get(
-                            "BOQ Amount Exc. PPN",
-                            0,
-                        )
-                    )
-                )
-
-                edit_grand_total_manual = (
-                    parse_price(
-                        selected_data.get(
-                            "BOQ Amount inc. PPN",
-                            0,
-                        )
-                    )
-                )
-
-                st.caption(
-                    "Nilai di bawah akan "
-                    "otomatis mengikuti "
-                    "kalkulasi detail template."
-                )
-
-                st.metric(
-                    "DB Sub Total Saat Ini",
-                    format_currency(
-                        edit_sub_total_manual
-                    ),
-                )
-
-                st.metric(
-                    "DB Grand Total Saat Ini",
-                    format_currency(
-                        edit_grand_total_manual
-                    ),
-                )
-
-            # ------------------------------------------------------------------
-            # LOAD SELECTED TEMPLATE
-            # ------------------------------------------------------------------
-
-            (
-                df_boq_edit,
-                target_sheet_edit,
-                reg_norm,
-            ) = load_boq_dataframe(
-                edit_charger_type,
-                edit_province,
-                edit_template_name,
-            )
-
-            if (
-                df_boq_edit is not None
-                and not df_boq_edit.empty
-            ):
-
-                st.markdown("---")
-
-                st.subheader(
-                    "✏️ Edit Detail BOQ"
-                )
-
-                st.caption(
-                    f"Template: "
-                    f"**{edit_template_name}** | "
-                    f"Sheet: "
-                    f"**{target_sheet_edit}** | "
-                    f"Region: "
-                    f"**{reg_norm}**"
-                )
-
-                # ------------------------------------------------------------------
-                # EDIT DETAIL
-                # ------------------------------------------------------------------
-
-                df_boq_edit = (
-                    edit_boq_sections(
-                        df_boq_edit,
-                        edit_charger_type,
-                        (
-                            f"edit_detail_"
-                            f"{selected_boq_key}_"
-                            f"{edit_template_name}_"
-                            f"{edit_charger_type}"
-                        ),
-                    )
-                )
-
-                # ------------------------------------------------------------------
-                # FINAL RECALCULATION
-                # ------------------------------------------------------------------
-
-                (
-                    df_boq_edit,
-                    edit_sub_total,
-                    vat_edit,
-                    edit_grand_total,
-                ) = recalculate_boq_totals(
-                    df_boq_edit
-                )
-
-                st.markdown("---")
-
-                # ------------------------------------------------------------------
-                # PREVIEW TABLE
-                # ------------------------------------------------------------------
-
-                st.subheader(
-                    "👁️ Preview BOQ"
-                )
-
-                display_edit_df = (
-                    df_boq_edit.copy()
-                )
-
-                for c in [
-                    "UNIT PRICE",
-                    "TOTAL PRICE",
-                ]:
-
-                    display_edit_df[c] = (
-                        display_edit_df[c]
-                        .apply(
-                            lambda x:
-                            format_currency(x)
-                            if parse_price(x)
-                            != 0
-                            else "-"
-                        )
-                    )
-
-                st.dataframe(
-                    display_edit_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                # ------------------------------------------------------------------
-                # SUMMARY
-                # ------------------------------------------------------------------
-
-                summary_c1, summary_c2, summary_c3 = (
-                    st.columns(3)
-                )
-
-                with summary_c1:
-
-                    st.metric(
-                        "Sub Total / Exc. PPN",
-                        format_currency(
-                            edit_sub_total
-                        ),
-                    )
-
-                with summary_c2:
-
-                    st.metric(
-                        "PPN 11%",
-                        format_currency(
-                            vat_edit
-                        ),
-                    )
-
-                with summary_c3:
-
-                    st.metric(
-                        "Grand Total / Inc. PPN",
-                        format_currency(
-                            edit_grand_total
-                        ),
-                    )
-
-                # ------------------------------------------------------------------
-                # ACTION
-                # ------------------------------------------------------------------
-
-                st.markdown("---")
-
-                col_act1, col_act2 = (
-                    st.columns(2)
-                )
-
-                # ------------------------------------------------------------------
-                # SAVE UPDATE
-                # ------------------------------------------------------------------
-
-                with col_act1:
-
-                    if st.button(
-                        "💾 Save & Update BOQ Database",
-                        type="primary",
-                        key=(
-                            f"btn_update_boq_"
-                            f"{selected_boq_key}"
-                        ),
-                    ):
-
-                        with st.spinner(
-                            "Memperbarui DB BOQ "
-                            "& Sum Project..."
-                        ):
-
-                            success = (
-                                update_db_boq_row(
-                                    row_idx=selected_data[
-                                        "row_idx"
-                                    ],
-                                    old_site_name=(
-                                        old_site_name
-                                    ),
-                                    new_site_name=(
-                                        edit_site_name
-                                    ),
-                                    charger_capacity=(
-                                        edit_charger_type
-                                    ),
-                                    sub_total=(
-                                        edit_sub_total
-                                    ),
-                                    grand_total=(
-                                        edit_grand_total
-                                    ),
-                                    epc_name=(
-                                        edit_epc_name
-                                    ),
-                                    template_name=(
-                                        edit_template_name
-                                    ),
-                                )
-                            )
-
-                            if success:
-
-                                st.cache_data.clear()
-
-                                st.success(
-                                    f"🎉 BOQ "
-                                    f"`{selected_data.get('BOQ No.', '-')}` "
-                                    "berhasil diperbarui."
-                                )
-
-                                st.rerun()
-
-                # ------------------------------------------------------------------
-                # RE-DOWNLOAD PDF
-                # ------------------------------------------------------------------
-
-                with col_act2:
-
-                    pdf_bytes_edit = (
-                        generate_boq_pdf(
-                            edit_site_name,
-                            edit_address,
-                            edit_charger_type,
-                            reg_norm,
-                            df_boq_edit,
-                            edit_sub_total,
-                            vat_edit,
-                            edit_grand_total,
-                        )
-                    )
-
-                    safe_edit_site = re.sub(
-                        r'[\\/*?:"<>|]',
-                        "_",
-                        str(
-                            edit_site_name
-                        ),
-                    )
-
-                    safe_edit_charger = re.sub(
-                        r'[\\/*?:"<>|]',
-                        "_",
-                        str(
-                            edit_charger_type
-                        ),
-                    )
-
-                    safe_boq_no = re.sub(
-                        r'[\\/*?:"<>|]',
-                        "_",
-                        str(
-                            selected_data.get(
-                                "BOQ No.",
-                                "",
-                            )
-                        ),
-                    )
-
-                    st.download_button(
-                        label=(
-                            "📥 Re-Download PDF BOQ "
-                            f"({selected_data.get('BOQ No.', '-')})"
-                        ),
-                        data=pdf_bytes_edit,
-                        file_name=(
-                            f"BOQ_"
-                            f"{safe_boq_no}_"
-                            f"{safe_edit_site}_"
-                            f"{safe_edit_charger}.pdf"
-                        ),
-                        mime="application/pdf",
-                        key=(
-                            f"download_edit_"
-                            f"{selected_boq_key}_"
-                            f"{edit_template_name}"
-                        ),
-                    )
-
-
-# ==============================================================================
-# RUN
-# ==============================================================================
 
 if __name__ == "__main__":
     render()
