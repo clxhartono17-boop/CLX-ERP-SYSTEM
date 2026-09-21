@@ -1,4 +1,4 @@
-
+import datetime
 import io
 import os
 from typing import List
@@ -11,11 +11,6 @@ from reportlab.lib.pagesizes import letter, portrait
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
-
-try:
-    from PIL import Image as PILImage
-except Exception:
-    PILImage = None
 from reportlab.platypus import (
     Image,
     KeepTogether,
@@ -55,145 +50,43 @@ CACHE_TTL_SHEET = 120
 COO_SIGNATURE_RELATIVE_PATH = os.path.join(
     "assets",
     "templates",
-    "Approved COO.jpg",
+    "Approved COO.png",
 )
 
 def get_coo_signature_path():
-    """Return the configured COO signature path.
-
-    The original JPG path is kept as the primary path so the existing
-    deployment structure is unchanged. PNG/JPEG alternatives are also
-    accepted if a transparent version is later added to the same folder.
-    """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    configured = os.path.join(
-        base_dir,
-        COO_SIGNATURE_RELATIVE_PATH,
-    )
-
     candidates = [
-        configured,
+        COO_SIGNATURE_RELATIVE_PATH,
         os.path.join(
-            base_dir,
-            "assets",
-            "templates",
-            "Approved COO.png",
-        ),
-        os.path.join(
-            base_dir,
-            "assets",
-            "templates",
-            "Approved COO.jpeg",
+            os.path.dirname(os.path.abspath(__file__)),
+            COO_SIGNATURE_RELATIVE_PATH,
         ),
     ]
-
     for path in candidates:
         if os.path.exists(path):
             return path
-
-    return configured
-
-
-def _make_coo_signature_transparent_png(signature_path):
-    """
-    Convert the existing COO JPG signature into an in-memory PNG with
-    transparent low-saturation background.
-
-    This specifically prevents a checkerboard/gray transparency grid that
-    may already be embedded in the JPG from being printed into the PDF.
-    The signature itself is normally blue, so the blue pixels are retained.
-    """
-    if PILImage is None:
-        return None
-
-    try:
-        with PILImage.open(signature_path) as source:
-            image = source.convert("RGBA")
-
-        pixels = image.load()
-        width, height = image.size
-
-        for y in range(height):
-            for x in range(width):
-                r, g, b, a = pixels[x, y]
-
-                # Bright/neutral pixels are background (white or checkerboard).
-                maximum = max(r, g, b)
-                minimum = min(r, g, b)
-                saturation_range = maximum - minimum
-
-                # Preserve the blue ink of the COO signature.
-                is_blue_ink = (
-                    b > r + 18
-                    and b > g + 5
-                )
-
-                # Remove white / light gray / checkerboard pixels.
-                is_neutral_background = (
-                    saturation_range <= 32
-                    and maximum >= 105
-                )
-
-                if is_neutral_background and not is_blue_ink:
-                    pixels[x, y] = (r, g, b, 0)
-
-        # Crop transparent outer whitespace so the signature occupies the
-        # available signature area more naturally.
-        alpha = image.getchannel("A")
-        bbox = alpha.getbbox()
-        if bbox:
-            image = image.crop(bbox)
-
-        output = io.BytesIO()
-        image.save(output, format="PNG")
-        output.seek(0)
-        return output
-
-    except Exception:
-        return None
-
+    return candidates[-1]
 
 def build_coo_signature_image(
     width=1.8 * inch,
     max_height=0.70 * inch,
 ):
     signature_path = get_coo_signature_path()
-
     if not os.path.exists(signature_path):
         return None
-
     try:
-        # Prefer a cleaned transparent PNG for the configured JPG so that
-        # checkerboard transparency grids never appear in the final PDF.
-        cleaned_png = _make_coo_signature_transparent_png(
-            signature_path
-        )
-
-        image_source = (
-            cleaned_png
-            if cleaned_png is not None
-            else signature_path
-        )
-
-        image_reader = ImageReader(image_source)
+        image_reader = ImageReader(signature_path)
         image_width, image_height = image_reader.getSize()
-
         if image_width <= 0 or image_height <= 0:
             return None
-
-        display_width = width
-        display_height = display_width * (image_height / image_width)
-
-        if display_height > max_height:
-            display_height = max_height
-            display_width = display_height * (image_width / image_height)
-
+        height = width * (image_height / image_width)
+        if height > max_height:
+            height = max_height
+            width = height * (image_width / image_height)
         return Image(
-            image_source,
-            width=display_width,
-            height=display_height,
+            signature_path,
+            width=width,
+            height=height,
         )
-
     except Exception:
         return None
 
@@ -648,7 +541,7 @@ def generate_spk_number(
     sow_type="GENERAL",
     sequence_num=1,
 ):
-    now = dt_module.datetime.now()
+    now = datetime.datetime.now()
 
     roman_months = [
         "I",
@@ -693,7 +586,7 @@ def generate_spk_number(
 def generate_ms_number(
     sequence_num=1,
 ):
-    now = dt_module.datetime.now()
+    now = datetime.datetime.now()
 
     roman_months = [
         "I",
@@ -1152,7 +1045,7 @@ def generate_spk_pdf_bytes(
         "-",
     )
 
-    date_str = dt_module.datetime.now().strftime(
+    date_str = datetime.datetime.now().strftime(
         "%d %B %Y"
     )
 
@@ -1827,7 +1720,7 @@ def generate_ms_pdf_bytes(
     date_str = safe_str(
         spk_metadata.get(
             "date_spk",
-            dt_module.datetime.now().strftime(
+            datetime.datetime.now().strftime(
                 "%d/%m/%Y"
             ),
         ),
@@ -2178,220 +2071,6 @@ def generate_ms_pdf_bytes(
 # RECREATE PROJECT PDF FROM DATABASE
 # ==============================================================================
 
-def _normalize_match_value(value):
-    """Normalize values used when reconstructing site data from Query."""
-    text = safe_str(value, "")
-    text = " ".join(text.split())
-    return text.strip().lower()
-
-
-def _get_query_site_columns(df_query):
-    """
-    Resolve Query columns using the same positional mapping already used by
-    Create SPK Project. This preserves the existing Query sheet logic.
-
-    Existing mapping:
-      Column index 2 -> Charging Type
-      Column index 5 -> Site Name
-      Column index 7 -> Gmaps
-      Column index 8 -> Province
-      Column index 10 -> PIC + Contact
-    """
-    if df_query is None or df_query.empty:
-        return None
-
-    def get_col(index):
-        if df_query.shape[1] > index:
-            return df_query.columns[index]
-        return None
-
-    return {
-        "charge": get_col(2),
-        "site": get_col(5),
-        "gmaps": get_col(7),
-        "province": get_col(8),
-        "pic": get_col(10),
-    }
-
-
-def _restore_project_site_details_from_query(
-    selected_sites,
-    selected_wo,
-    sow_type="",
-):
-    """
-    Restore Province, PIC + Contact and Gmaps from Query for an Approved PDF.
-
-    The DB SPK structure is intentionally not changed. The function only
-    reconstructs the display fields at PDF-generation time, using the same
-    Query column positions already used by the original Create SPK form.
-    """
-    if selected_sites is None or selected_sites.empty:
-        return selected_sites
-
-    restored = selected_sites.copy()
-
-    # Keep existing values if they are already present.
-    for column in [
-        "col_province",
-        "col_pic",
-        "col_gmaps",
-    ]:
-        if column not in restored.columns:
-            restored[column] = "-"
-
-    try:
-        query_rows = load_sheet_values_cached(
-            SHEET_QUERY
-        )
-
-        if not query_rows or len(query_rows) <= 1:
-            return restored
-
-        df_query = dataframe_from_sheet_rows(
-            query_rows
-        )
-
-        if df_query.empty:
-            return restored
-
-        columns = _get_query_site_columns(
-            df_query
-        )
-
-        if not columns:
-            return restored
-
-        query_site_col = columns.get("site")
-        query_charge_col = columns.get("charge")
-        query_gmaps_col = columns.get("gmaps")
-        query_province_col = columns.get("province")
-        query_pic_col = columns.get("pic")
-
-        if not query_site_col:
-            return restored
-
-        query_work = df_query.copy()
-
-        query_work["__site_key"] = query_work[
-            query_site_col
-        ].map(_normalize_match_value)
-
-        if query_charge_col:
-            query_work["__charge_key"] = query_work[
-                query_charge_col
-            ].map(_normalize_match_value)
-        else:
-            query_work["__charge_key"] = ""
-
-        # Use the same dynamic WO-column logic as Create SPK Project:
-        # Survey -> Query column L (zero-based index 11)
-        # Construction -> Query column W (zero-based index 22)
-        query_wo_col = None
-        query_wo_col_idx = get_wo_column_index(
-            sow_type
-        )
-
-        if (
-            query_wo_col_idx is not None
-            and df_query.shape[1] > query_wo_col_idx
-        ):
-            query_wo_col = df_query.columns[
-                query_wo_col_idx
-            ]
-
-        wo_key = _normalize_match_value(
-            selected_wo
-        )
-
-        for row_index, (_, db_row) in enumerate(
-            restored.iterrows()
-        ):
-            site_key = _normalize_match_value(
-                db_row.get("col_site", "")
-            )
-            charge_key = _normalize_match_value(
-                db_row.get("col_charge", "")
-            )
-
-            if not site_key:
-                continue
-
-            candidates = query_work[
-                query_work["__site_key"] == site_key
-            ]
-
-            if charge_key and not candidates.empty:
-                charge_matches = candidates[
-                    candidates["__charge_key"] == charge_key
-                ]
-                if not charge_matches.empty:
-                    candidates = charge_matches
-
-            if query_wo_col and wo_key and not candidates.empty:
-                wo_matches = candidates[
-                    candidates[query_wo_col]
-                    .map(_normalize_match_value)
-                    == wo_key
-                ]
-                if not wo_matches.empty:
-                    candidates = wo_matches
-
-            if candidates.empty:
-                continue
-
-            matched_query_row = candidates.iloc[0]
-
-            if query_province_col:
-                province = safe_str(
-                    matched_query_row.get(
-                        query_province_col,
-                        "-",
-                    ),
-                    "-",
-                )
-                if province:
-                    restored.at[
-                        row_index,
-                        "col_province",
-                    ] = province
-
-            if query_pic_col:
-                pic = safe_str(
-                    matched_query_row.get(
-                        query_pic_col,
-                        "-",
-                    ),
-                    "-",
-                )
-                if pic:
-                    restored.at[
-                        row_index,
-                        "col_pic",
-                    ] = pic
-
-            if query_gmaps_col:
-                gmaps = safe_str(
-                    matched_query_row.get(
-                        query_gmaps_col,
-                        "-",
-                    ),
-                    "-",
-                )
-                if gmaps:
-                    restored.at[
-                        row_index,
-                        "col_gmaps",
-                    ] = gmaps
-
-    except Exception:
-        # PDF generation must remain backward-compatible even if Query is
-        # temporarily unavailable. Existing DB data is retained.
-        return restored
-
-    return restored
-
-
 def generate_project_pdf_from_database(
     df_project,
     selected_spk,
@@ -2488,30 +2167,30 @@ def generate_project_pdf_from_database(
         fallback=None,
     )
 
+    col_province = None
+    col_pic = None
+
     selected_sites = pd.DataFrame()
 
     if col_site:
 
-        selected_sites["col_site"] = matched[
-            col_site
-        ]
+        selected_sites["col_site"] = (
+            matched[col_site]
+        )
 
         if col_charge:
-            selected_sites["col_charge"] = matched[
-                col_charge
-            ]
+            selected_sites["col_charge"] = (
+                matched[col_charge]
+            )
         else:
             selected_sites["col_charge"] = "-"
 
-        # These fields are reconstructed from Query below.
         selected_sites["col_province"] = "-"
 
-        # Preserve the existing DB value if present, otherwise restore from
-        # Query. The old DB normally contains the Mitra in this column.
-        if col_mitra:
-            selected_sites["col_pic"] = matched[
-                col_mitra
-            ]
+        if col_pic:
+            selected_sites["col_pic"] = (
+                matched[col_pic]
+            )
         else:
             selected_sites["col_pic"] = "-"
 
@@ -2523,19 +2202,6 @@ def generate_project_pdf_from_database(
         )
         if col_wo
         else ""
-    )
-
-    # Reconstruct the site display information from Query. This fixes the
-    # Approved PDF without changing the existing DB structure or Create SPK
-    # workflow.
-    selected_sites = _restore_project_site_details_from_query(
-        selected_sites,
-        selected_wo,
-        sow_type=(
-            safe_str(first_row[col_sow])
-            if col_sow
-            else "Construction"
-        ),
     )
 
     pekerjaan = (
@@ -2567,7 +2233,7 @@ def generate_project_pdf_from_database(
             first_row[col_date]
         )
         if col_date
-        else dt_module.datetime.now().strftime(
+        else datetime.datetime.now().strftime(
             "%d/%m/%Y"
         )
     )
@@ -2680,7 +2346,7 @@ def generate_ms_pdf_from_database(
     date_spk = (
         safe_str(row[col_date])
         if col_date
-        else dt_module.datetime.now().strftime(
+        else datetime.datetime.now().strftime(
             "%d/%m/%Y"
         )
     )
@@ -3481,7 +3147,7 @@ def show_spk_page():
                                 matched_sow_df,
                             )
 
-                            now = dt_module.datetime.now()
+                            now = datetime.datetime.now()
 
                             current_date_str = (
                                 now.strftime(
@@ -3615,14 +3281,14 @@ def show_spk_page():
 
                 periode_start = st.date_input(
                     "Periode Start",
-                    value=dt_module.date.today(),
+                    value=datetime.date.today(),
                     key="ms_period_start",
                     format="DD/MM/YYYY",
                 )
 
                 periode_end = st.date_input(
                     "Periode End",
-                    value=dt_module.date.today(),
+                    value=datetime.date.today(),
                     key="ms_period_end",
                     format="DD/MM/YYYY",
                 )
@@ -3725,7 +3391,7 @@ def show_spk_page():
                 )
 
                 preview_date = (
-                    dt_module.datetime.now().strftime(
+                    datetime.datetime.now().strftime(
                         "%d/%m/%Y"
                     )
                 )
@@ -3827,7 +3493,7 @@ def show_spk_page():
                             )
                         )
 
-                        now = dt_module.datetime.now()
+                        now = datetime.datetime.now()
 
                         current_date_str = (
                             now.strftime(
@@ -4166,7 +3832,7 @@ def show_spk_page():
                     with col_to4:
 
                         today_date_str = (
-                            dt_module.datetime.now()
+                            datetime.datetime.now()
                             .strftime(
                                 "%d/%m/%Y"
                             )
