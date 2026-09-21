@@ -50,7 +50,7 @@ CACHE_TTL_SHEET = 120
 COO_SIGNATURE_RELATIVE_PATH = os.path.join(
     "assets",
     "templates",
-    "Approved COO.jpg",
+    "Approved COO.png",
 )
 
 def get_coo_signature_path():
