@@ -10,6 +10,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, portrait
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     Image,
     KeepTogether,
@@ -42,6 +43,52 @@ STATUS_APPROVED = "Approved by COO"
 STATUS_REJECTED = "Rejected by COO"
 
 CACHE_TTL_SHEET = 120
+
+# ------------------------------------------------------------------------------
+# COO DIGITAL SIGNATURE
+# ------------------------------------------------------------------------------
+COO_SIGNATURE_RELATIVE_PATH = os.path.join(
+    "assets",
+    "templates",
+    "Approved COO.jpg",
+)
+
+def get_coo_signature_path():
+    candidates = [
+        COO_SIGNATURE_RELATIVE_PATH,
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            COO_SIGNATURE_RELATIVE_PATH,
+        ),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[-1]
+
+def build_coo_signature_image(
+    width=1.8 * inch,
+    max_height=0.70 * inch,
+):
+    signature_path = get_coo_signature_path()
+    if not os.path.exists(signature_path):
+        return None
+    try:
+        image_reader = ImageReader(signature_path)
+        image_width, image_height = image_reader.getSize()
+        if image_width <= 0 or image_height <= 0:
+            return None
+        height = width * (image_height / image_width)
+        if height > max_height:
+            height = max_height
+            width = height * (image_width / image_height)
+        return Image(
+            signature_path,
+            width=width,
+            height=height,
+        )
+    except Exception:
+        return None
 
 
 # ==============================================================================
@@ -960,6 +1007,7 @@ def generate_spk_pdf_bytes(
     selected_sites,
     spk_metadata,
     matched_sow_df,
+    approved=False,
 ):
     buffer = io.BytesIO()
 
@@ -1505,6 +1553,12 @@ def generate_spk_pdf_bytes(
         alignment=1,
     )
 
+    coo_signature = (
+        build_coo_signature_image()
+        if approved
+        else None
+    )
+
     sign_data = [
         [
             Paragraph(
@@ -1519,7 +1573,7 @@ def generate_spk_pdf_bytes(
         ],
         [
             Spacer(1, 35),
-            Spacer(1, 35),
+            coo_signature if coo_signature is not None else Spacer(1, 35),
         ],
         [
             Paragraph(
@@ -1582,6 +1636,7 @@ def generate_spk_pdf_bytes(
 
 def generate_ms_pdf_bytes(
     spk_metadata,
+    approved=False,
 ):
     buffer = io.BytesIO()
 
@@ -1936,6 +1991,12 @@ def generate_ms_pdf_bytes(
         alignment=1,
     )
 
+    coo_signature = (
+        build_coo_signature_image()
+        if approved
+        else None
+    )
+
     sign_data = [
         [
             Paragraph(
@@ -1950,7 +2011,7 @@ def generate_ms_pdf_bytes(
         ],
         [
             Spacer(1, 45),
-            Spacer(1, 45),
+            coo_signature if coo_signature is not None else Spacer(1, 45),
         ],
         [
             Paragraph(
@@ -2013,6 +2074,7 @@ def generate_ms_pdf_bytes(
 def generate_project_pdf_from_database(
     df_project,
     selected_spk,
+    approved=False,
 ):
     if df_project is None or df_project.empty:
         return None, None
@@ -2195,6 +2257,7 @@ def generate_project_pdf_from_database(
         selected_sites,
         spk_metadata,
         pd.DataFrame(),
+        approved=approved,
     )
 
     return no_spk, pdf_bytes
@@ -2207,6 +2270,7 @@ def generate_project_pdf_from_database(
 def generate_ms_pdf_from_database(
     df_ms,
     selected_spk,
+    approved=False,
 ):
     if df_ms is None or df_ms.empty:
         return None, None
@@ -2327,7 +2391,8 @@ def generate_ms_pdf_from_database(
         no_spk,
         pdf_bytes,
     ) = generate_ms_pdf_bytes(
-        spk_metadata
+        spk_metadata,
+        approved=approved,
     )
 
     return no_spk, pdf_bytes
@@ -4578,6 +4643,7 @@ def show_spk_page():
                                             generate_project_pdf_from_database(
                                                 df_download,
                                                 selected_download_spk,
+                                                approved=True,
                                             )
                                         )
 
@@ -4753,6 +4819,7 @@ def show_spk_page():
                                             generate_ms_pdf_from_database(
                                                 df_download,
                                                 selected_download_spk,
+                                                approved=True,
                                             )
                                         )
 
