@@ -648,7 +648,7 @@ def generate_spk_number(
     sow_type="GENERAL",
     sequence_num=1,
 ):
-    now = datetime.datetime.now()
+    now = dt_module.datetime.now()
 
     roman_months = [
         "I",
@@ -693,7 +693,7 @@ def generate_spk_number(
 def generate_ms_number(
     sequence_num=1,
 ):
-    now = datetime.datetime.now()
+    now = dt_module.datetime.now()
 
     roman_months = [
         "I",
@@ -1152,7 +1152,7 @@ def generate_spk_pdf_bytes(
         "-",
     )
 
-    date_str = datetime.datetime.now().strftime(
+    date_str = dt_module.datetime.now().strftime(
         "%d %B %Y"
     )
 
@@ -1827,7 +1827,7 @@ def generate_ms_pdf_bytes(
     date_str = safe_str(
         spk_metadata.get(
             "date_spk",
-            datetime.datetime.now().strftime(
+            dt_module.datetime.now().strftime(
                 "%d/%m/%Y"
             ),
         ),
@@ -2567,7 +2567,7 @@ def generate_project_pdf_from_database(
             first_row[col_date]
         )
         if col_date
-        else datetime.datetime.now().strftime(
+        else dt_module.datetime.now().strftime(
             "%d/%m/%Y"
         )
     )
@@ -2680,7 +2680,7 @@ def generate_ms_pdf_from_database(
     date_spk = (
         safe_str(row[col_date])
         if col_date
-        else datetime.datetime.now().strftime(
+        else dt_module.datetime.now().strftime(
             "%d/%m/%Y"
         )
     )
@@ -3481,7 +3481,7 @@ def show_spk_page():
                                 matched_sow_df,
                             )
 
-                            now = datetime.datetime.now()
+                            now = dt_module.datetime.now()
 
                             current_date_str = (
                                 now.strftime(
@@ -3615,14 +3615,14 @@ def show_spk_page():
 
                 periode_start = st.date_input(
                     "Periode Start",
-                    value=datetime.date.today(),
+                    value=dt_module.date.today(),
                     key="ms_period_start",
                     format="DD/MM/YYYY",
                 )
 
                 periode_end = st.date_input(
                     "Periode End",
-                    value=datetime.date.today(),
+                    value=dt_module.date.today(),
                     key="ms_period_end",
                     format="DD/MM/YYYY",
                 )
@@ -3725,7 +3725,7 @@ def show_spk_page():
                 )
 
                 preview_date = (
-                    datetime.datetime.now().strftime(
+                    dt_module.datetime.now().strftime(
                         "%d/%m/%Y"
                     )
                 )
@@ -3827,7 +3827,7 @@ def show_spk_page():
                             )
                         )
 
-                        now = datetime.datetime.now()
+                        now = dt_module.datetime.now()
 
                         current_date_str = (
                             now.strftime(
@@ -4166,7 +4166,7 @@ def show_spk_page():
                     with col_to4:
 
                         today_date_str = (
-                            datetime.datetime.now()
+                            dt_module.datetime.now()
                             .strftime(
                                 "%d/%m/%Y"
                             )
