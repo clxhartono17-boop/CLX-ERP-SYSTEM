@@ -496,36 +496,162 @@ def get_wo_column_index(sow_type):
     return None
 
 
+def _looks_like_wo(value):
+    """Return True when a cell looks like a real Work Order number."""
+    text = safe_str(value).strip()
+    if not text or is_sheet_error_value(text):
+        return False
+
+    upper = text.upper()
+    if upper in {"NAN", "NONE", "-"}:
+        return False
+
+    # Current CLX WO examples use forms such as VGID-WO/BD/2026/IX/0313.
+    # Keep this intentionally flexible so other valid WO formats are accepted.
+    return (
+        "WO" in upper
+        and "/" in text
+        and len(text) >= 8
+    )
+
+
+def _wo_column_score(series, header, physical_index, expected_index):
+    """Score a Query column using header + actual cell contents."""
+    try:
+        values = series.tolist()
+    except Exception:
+        return -1
+
+    valid_count = sum(1 for value in values if _looks_like_wo(value))
+    if valid_count == 0:
+        return -1
+
+    header_text = normalize_header(header).lower()
+    score = valid_count * 100
+
+    # Strong preference for an explicitly named WO header.
+    if "wo" in header_text:
+        score += 1000
+        if "cons" in header_text or "construct" in header_text:
+            score += 250
+        if "survey" in header_text:
+            score += 250
+
+    # If the current Query layout is unchanged, prefer W for Cons / L for Survey.
+    if physical_index == expected_index:
+        score += 500
+
+    return score
+
+
 def get_query_wo_column(df_query, sow_type):
-    """Find the correct WO column by header, with L/W fallback."""
+    """
+    Detect the actual WO column safely.
+
+    Important: do NOT use fuzzy matching for generic headers such as `No`.
+    A previous implementation could match `No` against `No. WO Cons` and
+    accidentally select the first `No` column. We now validate the column
+    contents and prefer the legacy L/W position only when it contains real WO
+    values.
+    """
     if df_query is None or df_query.empty:
         return None
 
     category = get_sow_category(sow_type)
     if category == "SURVEY":
-        candidates = [
-            "WO Survey", "WO Number Survey", "No. WO Survey",
-            "No WO Survey", "WO Survey Number", "Nomor WO Survey",
-            "No. WO", "No WO", "WO Number", "Nomor WO",
-            "L", "Column L",
+        header_candidates = [
+            "WO Survey",
+            "WO Number Survey",
+            "No. WO Survey",
+            "No WO Survey",
+            "WO Survey Number",
+            "Nomor WO Survey",
+            "No. WO",
+            "No WO",
+            "WO Number",
+            "Nomor WO",
         ]
+        expected_index = 11  # L
     elif category == "CONS":
-        candidates = [
-            "WO Cons", "WO Construction", "WO Construct",
-            "WO Number Cons", "No. WO Cons", "No WO Cons",
-            "WO Cons Number", "Nomor WO Cons", "No. WO",
-            "No WO", "WO Number", "Nomor WO", "W", "Column W",
+        header_candidates = [
+            "WO Cons",
+            "WO Construction",
+            "WO Construct",
+            "WO Number Cons",
+            "No. WO Cons",
+            "No WO Cons",
+            "WO Cons Number",
+            "Nomor WO Cons",
+            "No. WO",
+            "No WO",
+            "WO Number",
+            "Nomor WO",
         ]
+        expected_index = 22  # W
     else:
         return None
 
-    detected = find_column(df_query, candidates, fallback=None)
-    if detected is not None:
-        return detected
+    # ------------------------------------------------------------------
+    # 1. Exact header match ONLY. Never use substring/fuzzy matching here.
+    # ------------------------------------------------------------------
+    normalized_headers = {
+        normalize_header(col).strip().lower(): idx
+        for idx, col in enumerate(df_query.columns)
+    }
 
-    legacy_idx = get_wo_column_index(sow_type)
-    if legacy_idx is not None and df_query.shape[1] > legacy_idx:
-        return df_query.columns[legacy_idx]
+    for candidate in header_candidates:
+        idx = normalized_headers.get(
+            normalize_header(candidate).strip().lower()
+        )
+        if idx is not None:
+            try:
+                if any(
+                    _looks_like_wo(value)
+                    for value in df_query.iloc[:, idx].tolist()
+                ):
+                    return idx
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # 2. Legacy physical position (L/W), but ONLY if it contains WO data.
+    #    This is important when the actual header in Query is simply `No`.
+    # ------------------------------------------------------------------
+    if df_query.shape[1] > expected_index:
+        try:
+            legacy_series = df_query.iloc[:, expected_index]
+            if any(
+                _looks_like_wo(value)
+                for value in legacy_series.tolist()
+            ):
+                return expected_index
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 3. Last resort: scan every column by actual WO content.
+    #    This handles inserted/reordered columns without relying on headers.
+    # ------------------------------------------------------------------
+    best_idx = None
+    best_score = -1
+
+    for idx, col in enumerate(df_query.columns):
+        try:
+            score = _wo_column_score(
+                df_query.iloc[:, idx],
+                col,
+                idx,
+                expected_index,
+            )
+        except Exception:
+            continue
+
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+
+    if best_idx is not None:
+        return best_idx
 
     return None
 
@@ -2647,7 +2773,7 @@ def show_spk_page():
 
                     if target_wo_col is not None:
                         raw_wos = (
-                            df_query[target_wo_col]
+                            df_query.iloc[:, target_wo_col]
                             .fillna("")
                             .astype(str)
                             .str.strip()
@@ -2691,9 +2817,15 @@ def show_spk_page():
                             "dan fallback kolom lama (L/W)."
                         )
                     elif not wo_list:
+                        detected_wo_header = (
+                            df_query.columns[target_wo_col]
+                            if isinstance(target_wo_col, int)
+                            and target_wo_col < len(df_query.columns)
+                            else target_wo_col
+                        )
                         st.warning(
-                            f"⚠️ Kolom WO terdeteksi sebagai `{target_wo_col}`, "
-                            "tetapi tidak ada nomor WO yang valid. "
+                            f"⚠️ Kolom WO terdeteksi sebagai `{detected_wo_header}` "
+                            f"(index {target_wo_col}), tetapi tidak ada nomor WO yang valid. "
                             "Nilai error Google Sheets seperti #VALUE!, #REF!, "
                             "#N/A, dan #DIV/0! otomatis diabaikan."
                         )
@@ -2908,7 +3040,7 @@ def show_spk_page():
                         filtered_df = pd.DataFrame()
                     else:
                         wo_series = (
-                            df_query[target_wo_col]
+                            df_query.iloc[:, target_wo_col]
                             .fillna("")
                             .astype(str)
                             .str.strip()
