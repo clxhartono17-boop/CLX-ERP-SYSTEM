@@ -329,6 +329,24 @@ def find_column(
     return fallback
 
 
+SHEET_ERROR_VALUES = {
+    "#VALUE!",
+    "#REF!",
+    "#N/A",
+    "#DIV/0!",
+    "#NAME?",
+    "#NUM!",
+    "#NULL!",
+    "#ERROR!",
+}
+
+
+def is_sheet_error_value(value):
+    """Return True when Google Sheets returned an error token."""
+    text = safe_str(value).strip().upper()
+    return text in SHEET_ERROR_VALUES
+
+
 def safe_str(value, default=""):
     if value is None:
         return default
@@ -341,7 +359,11 @@ def safe_str(value, default=""):
 
     text = str(value).strip()
 
-    if text.lower() == "nan":
+    if text.lower() in {"nan", "none"}:
+        return default
+
+    # Never allow Google Sheets error tokens to become application data.
+    if text.upper() in SHEET_ERROR_VALUES:
         return default
 
     return text
@@ -2636,6 +2658,9 @@ def show_spk_page():
                         seen_wo = set()
 
                         for wo in raw_wos:
+                            if is_sheet_error_value(wo):
+                                continue
+
                             wo_clean = safe_str(wo).strip()
                             if (
                                 not wo_clean
@@ -2668,7 +2693,9 @@ def show_spk_page():
                     elif not wo_list:
                         st.warning(
                             f"⚠️ Kolom WO terdeteksi sebagai `{target_wo_col}`, "
-                            "tetapi tidak ada nomor WO yang berisi data."
+                            "tetapi tidak ada nomor WO yang valid. "
+                            "Nilai error Google Sheets seperti #VALUE!, #REF!, "
+                            "#N/A, dan #DIV/0! otomatis diabaikan."
                         )
 
                     selected_wo = st.selectbox(
@@ -2880,13 +2907,17 @@ def show_spk_page():
                     if target_wo_col is None:
                         filtered_df = pd.DataFrame()
                     else:
+                        wo_series = (
+                            df_query[target_wo_col]
+                            .fillna("")
+                            .astype(str)
+                            .str.strip()
+                        )
+
                         filtered_df = (
                             df_query[
-                                df_query[target_wo_col]
-                                .fillna("")
-                                .astype(str)
-                                .str.strip()
-                                == selected_wo
+                                (~wo_series.str.upper().isin(SHEET_ERROR_VALUES))
+                                & (wo_series == selected_wo)
                             ]
                             .copy()
                         )
