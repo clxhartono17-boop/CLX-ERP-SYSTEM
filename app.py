@@ -906,12 +906,12 @@ structure_menu = {
     ],
 
     "Commercial Div": [
-        "Create PO",
         "Create Invoice",
         "Form Reimbursement",
     ],
 
     "SCM Div": [
+        "Create PO",
         "Create DO",
     ],
 
