@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import io
 import os
 import re
@@ -35,7 +36,7 @@ except ModuleNotFoundError:
 # ==============================================================================
 OLD_TEMPLATE_FILENAME = "Template BOQ Vgreen.xlsx"
 NEW_TEMPLATE_FILENAME = "New Template BOQ Sept 2026 All Charger.xlsx"
-BOQ_EDITOR_VERSION = "QTY_TEMPLATE_AUTO_TOTAL_V11"
+BOQ_EDITOR_VERSION = "QTY_TEMPLATE_AUTO_TOTAL_V13"
 TEMPLATE_OPTIONS = {
     "Template BOQ Vgreen Lama": OLD_TEMPLATE_FILENAME,
     "New Template BOQ Sept 2026": NEW_TEMPLATE_FILENAME,
@@ -129,22 +130,66 @@ def clean_text(value):
 
 
 def map_to_standard_province(raw_province):
+    """Map Indonesian province names/abbreviations to the BOQ island region.
+
+    IMPORTANT: Query!I may contain either Indonesian names (Jawa Barat) or
+    English names (West Java). The previous mapper only recognised JAWA, so
+    ``West Java`` was returned literally and was incorrectly treated as NON JAVA.
+    This function is intentionally strict for the six BOQ regions used by the
+    template workbook.
+    """
     s = clean_text(raw_province).upper()
     if not s:
         return "JAVA"
-    if any(x in s for x in ["JAKARTA", "BANTEN", "JAWA", "YOGYAKARTA", "DI YOGYAKARTA"]):
+
+    # Normalize punctuation/separators so variants such as
+    # "DI. Yogyakarta" / "D.I. Yogyakarta" are handled consistently.
+    s_norm = re.sub(r"[^A-Z0-9]+", " ", s).strip()
+
+    java_terms = {
+        "JAKARTA", "DKI JAKARTA", "BANTEN",
+        "JAWA", "JAWA BARAT", "JAWA TENGAH", "JAWA TIMUR",
+        "WEST JAVA", "CENTRAL JAVA", "EAST JAVA",
+        "YOGYAKARTA", "SPECIAL REGION OF YOGYAKARTA",
+        "DI YOGYAKARTA", "D I YOGYAKARTA",
+    }
+    if s_norm in java_terms or any(
+        term in s_norm for term in ["WEST JAVA", "CENTRAL JAVA", "EAST JAVA", "JAWA BARAT", "JAWA TENGAH", "JAWA TIMUR"]
+    ):
         return "JAVA"
-    if any(x in s for x in ["SUMATERA", "ACEH", "RIAU", "JAMBI", "BENGKULU", "LAMPUNG", "BANGKA", "BELITUNG"]):
+
+    sumatera_terms = [
+        "SUMATERA", "SUMATRA", "ACEH", "NANGGROE ACEH", "RIAU",
+        "JAMBI", "BENGKULU", "LAMPUNG", "BANGKA", "BELITUNG",
+        "KEPULAUAN RIAU", "RIAU ISLANDS", "NORTH SUMATERA",
+        "NORTH SUMATRA", "WEST SUMATERA", "WEST SUMATRA",
+        "SOUTH SUMATERA", "SOUTH SUMATRA"
+    ]
+    if any(x in s_norm for x in sumatera_terms):
         return "SUMATERA"
-    if any(x in s for x in ["BALI", "NUSA TENGGARA", "NTB", "NTT"]):
+
+    bali_nt_terms = [
+        "BALI", "NUSA TENGGARA", "NUSA TENGGARA BARAT",
+        "NUSA TENGGARA TIMUR", "NTB", "NTT",
+        "WEST NUSA TENGGARA", "EAST NUSA TENGGARA"
+    ]
+    if any(x in s_norm for x in bali_nt_terms):
         return "BALI NUSATENGGARA"
-    if "KALIMANTAN" in s:
+
+    if "KALIMANTAN" in s_norm or "BORNEO" in s_norm:
         return "KALIMANTAN"
-    if any(x in s for x in ["SULAWESI", "GORONTALO"]):
+
+    sulawesi_terms = [
+        "SULAWESI", "GORONTALO", "NORTH SULAWESI", "CENTRAL SULAWESI",
+        "SOUTH SULAWESI", "SOUTHEAST SULAWESI", "WEST SULAWESI"
+    ]
+    if any(x in s_norm for x in sulawesi_terms):
         return "SULAWESI"
-    if any(x in s for x in ["PAPUA", "MALUKU"]):
-        return "SULAWESI"
-    return s
+
+    # Preserve existing legacy behaviour for unknown values, but do not
+    # silently classify them as JAVA. The template loader will reject a
+    # missing exact sheet rather than falling back to the wrong region.
+    return s_norm
 
 
 def normalize_charger_type(charging_type):
@@ -184,6 +229,22 @@ def get_template_path(filename):
     for path in candidates:
         if os.path.exists(path):
             return path
+
+    # Developer/upload convenience: if the workbook was copied from a chat upload
+    # and received a duplicate suffix such as "(4)", accept that exact variant.
+    base, ext = os.path.splitext(filename)
+    variants = [
+        f"{base}(4){ext}",
+        f"{base} (4){ext}",
+        f"{base}(3){ext}",
+        f"{base} (3){ext}",
+    ]
+    for variant in variants:
+        for root in [CURRENT_DIR, ROOT_DIR, CWD]:
+            candidate = os.path.join(root, "assets", "templates", variant)
+            if os.path.exists(candidate):
+                return candidate
+
     return candidates[0]
 
 
@@ -209,13 +270,47 @@ def template_name_from_db_value(value):
 
 
 def get_new_template_sheet_name(charging_type, province_str):
+    """
+    Resolve the NEW Sept-2026 workbook sheet from exactly two dimensions:
+    Charging Type + BOQ Region.
+
+    IMPORTANT:
+    - JAVA uses the sheet without "(NON JAVA)".
+    - Every non-JAVA region uses the "(NON JAVA)" sheet.
+    - There is NO fallback to another charger/region sheet.
+    """
     c = normalize_charger_type(charging_type)
     region = map_to_standard_province(province_str)
-    if c in {"6S1P", "12S1P", "12S3P"}:
+
+    supported_regional_chargers = {
+        "DC20", "DC30", "DC60",
+        "6S1P", "12S1P", "12S3P",
+    }
+
+    if c not in supported_regional_chargers:
+        # The new workbook supplied by the user does not contain 7KW/22KW/DC120.
         return c
-    if c in {"DC20", "DC30", "DC60"}:
-        return c if region == "JAVA" else f"{c} (NON JAVA)"
-    return c
+
+    if region == "JAVA":
+        return c
+
+    # Any explicitly mapped non-Java region goes here.
+    non_java_regions = {
+        "SUMATERA",
+        "BALI NUSATENGGARA",
+        "KALIMANTAN",
+        "SULAWESI",
+    }
+    if region in non_java_regions:
+        return f"{c} (NON JAVA)"
+
+    # Unknown province must never silently become NON-JAVA.
+    raise ValueError(
+        f"Province/Region tidak dikenali untuk template BOQ baru: "
+        f"'{province_str}' -> '{region}'. "
+        f"Mapping region harus salah satu dari JAVA, SUMATERA, "
+        f"BALI NUSATENGGARA, KALIMANTAN, atau SULAWESI."
+    )
 
 
 def detect_template_header(raw, keywords=("NO", "ITEM")):
@@ -703,32 +798,8 @@ def _excel_number_from_value(value, cell_map=None, resolving=None):
         return None
 
 
-def _restore_formula_quantities(df, raw):
-    """Recover Qty/Volume from the actual Excel Qty column, including formulas."""
-    if df is None or df.empty or raw is None or raw.empty:
-        return df
-    if "Unit/Volume" not in df.columns:
-        return df
-
-    out = df.copy()
-    out["Unit/Volume"] = out["Unit/Volume"].astype(object)
-
-    header_row = detect_template_header(raw)
-    if header_row >= len(raw):
-        return out
-
-    headers = _normalize_template_headers(raw.iloc[header_row].tolist())
-    data_raw = raw.iloc[header_row + 1:].reset_index(drop=True)
-    if data_raw.empty:
-        return out
-
-    mapping = build_new_template_column_mapping(headers)
-    vol_col = mapping.get("UNIT_VOLUME")
-    if vol_col is None or vol_col not in headers:
-        return out
-    vol_pos = headers.index(vol_col)
-
-    # Build A1 -> raw value map for formula Qty cells such as =D15 or =D15/0.45.
+def _build_excel_cell_map(data_raw, header_row):
+    """Build an A1 -> raw-value map for one worksheet."""
     cell_map = {}
     for raw_i, row in data_raw.iterrows():
         excel_row = raw_i + header_row + 2
@@ -739,25 +810,77 @@ def _restore_formula_quantities(df, raw):
                 n, rem = divmod(n - 1, 26)
                 letters = chr(65 + rem) + letters
             cell_map[f"{letters}{excel_row}"] = value
+    return cell_map
 
-    for i in range(min(len(out), len(data_raw))):
-        raw_value = data_raw.iloc[i, vol_pos]
-        current = out.at[i, "Unit/Volume"]
 
-        # If pandas already supplied a usable numeric Qty, keep it exactly.
-        if current is not None and clean_text(current) != "":
-            existing = _excel_number_from_value(current, cell_map)
-            if existing is not None:
-                out.at[i, "Unit/Volume"] = existing
-                continue
+def _restore_template_formula_values(df, raw):
+    """
+    Resolve formula-backed numeric cells from the actual workbook.
 
-        # Otherwise resolve the actual Excel cell/formula.
-        resolved = _excel_number_from_value(raw_value, cell_map)
-        if resolved is not None:
-            out.at[i, "Unit/Volume"] = resolved
+    The Sept-2026 template contains formulas in BOTH Qty and Unit Price.
+    Example:
+        Qty D53 = D52*0.6*0.9
+        Qty D54 = D53*0.8
+        Unit Price G44 = 1.1*1500000
+
+    pandas/openpyxl may expose the formula string rather than a cached
+    calculated value. We therefore resolve formulas from the raw worksheet
+    before the calculation engine sees them.
+    """
+    if df is None or df.empty or raw is None or raw.empty:
+        return df
+
+    out = df.copy()
+    header_row = detect_template_header(raw)
+    if header_row >= len(raw):
+        return out
+
+    headers = _normalize_template_headers(raw.iloc[header_row].tolist())
+    data_raw = raw.iloc[header_row + 1:].reset_index(drop=True)
+    if data_raw.empty:
+        return out
+
+    mapping = build_new_template_column_mapping(headers)
+    cell_map = _build_excel_cell_map(data_raw, header_row)
+
+    def raw_column_position(target):
+        source = mapping.get(target)
+        if source is None or source not in headers:
+            return None
+        return headers.index(source)
+
+    qty_pos = raw_column_position("UNIT_VOLUME")
+    price_pos = raw_column_position("UNIT_PRICE")
+    total_pos = raw_column_position("TOTAL_PRICE")
+
+    # Row alignment is preserved by _standardize_template_df().
+    row_count = min(len(out), len(data_raw))
+
+    for i in range(row_count):
+        # Qty / Volume
+        if qty_pos is not None:
+            raw_qty = data_raw.iloc[i, qty_pos]
+            resolved_qty = _excel_number_from_value(raw_qty, cell_map)
+            if resolved_qty is not None:
+                out.at[i, "Unit/Volume"] = resolved_qty
+
+        # Unit Price
+        if price_pos is not None:
+            raw_price = data_raw.iloc[i, price_pos]
+            resolved_price = _excel_number_from_value(raw_price, cell_map)
+            if resolved_price is not None:
+                out.at[i, "UNIT PRICE"] = resolved_price
+
+        # Template Total Price is intentionally NOT trusted for calculations.
+        # The application always recalculates it as Qty × Unit Price so that
+        # changing Qty immediately changes Total Price.
+        if total_pos is not None:
+            raw_total = data_raw.iloc[i, total_pos]
+            resolved_total = _excel_number_from_value(raw_total, cell_map)
+            if resolved_total is not None:
+                out.at[i, "TOTAL PRICE"] = resolved_total
 
     return out
-
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -766,59 +889,89 @@ def load_boq_dataframe(charging_type, province_str, template_name="Template BOQ 
     path = get_template_path(filename)
     if not os.path.exists(path):
         raise FileNotFoundError(f"Template tidak ditemukan: {path}")
+
     c = normalize_charger_type(charging_type)
     region = map_to_standard_province(province_str)
+
     if template_name == "Template BOQ Vgreen Lama":
-        sheet_map = {"DC20":"DC20","DC30":"DC30","DC60":"DC60","DC120":"DC120","6S1P":"6S1P","12S1P":"12S1P","12S3P":"12S3P","7KW":"7KW","22KW":"22KW"}
+        sheet_map = {
+            "DC20": "DC20", "DC30": "DC30", "DC60": "DC60",
+            "DC120": "DC120", "6S1P": "6S1P", "12S1P": "12S1P",
+            "12S3P": "12S3P", "7KW": "7KW", "22KW": "22KW"
+        }
         sheet = sheet_map.get(c, c)
         raw = pd.read_excel(path, sheet_name=sheet, header=None)
         off = _old_template_offsets(region)
-        # Existing old template stores regional price blocks. Keep the first
-        # seven columns and shift rows according to the established region offset.
         if off and len(raw) > off:
             raw = raw.iloc[off:].reset_index(drop=True)
+
         header_row = detect_template_header(raw)
-        # Old template commonly has a fixed 7-column structure.
         if header_row == 0 and raw.shape[1] >= 7:
             first = [clean_text(x).upper() for x in raw.iloc[0].tolist()]
             if not any("ITEM" in x for x in first):
-                raw.columns = ["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"] + list(raw.columns[7:])
+                raw.columns = [
+                    "NO", "Item", "Unit/Volume", "Satuan/Uom",
+                    "MERK", "UNIT PRICE", "TOTAL PRICE"
+                ] + list(raw.columns[7:])
                 df = raw.iloc[:, :7].copy()
-                df.columns = ["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"]
+                df.columns = [
+                    "NO", "Item", "Unit/Volume", "Satuan/Uom",
+                    "MERK", "UNIT PRICE", "TOTAL PRICE"
+                ]
             else:
                 df = _standardize_template_df(raw, header_row)
         else:
             df = _standardize_template_df(raw, header_row)
     else:
-        sheet = get_new_template_sheet_name(c, province_str)
+        # ==============================================================
+        # NEW TEMPLATE: STRICT REGION + CHARGER RESOLUTION
+        # ==============================================================
+        expected_sheet = get_new_template_sheet_name(c, province_str)
+
         xl = pd.ExcelFile(path)
-        if sheet not in xl.sheet_names:
-            # Fall back to normalized charger sheet if the exact regional sheet
-            # is not present.
-            alternatives = [c, c.upper(), c.replace("DC", "")]
-            sheet = next((x for x in alternatives if x in xl.sheet_names), xl.sheet_names[0])
+        available_sheets = list(xl.sheet_names)
+
+        # Exact/case-insensitive match only.
+        sheet = next((x for x in available_sheets if x == expected_sheet), None)
+        if sheet is None:
+            sheet = next(
+                (x for x in available_sheets if x.upper() == expected_sheet.upper()),
+                None
+            )
+
+        # NEVER use the first sheet as fallback.
+        if sheet is None:
+            raise ValueError(
+                "Regional template mismatch.\n"
+                f"Province source : '{province_str}'\n"
+                f"Mapped region   : '{region}'\n"
+                f"Charging type   : '{c}'\n"
+                f"Required sheet  : '{expected_sheet}'\n"
+                f"Available sheets: {', '.join(available_sheets)}"
+            )
+
         raw = pd.read_excel(path, sheet_name=sheet, header=None)
+
+        # The workbook supplied by the user has:
+        # A=NO, B=Item, C=Spec, D=Qty, E=Lot,
+        # F=MERK, G=UNIT PRICE, H=TOTAL PRICE.
         df = _standardize_template_df(raw)
 
-        # IMPORTANT:
-        # The Sept-2026 workbook contains formula-based Qty/Volume cells.
-        # Some Excel files have no cached formula result, so pandas can read
-        # those cells as blank. Recover the formula result from the raw sheet
-        # before the values reach the editor/calculation engine.
-        df = _restore_formula_quantities(df, raw)
+        # Resolve formula-backed Qty AND Unit Price from the actual sheet.
+        df = _restore_template_formula_values(df, raw)
 
-    # IMPORTANT: Jangan mengubah Unit/Volume template menjadi numeric secara
-    # paksa. Template dapat berisi nilai seperti "30kw dc", "Lot", atau
-    # angka biasa. Jika dipaksa parse_qty_num(), nilai non-numeric akan menjadi
-    # 0 dan BOQ yang tampil tidak lagi sama dengan template asli.
+    # Clean textual columns without destroying numeric Qty values.
     for col in ["NO", "Item", "Unit/Volume", "Satuan/Uom", "MERK"]:
         df[col] = df[col].apply(clean_text)
 
-    # Unit/Volume dibiarkan mengikuti nilai asli template. Engine kalkulasi
-    # tetap menggunakan parse_qty_num() saat menghitung TOTAL PRICE.
+    # Unit price formulas must already have been resolved above.
     df["UNIT PRICE"] = df["UNIT PRICE"].apply(parse_price)
     df["TOTAL PRICE"] = df["TOTAL PRICE"].apply(parse_price)
+
+    # The application is the calculation source of truth:
+    # TOTAL PRICE = Qty × UNIT PRICE
     df, _, _, _ = recalculate_boq_totals(df)
+
     return df.reset_index(drop=True), sheet, region
 
 
@@ -866,6 +1019,15 @@ def get_section_indices(df_boq, section_no):
 
 
 def get_editable_sections(charger_type):
+    """
+    Points that are intentionally editable by the user.
+
+    For the current Sept-2026 charger templates:
+      DC20/DC30/DC60 -> Point A and Point G
+      6S1P/12S1P/12S3P -> Point A and Point D
+
+    All other points remain read-only.
+    """
     c = normalize_charger_type(charger_type)
     if c in {"6S1P", "12S1P", "12S3P"}:
         return ["A", "D"]
@@ -874,24 +1036,42 @@ def get_editable_sections(charger_type):
     return []
 
 
+def _editor_signature(section_df):
+    """Stable content signature used to reset an editor only when template data changes."""
+    payload = section_df[
+        ["NO", "Item", "Unit/Volume", "Satuan/Uom", "MERK", "UNIT PRICE"]
+    ].fillna("").astype(str).to_json(orient="records")
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
 def edit_boq_sections(df_boq, charger_type, widget_prefix):
-    """Display the selected template exactly; only Qty/Volume is editable."""
+    """
+    Render the selected BOQ template.
+
+    RULE:
+      - Initial Qty comes from the selected Excel template.
+      - Only Qty / Volume in the designated points is editable.
+      - NO, Item, Satuan, MERK and Unit Price are locked.
+      - Total Price is always recalculated as Qty × Unit Price.
+    """
     if df_boq is None or df_boq.empty:
         return df_boq
+
     editable_sections = get_editable_sections(charger_type)
     if not editable_sections:
         return df_boq
 
     df = df_boq.copy()
+
     for col in ["Unit/Volume", "UNIT PRICE", "TOTAL PRICE"]:
         if col in df.columns:
             df[col] = df[col].astype(object)
 
     st.markdown("### ✏️ Edit Qty / Volume BOQ")
     st.info(
-        "💡 Nilai Qty / Volume ditampilkan persis seperti pada template BOQ. "
-        "Hanya Qty / Volume pada Point yang ditentukan yang dapat diedit. "
-        "Item, Satuan, MERK dan UNIT PRICE tetap mengikuti template. "
+        "💡 Qty / Volume awal mengikuti template BOQ yang dipilih. "
+        "Hanya Qty / Volume pada Point yang ditentukan yang dapat diubah. "
+        "NO, Item, Satuan, MERK dan UNIT PRICE mengikuti template dan terkunci. "
         "TOTAL PRICE otomatis = Qty × UNIT PRICE."
     )
 
@@ -899,35 +1079,60 @@ def edit_boq_sections(df_boq, charger_type, widget_prefix):
         section_indices = get_section_indices(df, section_no)
         if not section_indices:
             continue
+
         section_df = df.loc[section_indices].copy()
         st.markdown(f"#### Point {section_no}")
 
-        editor_df = section_df[[
-            "NO", "Item", "Unit/Volume", "Satuan/Uom", "MERK", "UNIT PRICE", "TOTAL PRICE"
-        ]].copy()
-        # DO NOT coerce Qty to numeric here. Values such as "30kw dc" must remain
-        # visible exactly as stored in the template.
+        editor_df = section_df[
+            ["NO", "Item", "Unit/Volume", "Satuan/Uom",
+             "MERK", "UNIT PRICE", "TOTAL PRICE"]
+        ].copy()
+
         editor_df["Unit/Volume"] = editor_df["Unit/Volume"].apply(clean_text)
         editor_df["Satuan/Uom"] = editor_df["Satuan/Uom"].apply(clean_text)
         editor_df["MERK"] = editor_df["MERK"].apply(clean_text)
         editor_df["UNIT PRICE"] = editor_df["UNIT PRICE"].apply(parse_price).astype(float)
         editor_df["TOTAL PRICE"] = editor_df["TOTAL PRICE"].apply(parse_price).astype(float)
 
-        # New key version eliminates old widgets whose state contained blank Qty.
-        qty_fingerprint = "|".join(clean_text(x) for x in section_df["Unit/Volume"].tolist())
-        editor_key = f"boq_qty_v11_{abs(hash(f'{widget_prefix}|{section_no}|{qty_fingerprint}'))}"
+        editor_key = (
+            f"boq_qty_editor_v13_"
+            f"{hashlib.sha1(str(widget_prefix).encode()).hexdigest()[:12]}_"
+            f"{section_no}"
+        )
+
+        # Reset old widget state ONLY when the actual template data changes.
+        signature = _editor_signature(section_df)
+        signature_key = f"{editor_key}__template_signature"
+        old_signature = st.session_state.get(signature_key)
+
+        if old_signature != signature:
+            st.session_state.pop(editor_key, None)
+            st.session_state[signature_key] = signature
 
         column_config = {
-            "NO": st.column_config.TextColumn("NO", disabled=True),
-            "Item": st.column_config.TextColumn("Item", disabled=True),
-            "Unit/Volume": st.column_config.TextColumn(
-                "Qty / Volume", disabled=False,
-                help="Nilai awal persis dari template BOQ. Edit hanya Qty/Volume."
+            "NO": st.column_config.TextColumn(
+                "NO", disabled=True
             ),
-            "Satuan/Uom": st.column_config.TextColumn("Satuan", disabled=True),
-            "MERK": st.column_config.TextColumn("MERK", disabled=True),
-            "UNIT PRICE": st.column_config.NumberColumn("UNIT PRICE", format="%.0f", disabled=True),
-            "TOTAL PRICE": st.column_config.NumberColumn("TOTAL PRICE", format="%.0f", disabled=True),
+            "Item": st.column_config.TextColumn(
+                "Item", disabled=True
+            ),
+            "Unit/Volume": st.column_config.TextColumn(
+                "Qty / Volume",
+                disabled=False,
+                help="Nilai awal berasal dari template. Hanya kolom ini yang dapat diedit."
+            ),
+            "Satuan/Uom": st.column_config.TextColumn(
+                "Satuan", disabled=True
+            ),
+            "MERK": st.column_config.TextColumn(
+                "MERK", disabled=True
+            ),
+            "UNIT PRICE": st.column_config.NumberColumn(
+                "UNIT PRICE", format="Rp %.0f", disabled=True
+            ),
+            "TOTAL PRICE": st.column_config.NumberColumn(
+                "TOTAL PRICE", format="Rp %.0f", disabled=True
+            ),
         }
 
         edited_df = st.data_editor(
@@ -936,27 +1141,35 @@ def edit_boq_sections(df_boq, charger_type, widget_prefix):
             use_container_width=True,
             num_rows="fixed",
             column_config=column_config,
+            disabled=[
+                "NO", "Item", "Satuan/Uom", "MERK",
+                "UNIT PRICE", "TOTAL PRICE"
+            ],
             key=editor_key,
         )
 
         for position, idx in enumerate(section_indices):
             if position >= len(edited_df):
                 continue
+
             raw_qty = edited_df.iloc[position]["Unit/Volume"]
             unit_price = parse_price(df.loc[idx, "UNIT PRICE"])
 
-            # Preserve the template text for non-priced/header rows.
+            # Section/header rows have no price. Preserve their original Qty text.
             if unit_price == 0:
                 df.loc[idx, "Unit/Volume"] = clean_text(raw_qty)
                 continue
 
+            # Detail rows: user may change Qty only.
             new_qty = parse_qty_num(raw_qty)
             df.loc[idx, "Unit/Volume"] = new_qty
-            df.loc[idx, "TOTAL PRICE"] = calculate_detail_total(new_qty, unit_price)
+            df.loc[idx, "TOTAL PRICE"] = calculate_detail_total(
+                new_qty, unit_price
+            )
 
+    # Recalculate EVERYTHING after user edits.
     df, _, _, _ = recalculate_boq_totals(df)
     return df
-
 
 
 def generate_boq_pdf(site_name,site_location,charger_capacity,region,df_boq,sub_total,vat,grand_total):
@@ -1672,16 +1885,38 @@ def _render_boq_create():
     c1,c2=st.columns(2)
     site_address=c2.text_input("Address (Kolom G)",value=meta.get("Address","-"),key=f"address_{selected_label}")
     c3,c4,c5=st.columns([1.5,1.5,1])
-    charging_type=c3.text_input("Charging Type (Kolom C)",value=meta.get("Charging Type","DC20"),key=f"charger_{selected_label}")
-    province=c4.text_input("Province Standar (Kolom I Mapped)",value=meta.get("Province","JAVA"),key=f"province_{selected_label}")
-    c5.caption(f"Raw Province Sheet: `{meta.get('Province','-')}`")
+    charging_type=c3.text_input(
+        "Charging Type (Kolom C)",
+        value=meta.get("Charging Type","DC20"),
+        key=f"charger_{selected_label}"
+    )
+    charging_type = normalize_charger_type(charging_type)
+    raw_province=clean_text(meta.get("Province",""))
+    province=map_to_standard_province(raw_province)
+    c4.text_input(
+        "Province Standard / BOQ Region (AUTO)",
+        value=province,
+        disabled=True,
+        key=f"province_mapped_{selected_label}"
+    )
+    c5.caption(f"Raw Province Query!I: `{raw_province or '-'} → {province}`")
     epc_name=st.text_input("EPC Name (Kolom B)",value=meta.get("EPC Name","-"),key=f"epc_{selected_label}")
     saved_pairs=get_existing_saved_site_charger_pairs(); pair=(selected_site.strip().lower(),charging_type.strip().lower()); is_already_saved=pair in saved_pairs or selected_site=="-"
     if is_already_saved and selected_site!="-": st.warning(f"⚠️ Kombinasi Site `{selected_site}` dengan Charger `{charging_type}` sudah pernah dibuatkan BOQ.")
-    df_boq,target_sheet,region_normalized=load_boq_dataframe(charging_type,province,template_name)
+    # Region is derived from the selected site's Query province; user cannot
+    # accidentally type "West Java" and make it look like a NON-JAVA region.
+    try:
+        df_boq,target_sheet,region_normalized=load_boq_dataframe(charging_type,province,template_name)
+    except ValueError as e:
+        st.error(f"❌ Regional template mismatch: {e}")
+        return
     if df_boq is None or df_boq.empty: return
     st.subheader(f"2. Table BOQ ({target_sheet} - {region_normalized})")
-    st.caption(f"📑 Template aktif: **{template_name}**")
+    st.caption(
+        f"📑 Template aktif: **{template_name}** | "
+        f"Sheet Excel: **{target_sheet}** | "
+        f"Region: **{region_normalized}**"
+    )
     if template_name=="Template BOQ Vgreen Lama":
         st.info("💡 Khusus **CABLING AND ACCESSORIES INSTALLATION** (Poin 1-3), Qty/Volume dapat diubah. TOTAL PRICE akan otomatis mengikuti Qty × UNIT PRICE.")
         e_start=False; editable_indices=[]
@@ -1724,8 +1959,16 @@ def _render_boq_edit():
     template_name=st.selectbox("Pilih Template untuk Edit / Re-Download PDF",list(TEMPLATE_OPTIONS.keys()),index=list(TEMPLATE_OPTIONS.keys()).index(template_name),key=f"edit_boq_template_{key}")
     _,qmap=fetch_query_site_options(exclude_saved=False)
     meta=next((v for v in qmap.values() if v.get("Site Name","").strip().lower()==old_site.strip().lower() and normalize_charger_type(v.get("Charging Type",""))==normalize_charger_type(old_charger)),{"Address":"-","Province":"JAVA","EPC Name":"-"})
-    site=st.text_input("Site Name",old_site,key=f"edit_site_{key}"); charger=st.text_input("Charger Type",old_charger,key=f"edit_charger_{key}"); epc=st.text_input("EPC Name",data.get("EPC Name","-"),key=f"edit_epc_{key}"); address=st.text_input("Address",meta.get("Address","-"),key=f"edit_address_{key}"); province=st.text_input("Province",meta.get("Province","JAVA"),key=f"edit_province_{key}")
-    df,target,region=load_boq_dataframe(charger,province,template_name)
+    site=st.text_input("Site Name",old_site,key=f"edit_site_{key}"); charger=st.text_input("Charger Type",old_charger,key=f"edit_charger_{key}"); charger=normalize_charger_type(charger); epc=st.text_input("EPC Name",data.get("EPC Name","-"),key=f"edit_epc_{key}"); address=st.text_input("Address",meta.get("Address","-"),key=f"edit_address_{key}")
+    raw_province=clean_text(meta.get("Province",""))
+    province=map_to_standard_province(raw_province)
+    st.text_input("Province Standard / BOQ Region (AUTO)",province,disabled=True,key=f"edit_province_mapped_{key}")
+    st.caption(f"Raw Province Query!I: `{raw_province or '-'} → {province}`")
+    try:
+        df,target,region=load_boq_dataframe(charger,province,template_name)
+    except ValueError as e:
+        st.error(f"❌ Regional template mismatch: {e}")
+        return
     if df is None or df.empty: return
     df=edit_boq_sections(df,charger,f"edit_detail_{key}_{template_name}_{charger}"); df,sub,vat,grand=recalculate_boq_totals(df)
     display=df.copy()
