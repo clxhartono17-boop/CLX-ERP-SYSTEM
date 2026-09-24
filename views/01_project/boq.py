@@ -35,6 +35,7 @@ except ModuleNotFoundError:
 # ==============================================================================
 OLD_TEMPLATE_FILENAME = "Template BOQ Vgreen.xlsx"
 NEW_TEMPLATE_FILENAME = "New Template BOQ Sept 2026 All Charger.xlsx"
+BOQ_EDITOR_VERSION = "QTY_TEMPLATE_AUTO_TOTAL_V8"
 TEMPLATE_OPTIONS = {
     "Template BOQ Vgreen Lama": OLD_TEMPLATE_FILENAME,
     "New Template BOQ Sept 2026": NEW_TEMPLATE_FILENAME,
@@ -236,43 +237,27 @@ def find_column_by_keywords(columns, keywords):
 def build_new_template_column_mapping(columns):
     cols = list(columns)
     mapping = {}
-
     mapping["NO"] = find_column_by_keywords(cols, ["NO"])
     mapping["ITEM"] = find_column_by_keywords(cols, ["ITEM", "DESCRIPTION", "MATERIAL"])
 
-    # Template baru memakai header seperti:
-    # NO | Item | Spec | Qty | Lot | MERK | UNIT PRICE | TOTAL PRICE
-    # Jadi "Qty" adalah Unit/Volume, sedangkan "Lot" adalah Satuan/Uom.
+    # IMPORTANT:
+    # Jangan gunakan keyword generik "UNIT" untuk mencari Satuan/Uom.
+    # Pada template baru terdapat kolom "Unit/Volume" dan "Satuan/Uom".
+    # Jika "UNIT" ikut dicari untuk SATUAN, fungsi lama dapat menemukan
+    # "Unit/Volume" lebih dulu sehingga nilai Qty/Volume masuk ke kolom
+    # Satuan dan kolom Qty/Volume menjadi kosong.
     mapping["UNIT_VOLUME"] = find_column_by_keywords(
         cols, ["UNIT/VOL", "UNIT VOL", "QTY/VOL", "QTY", "VOLUME"]
     )
-
     mapping["SATUAN"] = find_column_by_keywords(
         cols, ["SATUAN/UOM", "SATUAN", "UOM"]
     )
 
-    # Fallback penting:
-    # Bila template memakai "Qty" + "Lot" tanpa header "Satuan/Uom",
-    # kolom tepat setelah Qty dianggap sebagai Satuan/Uom.
-    if mapping["SATUAN"] is None and mapping["UNIT_VOLUME"] is not None:
-        try:
-            qty_pos = cols.index(mapping["UNIT_VOLUME"])
-            if qty_pos + 1 < len(cols):
-                candidate = cols[qty_pos + 1]
-                candidate_u = clean_text(candidate).upper()
-                if candidate_u not in {"MERK", "BRAND", "UNIT PRICE", "TOTAL PRICE"}:
-                    mapping["SATUAN"] = candidate
-        except Exception:
-            pass
-
     mapping["MERK"] = find_column_by_keywords(cols, ["MERK", "BRAND"])
-    mapping["UNIT_PRICE"] = find_column_by_keywords(
-        cols, ["UNIT PRICE", "UNIT PRICE (", "PRICE"]
-    )
-    mapping["TOTAL_PRICE"] = find_column_by_keywords(
-        cols, ["TOTAL PRICE", "TOTAL"]
-    )
+    mapping["UNIT_PRICE"] = find_column_by_keywords(cols, ["UNIT PRICE", "UNIT PRICE (", "PRICE"])
+    mapping["TOTAL_PRICE"] = find_column_by_keywords(cols, ["TOTAL PRICE", "TOTAL"])
     return mapping
+
 
 # ==============================================================================
 # GOOGLE SHEETS HELPERS
@@ -473,16 +458,18 @@ def calculate_detail_total(quantity, unit_price):
 
 def recalculate_boq_totals(df_boq):
     """
-    Recalculate BOQ totals without double-counting section/sub-section totals.
+    Recalculate BOQ totals correctly.
 
-    Rules:
-    1. A real cost line is identified by a non-zero UNIT PRICE.
-       TOTAL PRICE = Qty/Volume x Unit Price.
-    2. Section headers such as A/B/G (normally UNIT PRICE is blank/zero)
-       receive a display subtotal from their detail rows.
-    3. Section/sub-section display totals are NOT included again in Sub Total.
-    4. Rows such as "Price adjustment" with a negative UNIT PRICE remain
-       real cost lines and are included.
+    RULES:
+    1. Detail/cost rows with a non-zero UNIT PRICE are calculated as:
+       TOTAL PRICE = Qty/Volume x UNIT PRICE.
+    2. Top-level section headers A/B/C/D/E/F/G/H get a display subtotal
+       from their detail rows.
+    3. Section header totals are NOT added again to the BOQ subtotal.
+    4. Negative UNIT PRICE (for example Price adjustment) remains a real
+       cost line and is included in the subtotal.
+    5. Non-top-level headers such as I/II are not double-counted. If the
+       template already contains a display total for them, it is preserved.
     """
     if df_boq is None or df_boq.empty:
         return df_boq, 0.0, 0.0, 0.0
@@ -498,9 +485,9 @@ def recalculate_boq_totals(df_boq):
 
     top_level_labels = {"A", "B", "C", "D", "E", "F", "G", "H"}
 
-    # ------------------------------------------------------------------
-    # 1) Calculate every real cost line from Qty x Unit Price.
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # 1. Calculate every real cost/detail row from Qty x Unit Price.
+    # ---------------------------------------------------------------
     line_totals = [0.0] * len(df)
     is_detail = [False] * len(df)
 
@@ -510,13 +497,10 @@ def recalculate_boq_totals(df_boq):
             qty = parse_qty_num(row.get("Unit/Volume", 0))
             line_totals[pos] = qty * unit_price
             is_detail[pos] = True
-        else:
-            line_totals[pos] = 0.0
 
-    # ------------------------------------------------------------------
-    # 2) Build display totals for top-level section headers.
-    #    A section header normally has no Unit Price.
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # 2. Calculate display totals for top-level section headers.
+    # ---------------------------------------------------------------
     top_positions = []
     for pos, (_, row) in enumerate(df.iterrows()):
         no = clean_text(row.get("NO", "")).upper()
@@ -526,10 +510,12 @@ def recalculate_boq_totals(df_boq):
 
     display_totals = [None] * len(df)
 
+    # Detail rows show their own Qty x Unit Price.
     for pos, total in enumerate(line_totals):
         if is_detail[pos]:
             display_totals[pos] = total
 
+    # Top-level section rows show subtotal of their detail rows only.
     for n, parent_pos in enumerate(top_positions):
         end_pos = top_positions[n + 1] if n + 1 < len(top_positions) else len(df)
         display_totals[parent_pos] = sum(
@@ -538,8 +524,8 @@ def recalculate_boq_totals(df_boq):
             if is_detail[i]
         )
 
-    # Preserve the existing template total for non-top-level headers
-    # (for example I / II) when there is no calculated line price.
+    # Preserve an existing template display total for non-top-level headers
+    # such as I / II when they are not themselves a priced detail row.
     for pos, (_, row) in enumerate(df.iterrows()):
         if display_totals[pos] is None:
             existing = parse_price(row.get("TOTAL PRICE", 0))
@@ -547,17 +533,14 @@ def recalculate_boq_totals(df_boq):
 
     df["TOTAL PRICE"] = display_totals
 
-    # ------------------------------------------------------------------
-    # 3) IMPORTANT: subtotal only sums real detail/cost lines.
-    #    Never sum parent/sub-section totals again.
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # 3. Subtotal = detail rows only. Never sum section header totals.
+    # ---------------------------------------------------------------
     subtotal = sum(line_totals[i] for i in range(len(df)) if is_detail[i])
     vat = subtotal * 0.11
     grand = subtotal + vat
 
     return df, subtotal, vat, grand
-
-
 
 def _old_template_offsets(region):
     return {"JAVA":0, "SUMATERA":8, "BALI NUSATENGGARA":16, "KALIMANTAN":25, "SULAWESI":33}.get(region, 0)
@@ -632,6 +615,140 @@ def _standardize_template_df(raw, header_row=None):
     return out.reset_index(drop=True)
 
 
+import ast
+
+
+def _excel_number_from_value(value, cell_map=None, resolving=None):
+    """Evaluate the simple arithmetic formulas used by the new BOQ template.
+
+    The Sept-2026 template stores several Qty cells as formulas such as
+    =0.53*0.4*0.45, =D15, =D15/0.45 and =D17*0.05.
+    Pandas may return blank/NaN when an Excel formula has no cached result.
+    This evaluator resolves those local arithmetic formulas without guessing.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    s = str(value).strip()
+    if not s:
+        return None
+
+    # A normal numeric text value.
+    if not s.startswith("="):
+        try:
+            return parse_qty_num(s)
+        except Exception:
+            return None
+
+    expr = s[1:].strip().replace("$", "")
+    cell_map = cell_map or {}
+    resolving = set(resolving or set())
+
+    # Resolve A1 references against the same worksheet.
+    ref_re = re.compile(r"(?<![A-Za-z0-9_])([A-Z]{1,3})(\d+)(?![A-Za-z0-9_])", re.I)
+
+    def replace_ref(match):
+        ref = match.group(1).upper() + match.group(2)
+        if ref in resolving:
+            raise ValueError("Circular formula reference")
+        if ref not in cell_map:
+            raise KeyError(ref)
+        resolved = _excel_number_from_value(
+            cell_map[ref],
+            cell_map,
+            resolving | {ref},
+        )
+        if resolved is None:
+            raise ValueError(f"Non-numeric cell {ref}")
+        return str(resolved)
+
+    try:
+        expr = ref_re.sub(replace_ref, expr)
+
+        # Only arithmetic expressions are allowed.
+        if not re.fullmatch(r"[0-9eE+\-*/().\s]+", expr):
+            return None
+
+        tree = ast.parse(expr, mode="eval")
+        allowed = (
+            ast.Expression, ast.BinOp, ast.UnaryOp,
+            ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow,
+            ast.USub, ast.UAdd, ast.Constant, ast.Load,
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, allowed):
+                return None
+            if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)):
+                return None
+
+        return float(eval(compile(tree, "<boq-formula>", "eval"),
+                          {"__builtins__": {}}, {}))
+    except Exception:
+        return None
+
+
+def _restore_formula_quantities(df, raw):
+    """Recover Qty/Volume formula values from the raw Excel worksheet."""
+    if df is None or df.empty or raw is None or raw.empty:
+        return df
+
+    if "Unit/Volume" not in df.columns:
+        return df
+
+    out = df.copy()
+    out["Unit/Volume"] = out["Unit/Volume"].astype(object)
+
+    header_row = detect_template_header(raw)
+    if header_row >= len(raw):
+        return out
+
+    headers = [clean_text(x) for x in raw.iloc[header_row].tolist()]
+    data_raw = raw.iloc[header_row + 1:].reset_index(drop=True)
+    if data_raw.empty:
+        return out
+
+    mapping = build_new_template_column_mapping(headers)
+    vol_col = mapping.get("UNIT_VOLUME")
+    if vol_col is None or vol_col not in headers:
+        return out
+
+    vol_pos = headers.index(vol_col)
+
+    # Build an A1 -> raw value map so formulas such as =D15 can be resolved.
+    cell_map = {}
+    for raw_i, row in data_raw.iterrows():
+        excel_row = raw_i + header_row + 2
+        for j, value in enumerate(row.tolist(), start=1):
+            letters = ""
+            n = j
+            while n:
+                n, rem = divmod(n - 1, 26)
+                letters = chr(65 + rem) + letters
+            cell_map[f"{letters}{excel_row}"] = value
+
+    for i in range(min(len(out), len(data_raw))):
+        raw_value = data_raw.iloc[i, vol_pos]
+
+        # If pandas already has a usable number, keep it.
+        current = out.at[i, "Unit/Volume"]
+        if current is not None and clean_text(current) != "":
+            existing = _excel_number_from_value(current, cell_map)
+            if existing is not None:
+                continue
+
+        resolved = _excel_number_from_value(raw_value, cell_map)
+        if resolved is not None:
+            out.at[i, "Unit/Volume"] = resolved
+
+    return out
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_boq_dataframe(charging_type, province_str, template_name="Template BOQ Vgreen Lama"):
     filename = TEMPLATE_OPTIONS.get(template_name, template_name)
@@ -671,6 +788,14 @@ def load_boq_dataframe(charging_type, province_str, template_name="Template BOQ 
             sheet = next((x for x in alternatives if x in xl.sheet_names), xl.sheet_names[0])
         raw = pd.read_excel(path, sheet_name=sheet, header=None)
         df = _standardize_template_df(raw)
+
+        # IMPORTANT:
+        # The Sept-2026 workbook contains formula-based Qty/Volume cells.
+        # Some Excel files have no cached formula result, so pandas can read
+        # those cells as blank. Recover the formula result from the raw sheet
+        # before the values reach the editor/calculation engine.
+        df = _restore_formula_quantities(df, raw)
+
     # IMPORTANT: Jangan mengubah Unit/Volume template menjadi numeric secara
     # paksa. Template dapat berisi nilai seperti "30kw dc", "Lot", atau
     # angka biasa. Jika dipaksa parse_qty_num(), nilai non-numeric akan menjadi
@@ -749,9 +874,14 @@ def edit_boq_sections(
     EVCS (DC20/DC30/DC60) -> Point A dan G
     BSS  (6S1P/12S1P/12S3P) -> Point A dan D
 
-    HANYA kolom Qty/Volume yang editable.
+    HANYA Qty / Volume pada Point yang diizinkan yang editable.
     Item, Satuan, MERK, UNIT PRICE dan TOTAL PRICE readonly.
-    Nilai Qty awal selalu mengikuti template.
+
+    IMPORTANT:
+    - Qty awal TIDAK di-reset ke 0.
+    - Nilai Qty selalu berasal dari template BOQ yang dipilih.
+    - Hanya perubahan Qty yang benar-benar dilakukan user yang diterapkan.
+    - TOTAL PRICE langsung dihitung ulang = Qty x UNIT PRICE pada rerun Streamlit.
     """
     if df_boq is None or df_boq.empty:
         return df_boq
@@ -762,6 +892,8 @@ def edit_boq_sections(
 
     df = df_boq.copy()
 
+    # Pandas/Arrow dapat menghasilkan string dtype. Object dtype aman untuk
+    # mempertahankan Qty template sekaligus menerima hasil edit user.
     for _col in ["Unit/Volume", "UNIT PRICE", "TOTAL PRICE"]:
         if _col in df.columns:
             df[_col] = df[_col].astype(object)
@@ -770,7 +902,7 @@ def edit_boq_sections(
     st.info(
         "💡 Qty / Volume awal mengikuti template BOQ. "
         "Hanya Qty / Volume pada Point yang ditentukan yang dapat diubah. "
-        "Item, Satuan, MERK, UNIT PRICE dan TOTAL PRICE tidak dapat diedit. "
+        "Item, Satuan, MERK dan UNIT PRICE tetap mengikuti template. "
         "TOTAL PRICE otomatis = Qty × UNIT PRICE."
     )
 
@@ -793,34 +925,61 @@ def edit_boq_sections(
         ]
         editor_df = section_df[editor_columns].copy()
 
+        # NEVER convert the template Qty to 0 just because it is non-numeric.
+        # The original value must remain visible in the editor.
         editor_df["Unit/Volume"] = editor_df["Unit/Volume"].apply(clean_text)
         editor_df["Satuan/Uom"] = editor_df["Satuan/Uom"].apply(clean_text)
-        editor_df["UNIT PRICE"] = editor_df["UNIT PRICE"].apply(parse_price).astype(float)
-        editor_df["TOTAL PRICE"] = editor_df["TOTAL PRICE"].apply(parse_price).astype(float)
+        editor_df["MERK"] = editor_df["MERK"].apply(clean_text)
+        editor_df["UNIT PRICE"] = (
+            editor_df["UNIT PRICE"].apply(parse_price).astype(float)
+        )
+        editor_df["TOTAL PRICE"] = (
+            editor_df["TOTAL PRICE"].apply(parse_price).astype(float)
+        )
 
         column_config = {
-            "NO": st.column_config.TextColumn("NO", disabled=True),
-            "Item": st.column_config.TextColumn("Item", disabled=True),
+            "NO": st.column_config.TextColumn(
+                "NO",
+                disabled=True,
+            ),
+            "Item": st.column_config.TextColumn(
+                "Item",
+                disabled=True,
+            ),
             "Unit/Volume": st.column_config.TextColumn(
                 "Qty / Volume",
                 disabled=False,
-                help="Nilai awal mengikuti template. Hanya kolom ini yang boleh diedit.",
+                help=(
+                    "Nilai awal mengikuti template BOQ. "
+                    "Hanya kolom ini yang dapat diedit."
+                ),
             ),
-            "Satuan/Uom": st.column_config.TextColumn("Satuan", disabled=True),
-            "MERK": st.column_config.TextColumn("MERK", disabled=True),
+            "Satuan/Uom": st.column_config.TextColumn(
+                "Satuan",
+                disabled=True,
+            ),
+            "MERK": st.column_config.TextColumn(
+                "MERK",
+                disabled=True,
+            ),
             "UNIT PRICE": st.column_config.NumberColumn(
-                "UNIT PRICE", format="%.0f", disabled=True
+                "UNIT PRICE",
+                format="%.0f",
+                disabled=True,
             ),
             "TOTAL PRICE": st.column_config.NumberColumn(
-                "TOTAL PRICE", format="%.0f", disabled=True
+                "TOTAL PRICE",
+                format="%.0f",
+                disabled=True,
             ),
         }
 
-        # Versioned key intentionally used so an old data_editor state
-        # containing blank Qty cannot overwrite the current template.
-        editor_key = f"{widget_prefix}_section_{section_no}_v4"
+        # IMPORTANT: versioned key prevents stale state from an older version
+        # of the editor (where Qty had been initialized as 0) from replacing
+        # the current template values.
+        editor_key = f"{widget_prefix}_section_{section_no}_v8"
 
-        edited_section = st.data_editor(
+        st.data_editor(
             editor_df,
             hide_index=True,
             use_container_width=True,
@@ -829,10 +988,10 @@ def edit_boq_sections(
             key=editor_key,
         )
 
-        # CRITICAL:
-        # Do NOT copy every row returned by data_editor back into df.
-        # Streamlit can retain an older widget state. We only apply rows
-        # that the user actually edited in this widget.
+        # CRITICAL FIX:
+        # Do NOT copy the complete data_editor dataframe back into df.
+        # Streamlit can restore an old widget state on reruns. That was the
+        # reason the template Qty could suddenly become blank/0.
         widget_state = st.session_state.get(editor_key, {})
         edited_rows = widget_state.get("edited_rows", {})
 
@@ -845,23 +1004,29 @@ def edit_boq_sections(
 
                 if position < 0 or position >= len(section_indices):
                     continue
-                if not isinstance(changes, dict) or "Unit/Volume" not in changes:
+                if not isinstance(changes, dict):
+                    continue
+                if "Unit/Volume" not in changes:
                     continue
 
                 idx = section_indices[position]
-                raw_qty = changes.get("Unit/Volume", "")
+                raw_qty = changes.get("Unit/Volume")
+
+                # User is allowed to enter numeric Qty, including decimals.
                 new_qty = parse_qty_num(raw_qty)
 
-                # Preserve exactly what user entered in the Qty cell.
-                df.loc[idx, "Unit/Volume"] = clean_text(raw_qty)
+                # Store the numeric Qty in the working dataframe so the
+                # calculation engine and PDF use exactly the edited value.
+                df.loc[idx, "Unit/Volume"] = new_qty
                 df.loc[idx, "TOTAL PRICE"] = calculate_detail_total(
                     new_qty,
                     df.loc[idx, "UNIT PRICE"],
                 )
 
+    # Final authoritative calculation for every row.
+    # This also updates section subtotals and the grand total.
     df, _, _, _ = recalculate_boq_totals(df)
     return df
-
 
 def generate_boq_pdf(site_name,site_location,charger_capacity,region,df_boq,sub_total,vat,grand_total):
     buffer=io.BytesIO()
