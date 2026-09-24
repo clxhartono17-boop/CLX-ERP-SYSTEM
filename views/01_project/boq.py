@@ -128,77 +128,22 @@ def clean_text(value):
 
 
 def map_to_standard_province(raw_province):
-    """Map Query-sheet province values to the exact template region.
-
-    This function is intentionally strict about the island groups used by the
-    BOQ templates.  The Create BOQ screen must derive the template region from
-    the selected site's Province in Query, not from a manually guessed value.
-    """
     s = clean_text(raw_province).upper()
-    s = re.sub(r"\s+", " ", s).strip()
-
-    if not s or s in {"-", "N/A", "NA", "NONE", "NULL", "UNKNOWN"}:
+    if not s:
         return "JAVA"
-
-    # JAVA
-    java_terms = {
-        "JAVA", "JAWA", "JABAR", "JATENG", "JATIM", "DIY", "DKI",
-        "JAWA BARAT", "JAWA TENGAH", "JAWA TIMUR",
-        "DAERAH KHUSUS IBUKOTA JAKARTA", "DKI JAKARTA",
-        "DAERAH ISTIMEWA YOGYAKARTA", "DI YOGYAKARTA", "YOGYAKARTA",
-        "BANTEN", "WEST JAVA", "CENTRAL JAVA", "EAST JAVA",
-        "JAKARTA",
-    }
-    if s in java_terms or any(term in s for term in [
-        "JAWA BARAT", "JAWA TENGAH", "JAWA TIMUR", "WEST JAVA",
-        "CENTRAL JAVA", "EAST JAVA", "YOGYAKARTA", "JAKARTA", "BANTEN",
-    ]):
+    if any(x in s for x in ["JAKARTA", "BANTEN", "JAWA", "YOGYAKARTA", "DI YOGYAKARTA"]):
         return "JAVA"
-
-    # SUMATERA
-    sumatera_terms = [
-        "SUMATERA", "SUMATRA", "ACEH", "NANGGROE ACEH", "RIAU",
-        "RIAU ISLAND", "KEPULAUAN RIAU", "JAMBI", "BENGKULU", "LAMPUNG",
-        "SUMATERA BARAT", "SUMATERA UTARA", "SUMATERA SELATAN",
-        "BANGKA", "BELITUNG", "KEPULAUAN BANGKA BELITUNG",
-        "WEST SUMATRA", "NORTH SUMATRA", "SOUTH SUMATRA",
-    ]
-    if any(term in s for term in sumatera_terms):
+    if any(x in s for x in ["SUMATERA", "ACEH", "RIAU", "JAMBI", "BENGKULU", "LAMPUNG", "BANGKA", "BELITUNG"]):
         return "SUMATERA"
-
-    # BALI / NUSA TENGGARA
-    bali_terms = [
-        "BALI", "NUSA TENGGARA", "NTB", "NTT",
-        "NUSA TENGGARA BARAT", "NUSA TENGGARA TIMUR",
-        "WEST NUSA TENGGARA", "EAST NUSA TENGGARA",
-    ]
-    if any(term in s for term in bali_terms):
+    if any(x in s for x in ["BALI", "NUSA TENGGARA", "NTB", "NTT"]):
         return "BALI NUSATENGGARA"
-
-    # KALIMANTAN
-    if any(term in s for term in [
-        "KALIMANTAN", "BORNEO", "WEST KALIMANTAN", "CENTRAL KALIMANTAN",
-        "SOUTH KALIMANTAN", "EAST KALIMANTAN", "NORTH KALIMANTAN",
-    ]):
+    if "KALIMANTAN" in s:
         return "KALIMANTAN"
-
-    # SULAWESI
-    if any(term in s for term in [
-        "SULAWESI", "CELEBES", "GORONTALO", "NORTH SULAWESI",
-        "CENTRAL SULAWESI", "SOUTH SULAWESI", "SOUTHEAST SULAWESI",
-        "WEST SULAWESI",
-    ]):
+    if any(x in s for x in ["SULAWESI", "GORONTALO"]):
         return "SULAWESI"
-
-    # The old code incorrectly classified Papua/Maluku as Sulawesi.  There is
-    # no dedicated Papua/Maluku template in the current workbook, so keep them
-    # outside Java and let the template selector use the NON JAVA sheet.
-    if any(term in s for term in ["PAPUA", "MALUKU", "MALUKU UTARA", "WEST PAPUA"]):
-        return "NON JAVA"
-
-    # Unknown values must NOT silently become a Java province.  They are treated
-    # as non-Java so a DC20/DC30/DC60 BOQ cannot accidentally use the Java sheet.
-    return "NON JAVA"
+    if any(x in s for x in ["PAPUA", "MALUKU"]):
+        return "SULAWESI"
+    return s
 
 
 def normalize_charger_type(charging_type):
@@ -288,43 +233,99 @@ def find_column_by_keywords(columns, keywords):
     return None
 
 
+
 def build_new_template_column_mapping(columns):
+    """
+    Map the real Excel template columns without guessing from column position.
+
+    The September-2026 workbook uses headers such as:
+        NO | Item | Spec | Qty | Lot | MERK | UNIT PRICE 20kw | TOTAL PRICE 20kw
+
+    The old workbook uses:
+        NO | Item | VOLUME | [Lot] | MERK | UNIT PRICE | TOTAL PRICE
+
+    Exact header matches are always preferred.  Keyword matching is only a
+    fallback and every source column can be used only once.
+    """
     cols = list(columns)
+
+    def norm(value):
+        return re.sub(r"[^A-Z0-9]+", "", clean_text(value).upper())
+
+    normalized = [(col, norm(col)) for col in cols]
+    used = set()
     mapping = {}
-    mapping["NO"] = find_column_by_keywords(cols, ["NO"])
-    mapping["ITEM"] = find_column_by_keywords(cols, ["ITEM", "DESCRIPTION", "MATERIAL"])
 
-    # IMPORTANT:
-    # Jangan gunakan keyword generik "UNIT" untuk mencari Satuan/Uom.
-    # Pada template baru terdapat kolom "Unit/Volume" dan "Satuan/Uom".
-    # Jika "UNIT" ikut dicari untuk SATUAN, fungsi lama dapat menemukan
-    # "Unit/Volume" lebih dulu sehingga nilai Qty/Volume masuk ke kolom
-    # Satuan dan kolom Qty/Volume menjadi kosong.
-    mapping["UNIT_VOLUME"] = find_column_by_keywords(
-        cols, ["UNIT/VOL", "UNIT VOL", "QTY/VOL", "QTY", "VOLUME"]
-    )
-    mapping["SATUAN"] = find_column_by_keywords(
-        cols, ["SATUAN/UOM", "SATUAN", "UOM"]
-    )
+    def pick_exact(aliases):
+        aliases_norm = {norm(x) for x in aliases}
+        for col, ncol in normalized:
+            if col in used:
+                continue
+            if ncol in aliases_norm:
+                used.add(col)
+                return col
+        return None
 
-    # Pada template BOQ baru September 2026, kolom satuan ditulis sebagai
-    # "Lot" (contoh: Pcs, Unit, Mtr, m3, md, Lot).  Jangan mencari keyword
-    # generik "UNIT" karena itu bisa menangkap kolom "Unit/Volume".
+    def pick_keyword(keywords):
+        keywords_norm = [norm(x) for x in keywords]
+        for col, ncol in normalized:
+            if col in used:
+                continue
+            if any(k and k in ncol for k in keywords_norm):
+                used.add(col)
+                return col
+        return None
+
+    mapping["NO"] = pick_exact(["NO", "NO."])
+    mapping["ITEM"] = pick_exact([
+        "ITEM", "ITEM NAME", "DESCRIPTION", "DESCRIPTION / ITEM",
+        "MATERIAL", "MATERIAL NAME",
+    ])
+
+    # Qty / Volume is deliberately matched before Satuan/Lot.
+    mapping["UNIT_VOLUME"] = pick_exact([
+        "UNIT/VOLUME", "UNIT / VOLUME", "UNIT/VOL", "UNIT / VOL",
+        "VOLUME", "QTY", "QTY.", "QUANTITY",
+    ])
+
+    # New template calls this column "Lot"; old template can have a blank
+    # header in this position, so Lot is an explicit alias.
+    mapping["SATUAN"] = pick_exact([
+        "SATUAN", "SATUAN/UOM", "SATUAN / UOM", "UOM",
+        "LOT", "UNIT",
+    ])
+
+    mapping["MERK"] = pick_exact(["MERK", "MEREK", "BRAND"])
+
+    mapping["UNIT_PRICE"] = pick_exact([
+        "UNIT PRICE", "UNIT PRICE (IDR)", "UNIT PRICE (RP)", "PRICE",
+    ])
+    mapping["TOTAL_PRICE"] = pick_exact([
+        "TOTAL PRICE", "TOTAL PRICE (IDR)", "TOTAL PRICE (RP)", "TOTAL",
+    ])
+
+    # The EVCS template has "UNIT PRICE 20kw", "UNIT PRICE 30kw", etc.
+    # Therefore exact matching above is followed by a safe keyword fallback.
+    if mapping["NO"] is None:
+        mapping["NO"] = pick_keyword(["NO"])
+    if mapping["ITEM"] is None:
+        mapping["ITEM"] = pick_keyword(["ITEM", "DESCRIPTION", "MATERIAL"])
+    if mapping["UNIT_VOLUME"] is None:
+        mapping["UNIT_VOLUME"] = pick_keyword([
+            "UNIT/VOL", "UNITVOL", "VOLUME", "QTY", "QUANTITY"
+        ])
     if mapping["SATUAN"] is None:
-        for c in cols:
-            if clean_text(c).upper() in {"LOT", "UNIT", "UOM"}:
-                mapping["SATUAN"] = c
-                break
+        # Never use generic "UNIT" here; it can capture Unit/Volume.
+        mapping["SATUAN"] = pick_keyword(["SATUAN", "UOM", "LOT"])
+    if mapping["MERK"] is None:
+        mapping["MERK"] = pick_keyword(["MERK", "MEREK", "BRAND"])
+    if mapping["UNIT_PRICE"] is None:
+        mapping["UNIT_PRICE"] = pick_keyword(["UNITPRICE", "PRICE"])
+    if mapping["TOTAL_PRICE"] is None:
+        mapping["TOTAL_PRICE"] = pick_keyword(["TOTALPRICE", "TOTAL"])
 
-    mapping["MERK"] = find_column_by_keywords(cols, ["MERK", "BRAND"])
-    mapping["UNIT_PRICE"] = find_column_by_keywords(cols, ["UNIT PRICE", "UNIT PRICE (", "PRICE"])
-    mapping["TOTAL_PRICE"] = find_column_by_keywords(cols, ["TOTAL PRICE", "TOTAL"])
     return mapping
 
-
-# ==============================================================================
-# GOOGLE SHEETS HELPERS
-# ==============================================================================
 def _get_book():
     try:
         return get_google_sheet_connection()
@@ -418,77 +419,36 @@ def get_existing_saved_site_charger_pairs():
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_query_site_options(exclude_saved=True):
-    """Return site options and metadata from Query.
-
-    The site-to-template mapping is driven by the Province belonging to the
-    selected site.  Header-name detection is preferred, with the established
-    B/C/D/F/G/I positions kept as a fallback for the existing Query layout.
-    """
     df = read_sheet_df(QUERY_SHEET)
     if df.empty:
         return [], {}
-
-    def norm_header(value):
-        return re.sub(r"[^A-Z0-9]", "", clean_text(value).upper())
-
-    def find_header(*names):
-        wanted = {norm_header(x) for x in names}
-        for col in df.columns:
-            if norm_header(col) in wanted:
-                return col
-        return None
-
-    # Prefer explicit headers if the Query sheet exposes them.
-    epc_c = find_header("EPC", "EPC Name", "EPC NAME")
-    charger_c = find_header("Charger", "Charging Type", "Charger Type", "CHARGER")
-    status_c = find_header("Status")
-    site_c = find_header("Site", "Site Name", "SiteName")
-    addr_c = find_header("Address", "Site Address", "Location")
-    province_c = find_header("Province", "Provinsi", "Province Standar", "Standard Province")
-
-    # Existing Query layout: B EPC, C Charger, D Status, F Site, G Address, I Province.
+    # Original Query structure: B EPC, C Charger, D Status, F Site, G Address, I Province.
     def at(pos):
         return df.columns[pos] if pos < len(df.columns) else None
-
-    epc_c = epc_c or at(1)
-    charger_c = charger_c or at(2)
-    status_c = status_c or at(3)
-    site_c = site_c or at(5)
-    addr_c = addr_c or at(6)
-    province_c = province_c or at(8)
-
+    epc_c, charger_c, status_c, site_c, addr_c, province_c = at(1), at(2), at(3), at(5), at(6), at(8)
     if site_c is None:
         return [], {}
-
     saved = get_existing_saved_site_charger_pairs() if exclude_saved else set()
     options, data = [], {}
-
     for _, r in df.iterrows():
         site = clean_text(r.get(site_c, ""))
         charger = normalize_charger_type(r.get(charger_c, ""))
         status = clean_text(r.get(status_c, "")).upper() if status_c else ""
-        raw_province = clean_text(r.get(province_c, "")) if province_c else ""
-
         if not site or status in {"DROP", "CANCEL"}:
             continue
-
         key = (site.lower(), charger)
         if exclude_saved and key in saved:
             continue
-
         display = f"{site} ({charger})"
         if display not in data:
-            region = map_to_standard_province(raw_province)
             data[display] = {
                 "Site Name": site,
                 "Charging Type": charger,
                 "Address": clean_text(r.get(addr_c, "")) if addr_c else "",
-                "Province": raw_province,
-                "Region": region,
+                "Province": clean_text(r.get(province_c, "")) if province_c else "",
                 "EPC Name": clean_text(r.get(epc_c, "")) if epc_c else "",
             }
             options.append(display)
-
     return options, data
 
 
@@ -560,111 +520,190 @@ def calculate_detail_total(quantity, unit_price):
     return parse_qty_num(quantity) * parse_price(unit_price)
 
 
-def recalculate_boq_totals(df_boq):
-    """Recalculate BOQ totals using the template's DPP total row.
 
-    IMPORTANT:
-    - The Excel template contains the BOQ amount as DPP (before VAT).
-    - Row ``I / Total`` is the authoritative DPP total when it exists.
-    - VAT is calculated afterwards: DPP * 11%.
-    - Grand Total / Total Contractor Price Inc. VAT = DPP + VAT.
-    - Section totals (A-H) are never added together with their detail rows.
+
+
+def recalculate_boq_totals(df_boq):
+    """
+    Recalculate BOQ totals while preserving the template's displayed values.
+
+    The template is the source of truth for every existing detail TOTAL PRICE.
+    User edits are already applied by edit_boq_sections() / the old-template
+    editor, which updates the affected detail TOTAL PRICE. This function then
+    rolls those values up into section totals and the DPP.
+
+    This avoids changing a template value such as 37,000 into 36,972 merely
+    because Excel displayed a rounded/cached value.
     """
     if df_boq is None or df_boq.empty:
         return df_boq, 0.0, 0.0, 0.0
 
     df = df_boq.copy()
-    required = ["NO", "Item", "Unit/Volume", "Satuan/Uom", "MERK", "UNIT PRICE", "TOTAL PRICE"]
+
+    required = [
+        "NO", "Item", "Unit/Volume", "Satuan/Uom",
+        "MERK", "UNIT PRICE", "TOTAL PRICE"
+    ]
     for c in required:
         if c not in df.columns:
             df[c] = ""
 
-    # Preserve the TOTAL PRICE values that came from the Excel template.
-    # In particular, the template's ``I / Total`` row contains the DPP.
-    original_total_price = df["TOTAL PRICE"].copy()
-
     parent_labels = {"A", "B", "C", "D", "E", "F", "G", "H"}
+
+    def item_upper(row):
+        return clean_text(row.get("Item", "")).upper()
+
+    def is_dpp_summary(row):
+        item = item_upper(row)
+        return item in {"TOTAL", "SUB TOTAL", "SUBTOTAL"}
+
+    def is_vat_summary(row):
+        item = item_upper(row)
+        return bool(re.match(r"^(VAT|PPN)\b", item))
+
+    def is_grand_summary(row):
+        item = item_upper(row)
+        return (
+            "TOTAL CONTRACTOR PRICE" in item
+            or item in {"GRAND TOTAL", "TOTAL INC. VAT", "TOTAL INCLUDING VAT"}
+        )
+
+    def is_roman_subtotal(row):
+        no = clean_text(row.get("NO", "")).upper()
+        item = clean_text(row.get("Item", ""))
+        if not no or not item:
+            return False
+        if not re.fullmatch(r"[IVXLCDM]+", no):
+            return False
+
+        # Roman rows such as I / II in EVCS are cached subsection totals.
+        return (
+            parse_price(row.get("UNIT PRICE", 0)) == 0
+            and parse_price(row.get("TOTAL PRICE", 0)) != 0
+        )
+
+    def template_row_total(row):
+        """
+        Preserve the actual displayed/cached TOTAL PRICE from Excel.
+
+        If the template has no total but the row is directly calculable,
+        calculate it as a safe fallback.
+        """
+        cached_total = parse_price(row.get("TOTAL PRICE", 0))
+        if cached_total != 0:
+            return cached_total
+
+        qty = parse_qty_num(row.get("Unit/Volume", 0))
+        unit_price = parse_price(row.get("UNIT PRICE", 0))
+        if qty != 0 and unit_price != 0:
+            return qty * unit_price
+
+        return 0.0
+
+    parent_positions = [
+        pos for pos, (_, row) in enumerate(df.iterrows())
+        if clean_text(row.get("NO", "")).upper() in parent_labels
+    ]
+
     totals = [0.0] * len(df)
-    parent_positions = []
-    dpp_total_row_positions = []
 
-    for pos, (_, r) in enumerate(df.iterrows()):
-        no = clean_text(r["NO"]).upper()
-        item_name = clean_text(r["Item"]).upper()
-
-        # The template's final Total row is DPP. Never replace it with
-        # qty * unit price (which would normally be zero on this row).
-        if no == "I" or item_name in {"TOTAL", "SUB TOTAL", "SUBTOTAL"}:
-            template_total = parse_price(original_total_price.iloc[pos])
-            totals[pos] = template_total
-            if template_total != 0:
-                dpp_total_row_positions.append(pos)
-            continue
-
-        if no in parent_labels:
-            parent_positions.append(pos)
-            totals[pos] = 0.0
-        else:
-            totals[pos] = calculate_detail_total(
-                r["Unit/Volume"],
-                r["UNIT PRICE"],
-            )
-
-    # Calculate each section total from its detail rows. A section row is
-    # already a subtotal, so it must not be added again to its detail rows.
-    for parent_idx, parent_pos in enumerate(parent_positions):
+    # --------------------------------------------------------------------------
+    # Main section roll-up
+    # --------------------------------------------------------------------------
+    for parent_index, parent_pos in enumerate(parent_positions):
         next_parent_pos = (
-            parent_positions[parent_idx + 1]
-            if parent_idx + 1 < len(parent_positions)
+            parent_positions[parent_index + 1]
+            if parent_index + 1 < len(parent_positions)
             else len(df)
         )
 
-        qty = parse_qty_num(df.iloc[parent_pos]["Unit/Volume"])
-        price = parse_price(df.iloc[parent_pos]["UNIT PRICE"])
+        parent_row = df.iloc[parent_pos]
+        parent_qty = parse_qty_num(parent_row.get("Unit/Volume", 0))
+        parent_price = parse_price(parent_row.get("UNIT PRICE", 0))
+        parent_cached_total = parse_price(parent_row.get("TOTAL PRICE", 0))
 
-        if qty != 0 and price != 0:
-            section_total = qty * price
-        else:
-            section_total = sum(
-                totals[p]
-                for p in range(parent_pos + 1, next_parent_pos)
-                if p not in dpp_total_row_positions
+        # A directly priced section (for example transport) remains exactly
+        # the template value / Qty x Unit Price.
+        if parent_qty != 0 and parent_price != 0:
+            totals[parent_pos] = (
+                parent_qty * parent_price
+                if parent_cached_total == 0
+                else parent_cached_total
             )
+            continue
+
+        section_total = 0.0
+        roman_active = False
+
+        for pos in range(parent_pos + 1, next_parent_pos):
+            row = df.iloc[pos]
+
+            if is_dpp_summary(row) or is_vat_summary(row) or is_grand_summary(row):
+                continue
+
+            no = clean_text(row.get("NO", "")).upper()
+
+            # Roman subsection: count its subtotal once.
+            if is_roman_subtotal(row):
+                section_total += parse_price(row.get("TOTAL PRICE", 0))
+                roman_active = True
+                continue
+
+            if roman_active:
+                # All ordinary rows following a Roman subtotal belong to that
+                # subsection and are already included in its subtotal.
+                if re.fullmatch(r"[IVXLCDM]+", no):
+                    roman_active = True
+                else:
+                    continue
+
+            section_total += template_row_total(row)
+
+        # If the section had no child detail but has a valid cached total,
+        # preserve that value.
+        if section_total == 0 and parent_cached_total != 0:
+            section_total = parent_cached_total
 
         totals[parent_pos] = section_total
 
-    df["TOTAL PRICE"] = totals
-
-    # ================================================================
-    # DPP
-    # ================================================================
-    # Prefer the explicit ``I / Total`` value from the template. This is
-    # exactly what the Excel BOQ provides and avoids double counting.
-    if dpp_total_row_positions:
-        subtotal = parse_price(
-            original_total_price.iloc[dpp_total_row_positions[-1]]
-        )
-    elif parent_positions:
-        # Fallback only when the template has no explicit I/Total row.
+    # --------------------------------------------------------------------------
+    # No A-H section fallback
+    # --------------------------------------------------------------------------
+    if parent_positions:
         subtotal = sum(totals[p] for p in parent_positions)
     else:
-        # Final fallback for templates without section rows.
         subtotal = 0.0
-        for pos, (_, r) in enumerate(df.iterrows()):
-            no = clean_text(r["NO"]).upper()
-            item_name = clean_text(r["Item"]).upper()
-            if no == "I" or item_name in {"TOTAL", "GRAND TOTAL", "SUB TOTAL", "SUBTOTAL"}:
+        for _, row in df.iterrows():
+            if is_dpp_summary(row) or is_vat_summary(row) or is_grand_summary(row):
                 continue
-            subtotal += totals[pos]
+            subtotal += template_row_total(row)
 
-    # ================================================================
-    # VAT / GRAND TOTAL
-    # ================================================================
     vat = subtotal * 0.11
     grand = subtotal + vat
 
-    return df, subtotal, vat, grand
+    # --------------------------------------------------------------------------
+    # Write rolled-up values
+    # --------------------------------------------------------------------------
+    for pos, (_, row) in enumerate(df.iterrows()):
+        if pos in parent_positions:
+            df.iloc[pos, df.columns.get_loc("TOTAL PRICE")] = totals[pos]
+        elif is_dpp_summary(row):
+            df.iloc[pos, df.columns.get_loc("TOTAL PRICE")] = subtotal
+        elif is_vat_summary(row):
+            df.iloc[pos, df.columns.get_loc("TOTAL PRICE")] = vat
+        elif is_grand_summary(row):
+            df.iloc[pos, df.columns.get_loc("TOTAL PRICE")] = grand
+        elif is_roman_subtotal(row):
+            # Preserve template subsection subtotal.
+            df.iloc[pos, df.columns.get_loc("TOTAL PRICE")] = parse_price(
+                row.get("TOTAL PRICE", 0)
+            )
+        else:
+            # Keep the template detail total; user-edited rows already carry
+            # their newly calculated TOTAL PRICE.
+            df.iloc[pos, df.columns.get_loc("TOTAL PRICE")] = template_row_total(row)
 
+    return df, subtotal, vat, grand
 
 def _old_template_offsets(region):
     return {"JAVA":0, "SUMATERA":8, "BALI NUSATENGGARA":16, "KALIMANTAN":25, "SULAWESI":33}.get(region, 0)
@@ -693,22 +732,35 @@ def _first_series_by_header(data, source):
         return None
 
 
+
 def _standardize_template_df(raw, header_row=None):
-    if raw.empty:
-        return pd.DataFrame(columns=["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"])
+    if raw is None or raw.empty:
+        return pd.DataFrame(
+            columns=["NO", "Item", "Unit/Volume", "Satuan/Uom",
+                     "MERK", "UNIT PRICE", "TOTAL PRICE"]
+        )
 
     raw = raw.copy()
     if header_row is None:
         header_row = detect_template_header(raw)
 
+    if header_row < 0 or header_row >= len(raw):
+        header_row = 0
+
     headers = [clean_text(x) for x in raw.iloc[header_row].tolist()]
-    data = raw.iloc[header_row+1:].copy()
+    data = raw.iloc[header_row + 1:].copy()
     data.columns = headers
 
-    # Keep blank-header columns out, but DO NOT deduplicate/rename the real
-    # headers here because the mapping below intentionally uses the original
-    # template names.
-    data = data.loc[:, [c != "" for c in data.columns]]
+    # Remove only columns whose header is genuinely blank.
+    # Do not remove blank data rows: they are part of the visual template.
+    keep_positions = [i for i, c in enumerate(data.columns) if clean_text(c) != ""]
+    if not keep_positions:
+        return pd.DataFrame(
+            columns=["NO", "Item", "Unit/Volume", "Satuan/Uom",
+                     "MERK", "UNIT PRICE", "TOTAL PRICE"]
+        )
+
+    data = data.iloc[:, keep_positions]
 
     mapping = build_new_template_column_mapping(data.columns)
     out = pd.DataFrame(index=data.index)
@@ -716,82 +768,303 @@ def _standardize_template_df(raw, header_row=None):
     for target, source in mapping.items():
         if source is None:
             continue
-        series = _first_series_by_header(data, source)
-        if series is not None:
-            out[target] = series.to_numpy()
 
-    rename = {
-        "NO":"NO",
-        "ITEM":"Item",
-        "UNIT_VOLUME":"Unit/Volume",
-        "SATUAN":"Satuan/Uom",
-        "MERK":"MERK",
-        "UNIT_PRICE":"UNIT PRICE",
-        "TOTAL_PRICE":"TOTAL PRICE",
-    }
-    out = out.rename(columns=rename)
+        # Select by physical column position. This is important when an Excel
+        # template contains duplicate/merged headers.
+        positions = [i for i, col in enumerate(data.columns) if col == source]
+        if not positions:
+            continue
 
-    for c in ["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"]:
+        series = data.iloc[:, positions[0]]
+        out[target] = series.to_numpy()
+
+    out = out.rename(columns={
+        "NO": "NO",
+        "ITEM": "Item",
+        "UNIT_VOLUME": "Unit/Volume",
+        "SATUAN": "Satuan/Uom",
+        "MERK": "MERK",
+        "UNIT_PRICE": "UNIT PRICE",
+        "TOTAL_PRICE": "TOTAL PRICE",
+    })
+
+    required = [
+        "NO", "Item", "Unit/Volume", "Satuan/Uom",
+        "MERK", "UNIT PRICE", "TOTAL PRICE"
+    ]
+    for c in required:
         if c not in out.columns:
             out[c] = ""
 
-    out = out[["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"]]
-    return out.reset_index(drop=True)
 
+    # Normalize summary rows that use a different physical layout in the
+    # legacy workbook.  Example:
+    #   F54 = "Sub Total :" and G54 = 47,100,000
+    #   A56 = 41,500 and F56 = "Total Contractor Price"
+    #
+    # The visible BOQ meaning is preserved in the canonical Item column so
+    # the table/PDF and calculation engine can recognize it correctly.
+    for i in out.index:
+        no = clean_text(out.at[i, "NO"])
+        item = clean_text(out.at[i, "Item"])
+        unit_price_raw = clean_text(out.at[i, "UNIT PRICE"])
+
+        if not item:
+            label = ""
+
+            if re.match(r"^(SUB\s*TOTAL|SUBTOTAL|VAT|TOTAL\s+CONTRACTOR\s+PRICE|GRAND\s+TOTAL|TOTAL)\b",
+                        no, flags=re.IGNORECASE):
+                label = no
+
+            if re.match(r"^(SUB\s*TOTAL|SUBTOTAL|VAT|TOTAL\s+CONTRACTOR\s+PRICE|GRAND\s+TOTAL)\b",
+                        unit_price_raw, flags=re.IGNORECASE):
+                label = unit_price_raw
+
+            if label:
+                out.at[i, "Item"] = label.strip()
+                out.at[i, "NO"] = ""
+                out.at[i, "UNIT PRICE"] = ""
+
+    return out[required].reset_index(drop=True)
+
+
+
+def _normalize_boq_summary_rows(df):
+    """
+    Normalize legacy summary rows into the canonical BOQ columns.
+
+    Legacy Excel places labels such as "Sub Total :" and "VAT 11%" in the
+    Unit Price column and may contain a numeric artifact in NO. The displayed
+    meaning is moved to Item so the rest of the existing UI/calculation logic
+    can recognize the row correctly.
+    """
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+
+    for i in out.index:
+        no = clean_text(out.at[i, "NO"])
+        item = clean_text(out.at[i, "Item"])
+        unit_price_raw = clean_text(out.at[i, "UNIT PRICE"])
+
+        if item:
+            continue
+
+        label = ""
+
+        if re.match(
+            r"^(SUB\s*TOTAL|SUBTOTAL|VAT|TOTAL\s+CONTRACTOR\s+PRICE|GRAND\s+TOTAL|TOTAL)\b",
+            no,
+            flags=re.IGNORECASE,
+        ):
+            label = no
+
+        if re.match(
+            r"^(SUB\s*TOTAL|SUBTOTAL|VAT|TOTAL\s+CONTRACTOR\s+PRICE|GRAND\s+TOTAL|TOTAL)\b",
+            unit_price_raw,
+            flags=re.IGNORECASE,
+        ):
+            label = unit_price_raw
+
+        if label:
+            out.at[i, "Item"] = label.strip()
+            out.at[i, "NO"] = ""
+            out.at[i, "UNIT PRICE"] = ""
+
+    return out
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_boq_dataframe(charging_type, province_str, template_name="Template BOQ Vgreen Lama"):
+    """
+    Load the selected BOQ template exactly as displayed in Excel.
+
+    Important fixes:
+    1. Excel formulas are read with their cached/displayed values
+       (openpyxl data_only=True), so formula text such as ``=D9*G9`` is
+       never accidentally parsed as a price.
+    2. OLD template regional blocks are horizontal (JAVA, SUMATERA,
+       BALI NUSATENGGARA, KALIMANTAN, SULAWESI).  The previous code shifted
+       rows, which mixed unrelated rows.  We now select the correct block.
+    3. NEW template uses Qty/Lot and charger-specific Unit Price/Total Price
+       headers.  Header mapping is exact-first and never maps Unit/Volume to
+       Satuan/Lot.
+    4. The loader does NOT recalculate the template.  It mirrors the template
+       first.  Existing calculation logic runs only later when the user edits
+       Qty/Volume or when totals are requested.
+    """
     filename = TEMPLATE_OPTIONS.get(template_name, template_name)
     path = get_template_path(filename)
+
     if not os.path.exists(path):
         raise FileNotFoundError(f"Template tidak ditemukan: {path}")
+
     c = normalize_charger_type(charging_type)
     region = map_to_standard_province(province_str)
-    if template_name == "Template BOQ Vgreen Lama":
-        sheet_map = {"DC20":"DC20","DC30":"DC30","DC60":"DC60","DC120":"DC120","6S1P":"6S1P","12S1P":"12S1P","12S3P":"12S3P","7KW":"7KW","22KW":"22KW"}
-        sheet = sheet_map.get(c, c)
-        raw = pd.read_excel(path, sheet_name=sheet, header=None)
-        off = _old_template_offsets(region)
-        # Existing old template stores regional price blocks. Keep the first
-        # seven columns and shift rows according to the established region offset.
-        if off and len(raw) > off:
-            raw = raw.iloc[off:].reset_index(drop=True)
-        header_row = detect_template_header(raw)
-        # Old template commonly has a fixed 7-column structure.
-        if header_row == 0 and raw.shape[1] >= 7:
-            first = [clean_text(x).upper() for x in raw.iloc[0].tolist()]
-            if not any("ITEM" in x for x in first):
-                raw.columns = ["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"] + list(raw.columns[7:])
-                df = raw.iloc[:, :7].copy()
-                df.columns = ["NO","Item","Unit/Volume","Satuan/Uom","MERK","UNIT PRICE","TOTAL PRICE"]
-            else:
-                df = _standardize_template_df(raw, header_row)
+
+    # --------------------------------------------------------------------------
+    # Read Excel using cached/displayed values.
+    # --------------------------------------------------------------------------
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(
+            filename=path,
+            data_only=True,
+            read_only=False,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Gagal membaca template Excel '{filename}': {e}")
+
+    try:
+        if template_name == "Template BOQ Vgreen Lama":
+            sheet_map = {
+                "DC20": "DC20",
+                "DC30": "DC30",
+                "DC60": "DC60",
+                "DC120": "DC120",
+                "6S1P": "6S1P",
+                "12S1P": "12S1P",
+                "12S3P": "12S3P",
+                "7KW": "7KW",
+                "22KW": "22KW",
+            }
+            sheet = sheet_map.get(c, c)
+
+            if sheet not in wb.sheetnames:
+                raise ValueError(
+                    f"Sheet '{sheet}' tidak ditemukan di template lama. "
+                    f"Sheet tersedia: {', '.join(wb.sheetnames)}"
+                )
+
+            ws = wb[sheet]
+
+            # OLD EVCS sheets contain five BOQ blocks side-by-side:
+            #   A:G = JAVA
+            #   I:O = SUMATERA
+            #   Q:W = BALI NUSATENGGARA
+            #   Y:AE = KALIMANTAN
+            #   AG:AM = SULAWESI
+            #
+            # Each block has 7 real columns + 1 spacer column.
+            block_start = {
+                "JAVA": 1,
+                "SUMATERA": 9,
+                "BALI NUSATENGGARA": 17,
+                "KALIMANTAN": 25,
+                "SULAWESI": 33,
+            }.get(region)
+
+            # BSS old template contains only one 7-column BOQ block.
+            if block_start is None:
+                block_start = 1
+
+            # Find the header row from the selected block, not from unrelated
+            # regional blocks.
+            header_row = None
+            for r in range(1, min(30, ws.max_row) + 1):
+                no_val = clean_text(ws.cell(r, block_start).value).upper()
+                item_val = clean_text(ws.cell(r, block_start + 1).value).upper()
+                if no_val in {"NO", "NO."} and "ITEM" in item_val:
+                    header_row = r
+                    break
+
+            if header_row is None:
+                # Known old-template layouts.
+                header_row = 6 if c in {"DC20", "DC30", "DC60", "DC120"} else 7
+
+            rows = []
+            for r in range(header_row, ws.max_row + 1):
+                values = [
+                    ws.cell(r, block_start + offset).value
+                    for offset in range(7)
+                ]
+                rows.append(values)
+
+            raw = pd.DataFrame(
+                rows,
+                columns=[
+                    "NO",
+                    "Item",
+                    "VOLUME",
+                    "Satuan/Uom",
+                    "MERK",
+                    "UNIT PRICE",
+                    "TOTAL PRICE",
+                ],
+            )
+
+            # Drop the actual header row from the data.
+            if not raw.empty:
+                raw = raw.iloc[1:].reset_index(drop=True)
+
+            df = raw.copy()
+            df = df.rename(columns={
+                "VOLUME": "Unit/Volume",
+                "Satuan/Uom": "Satuan/Uom",
+            })
+            # Keep the canonical seven columns used by the rest of the module.
+            df = df[[
+                "NO", "Item", "Unit/Volume", "Satuan/Uom",
+                "MERK", "UNIT PRICE", "TOTAL PRICE"
+            ]]
+            df = _normalize_boq_summary_rows(df)
+            sheet_return = sheet
+
         else:
+            sheet = get_new_template_sheet_name(c, province_str)
+
+            if sheet not in wb.sheetnames:
+                alternatives = [
+                    c,
+                    c.upper(),
+                    c.replace("DC", ""),
+                ]
+                sheet = next(
+                    (x for x in alternatives if x in wb.sheetnames),
+                    None,
+                )
+
+            if not sheet:
+                raise ValueError(
+                    f"Sheet template baru untuk charger '{c}' tidak ditemukan."
+                )
+
+            ws = wb[sheet]
+
+            # Read complete sheet as displayed/cached values.
+            values = list(ws.iter_rows(values_only=True))
+            raw = pd.DataFrame(values)
+
+            header_row = detect_template_header(raw)
             df = _standardize_template_df(raw, header_row)
-    else:
-        sheet = get_new_template_sheet_name(c, province_str)
-        xl = pd.ExcelFile(path)
-        if sheet not in xl.sheet_names:
-            # Fall back to normalized charger sheet if the exact regional sheet
-            # is not present.
-            alternatives = [c, c.upper(), c.replace("DC", "")]
-            sheet = next((x for x in alternatives if x in xl.sheet_names), xl.sheet_names[0])
-        raw = pd.read_excel(path, sheet_name=sheet, header=None)
-        df = _standardize_template_df(raw)
-    # IMPORTANT: Jangan mengubah Unit/Volume template menjadi numeric secara
-    # paksa. Template dapat berisi nilai seperti "30kw dc", "Lot", atau
-    # angka biasa. Jika dipaksa parse_qty_num(), nilai non-numeric akan menjadi
-    # 0 dan BOQ yang tampil tidak lagi sama dengan template asli.
+            sheet_return = sheet
+
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+    # --------------------------------------------------------------------------
+    # Preserve the template values.
+    # --------------------------------------------------------------------------
     for col in ["NO", "Item", "Unit/Volume", "Satuan/Uom", "MERK"]:
         df[col] = df[col].apply(clean_text)
 
-    # Unit/Volume dibiarkan mengikuti nilai asli template. Engine kalkulasi
-    # tetap menggunakan parse_qty_num() saat menghitung TOTAL PRICE.
+    # Cached Excel values are already numeric for normal price cells.
+    # Formula cells without a cached result remain blank/zero rather than
+    # incorrectly extracting digits from the formula text.
     df["UNIT PRICE"] = df["UNIT PRICE"].apply(parse_price)
     df["TOTAL PRICE"] = df["TOTAL PRICE"].apply(parse_price)
-    df, _, _, _ = recalculate_boq_totals(df)
-    return df.reset_index(drop=True), sheet, region
 
+    # IMPORTANT:
+    # Do NOT call recalculate_boq_totals() here.
+    #
+    # The purpose of this function is to mirror the selected Excel template.
+    # Existing UI flows call recalculate_boq_totals() only after user edits
+    # or when totals are explicitly calculated.
+    return df.reset_index(drop=True), sheet_return, region
 
 # ==============================================================================
 # EXISTING SECTION EDITOR
@@ -1705,19 +1978,8 @@ def _render_boq_create():
     site_address=c2.text_input("Address (Kolom G)",value=meta.get("Address","-"),key=f"address_{selected_label}")
     c3,c4,c5=st.columns([1.5,1.5,1])
     charging_type=c3.text_input("Charging Type (Kolom C)",value=meta.get("Charging Type","DC20"),key=f"charger_{selected_label}")
-
-    # IMPORTANT: Region is derived from the selected site's Province in Query.
-    # It must not be manually changed here, otherwise a Java site can be
-    # accidentally loaded from a NON JAVA template.
-    raw_province = clean_text(meta.get("Province", ""))
-    province = map_to_standard_province(raw_province)
-    c4.text_input(
-        "Region / Island (Auto dari Site)",
-        value=province,
-        disabled=True,
-        key=f"province_auto_{selected_label}",
-    )
-    c5.caption(f"Province Query: `{raw_province or '-'} → {province}`")
+    province=c4.text_input("Province Standar (Kolom I Mapped)",value=meta.get("Province","JAVA"),key=f"province_{selected_label}")
+    c5.caption(f"Raw Province Sheet: `{meta.get('Province','-')}`")
     epc_name=st.text_input("EPC Name (Kolom B)",value=meta.get("EPC Name","-"),key=f"epc_{selected_label}")
     saved_pairs=get_existing_saved_site_charger_pairs(); pair=(selected_site.strip().lower(),charging_type.strip().lower()); is_already_saved=pair in saved_pairs or selected_site=="-"
     if is_already_saved and selected_site!="-": st.warning(f"⚠️ Kombinasi Site `{selected_site}` dengan Charger `{charging_type}` sudah pernah dibuatkan BOQ.")
@@ -1767,10 +2029,7 @@ def _render_boq_edit():
     template_name=st.selectbox("Pilih Template untuk Edit / Re-Download PDF",list(TEMPLATE_OPTIONS.keys()),index=list(TEMPLATE_OPTIONS.keys()).index(template_name),key=f"edit_boq_template_{key}")
     _,qmap=fetch_query_site_options(exclude_saved=False)
     meta=next((v for v in qmap.values() if v.get("Site Name","").strip().lower()==old_site.strip().lower() and normalize_charger_type(v.get("Charging Type",""))==normalize_charger_type(old_charger)),{"Address":"-","Province":"JAVA","EPC Name":"-"})
-    site=st.text_input("Site Name",old_site,key=f"edit_site_{key}"); charger=st.text_input("Charger Type",old_charger,key=f"edit_charger_{key}"); epc=st.text_input("EPC Name",data.get("EPC Name","-"),key=f"edit_epc_{key}"); address=st.text_input("Address",meta.get("Address","-"),key=f"edit_address_{key}")
-    raw_province = clean_text(meta.get("Province", ""))
-    province = map_to_standard_province(raw_province)
-    st.text_input("Region / Island (Auto dari Site)",province,disabled=True,key=f"edit_province_auto_{key}")
+    site=st.text_input("Site Name",old_site,key=f"edit_site_{key}"); charger=st.text_input("Charger Type",old_charger,key=f"edit_charger_{key}"); epc=st.text_input("EPC Name",data.get("EPC Name","-"),key=f"edit_epc_{key}"); address=st.text_input("Address",meta.get("Address","-"),key=f"edit_address_{key}"); province=st.text_input("Province",meta.get("Province","JAVA"),key=f"edit_province_{key}")
     df,target,region=load_boq_dataframe(charger,province,template_name)
     if df is None or df.empty: return
     df=edit_boq_sections(df,charger,f"edit_detail_{key}_{template_name}_{charger}"); df,sub,vat,grand=recalculate_boq_totals(df)
