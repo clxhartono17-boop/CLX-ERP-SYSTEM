@@ -35,6 +35,10 @@ except ModuleNotFoundError:
 # ==============================================================================
 OLD_TEMPLATE_FILENAME = "Template BOQ Vgreen.xlsx"
 NEW_TEMPLATE_FILENAME = "New Template BOQ Sept 2026 All Charger.xlsx"
+
+# Increment whenever template parsing/edit-state behavior changes.
+# This also invalidates Streamlit cache after deployment.
+BOQ_TEMPLATE_PARSER_VERSION = "2026-09-24-V3"
 TEMPLATE_OPTIONS = {
     "Template BOQ Vgreen Lama": OLD_TEMPLATE_FILENAME,
     "New Template BOQ Sept 2026": NEW_TEMPLATE_FILENAME,
@@ -796,6 +800,20 @@ def _standardize_template_df(raw, header_row=None):
         if c not in out.columns:
             out[c] = ""
 
+    # Defensive fallback for September-2026 templates: the UOM column is
+    # physically the Excel "Lot" column. If a header variation prevented the
+    # normal mapping, recover it by position relative to Qty/MERK.
+    if out["Satuan/Uom"].apply(clean_text).eq("").all():
+        try:
+            qty_src = mapping.get("UNIT_VOLUME")
+            lot_src = mapping.get("SATUAN")
+            if lot_src is not None:
+                lot_positions = [i for i, col in enumerate(data.columns) if col == lot_src]
+                if lot_positions:
+                    out["Satuan/Uom"] = data.iloc[:, lot_positions[0]].to_numpy()
+        except Exception:
+            pass
+
 
     # Normalize summary rows that use a different physical layout in the
     # legacy workbook.  Example:
@@ -875,7 +893,7 @@ def _normalize_boq_summary_rows(df):
     return out
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_boq_dataframe(charging_type, province_str, template_name="Template BOQ Vgreen Lama"):
+def load_boq_dataframe(charging_type, province_str, template_name="Template BOQ Vgreen Lama", _parser_version=BOQ_TEMPLATE_PARSER_VERSION):
     """
     Load the selected BOQ template exactly as displayed in Excel.
 
@@ -1246,19 +1264,42 @@ def edit_boq_sections(
                 continue
 
             edited_row = edited_section.iloc[position]
+            original_qty = df.loc[idx, "Unit/Volume"]
 
-            # HANYA Qty yang diambil dari hasil editor.
-            # Item/Satuan/MERK/UNIT PRICE tetap dari template asli.
-            new_qty = parse_qty_num(
-                edited_row["Unit/Volume"]
-            )
+            # IMPORTANT: Streamlit data_editor can return its persisted widget
+            # state instead of the freshly loaded Excel value. In older widget
+            # states this may be blank. A blank editor value is NOT a user
+            # request to erase Qty, so keep the template value.
+            edited_qty_raw = edited_row.get("Unit/Volume", "")
+            edited_qty_text = clean_text(edited_qty_raw)
+            original_qty_text = clean_text(original_qty)
+
+            if edited_qty_text == "" and original_qty_text != "":
+                new_qty = original_qty
+            else:
+                new_qty = parse_qty_num(edited_qty_raw)
+
+            # Section/header rows such as A, G, etc. do not represent an
+            # editable material quantity. Never turn their blank Qty into 0.
+            no_value = clean_text(df.loc[idx, "NO"]).upper()
+            item_value = clean_text(df.loc[idx, "Item"])
+            if no_value in {"A", "B", "C", "D", "E", "F", "G", "H"} and original_qty_text == "":
+                new_qty = original_qty
 
             df.loc[idx, "Unit/Volume"] = new_qty
 
-            df.loc[idx, "TOTAL PRICE"] = calculate_detail_total(
-                new_qty,
-                df.loc[idx, "UNIT PRICE"],
-            )
+            # Only rows with a real Qty + Unit Price get a newly calculated
+            # detail total. Otherwise preserve the template cached total.
+            if clean_text(new_qty) != "" and parse_qty_num(new_qty) != 0 and parse_price(df.loc[idx, "UNIT PRICE"]) != 0:
+                df.loc[idx, "TOTAL PRICE"] = calculate_detail_total(
+                    new_qty,
+                    df.loc[idx, "UNIT PRICE"],
+                )
+
+            # Never let the editor overwrite readonly template fields.
+            # This explicitly preserves Lot/UOM, MERK and UNIT PRICE.
+            # (They are also disabled in the data_editor.)
+            # No assignment from edited_section is made for these fields.
 
     # Final calculation tetap menggunakan engine BOQ existing.
     df, _, _, _ = recalculate_boq_totals(df)
