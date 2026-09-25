@@ -912,7 +912,8 @@ structure_menu = {
 
     "SCM Div": [
         "Create PO",
-        "Create DO",
+        "Create DO"
+        "good_receipt",
     ],
 
     "General / Lapangan": [
