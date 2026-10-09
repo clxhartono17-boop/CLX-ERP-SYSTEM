@@ -2,7 +2,7 @@ import datetime
 import io
 import os
 import re
-from html import escape as html_escape
+from xml.sax.saxutils import escape
 from typing import List
 
 import pandas as pd
@@ -30,17 +30,7 @@ from core.database import get_google_sheet_connection
 # CONFIGURATION
 # ==============================================================================
 
-# Set COO_APPROVAL_PIN in environment or Streamlit secrets in production.
-# Legacy fallback preserves existing deployments; change it before deployment.
-def get_coo_approval_pin():
-    pin = os.environ.get("COO_APPROVAL_PIN", "")
-    if not pin:
-        try:
-            pin = str(st.secrets.get("COO_APPROVAL_PIN", ""))
-        except Exception:
-            pass
-    return pin or "1234"
-
+COO_PIN_SECRET = os.getenv("CLX_COO_PIN", "1234")  # Set CLX_COO_PIN in production; default is legacy only.
 
 SHEET_QUERY = "Query"
 SHEET_DROPDOWN = "Master Dropdown"
@@ -285,16 +275,38 @@ def normalize_header(value):
 
 
 def normalize_dataframe_headers(df):
-    if df is None or df.empty:
+    """Normalize column names and make duplicate headers unique.
+
+    Google Sheets can contain repeated headers (for example, multiple
+    columns named "Site Name"). In pandas, selecting df["Site Name"] when
+    that label is duplicated returns a DataFrame instead of a Series, which
+    causes errors when assigning it to one output column. Keep the first
+    header unchanged and suffix subsequent duplicates.
+    """
+    if df is None:
         return df
 
     df = df.copy()
+    normalized = [normalize_header(col) for col in df.columns]
+    seen = {}
+    unique_headers = []
 
-    df.columns = [
-        normalize_header(col)
-        for col in df.columns
-    ]
+    for index, header in enumerate(normalized, start=1):
+        base = header or f"Column_{index}"
+        count = seen.get(base.lower(), 0) + 1
+        seen[base.lower()] = count
+        if count == 1:
+            unique_headers.append(base)
+        else:
+            candidate = f"{base} ({count})"
+            while candidate.lower() in seen:
+                count += 1
+                seen[base.lower()] = count
+                candidate = f"{base} ({count})"
+            seen[candidate.lower()] = 1
+            unique_headers.append(candidate)
 
+    df.columns = unique_headers
     return df
 
 
@@ -357,10 +369,6 @@ def is_sheet_error_value(value):
     """Return True when Google Sheets returned an error token."""
     text = safe_str(value).strip().upper()
     return text in SHEET_ERROR_VALUES
-
-
-def pdf_text(value, default="-"):
-    return html_escape(safe_str(value, default), quote=False)
 
 
 def safe_str(value, default=""):
@@ -830,36 +838,26 @@ def generate_ms_number(
 # SEQUENCE
 # ==============================================================================
 
-def _next_sequence_from_rows(rows, kind="PROJECT", sow_type=None):
-    """Next sequence from existing SPK numbers, scoped by month/year and type.
+def _next_sequence_from_rows(rows, number_kind):
+    """Use highest existing sequence, not number of unique SPKs.
 
-    Uses max existing sequence rather than count, preventing reuse after gaps.
-    Project sequences are shared across Survey/Cons in each target sheet.
+    Sequence restarts by month/year, matching the existing numbering pattern.
     """
     now = datetime.datetime.now()
-    roman = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII")
+    roman = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"]
     period = f"/{roman[now.month - 1]}/{now.year}"
-    if not rows or len(rows) <= 1:
-        return 1
-    header = [normalize_header(x).lower() for x in rows[0]]
-    try:
-        number_index = next(i for i, x in enumerate(header) if x in ("no. spk", "no spk", "spk number"))
-    except StopIteration:
-        number_index = 1
-    maximum = 0
-    for row in rows[1:]:
-        if len(row) <= number_index:
+    prefix = "/CLX/MS/" if number_kind == "MS" else "/CLX/SPK/"
+    max_seq = 0
+    for row in (rows or [])[1:]:
+        if len(row) < 2:
             continue
-        number = safe_str(row[number_index]).upper()
-        if not number.endswith(period.upper()):
+        number = safe_str(row[1]).upper()
+        if prefix not in number or not number.endswith(period):
             continue
-        if kind == "MS":
-            match = re.fullmatch(r"(\d+)/CLX/MS/[IVX]+/\d{4}", number)
-        else:
-            match = re.fullmatch(r"(\d+)/CLX/SPK/(?:SURVEY|CONS)/[IVX]+/\d{4}", number)
+        match = re.match(r"^(\d+)/CLX/", number)
         if match:
-            maximum = max(maximum, int(match.group(1)))
-    return maximum + 1
+            max_seq = max(max_seq, int(match.group(1)))
+    return max_seq + 1
 
 
 def get_next_spk_sequence_from_rows(rows):
@@ -980,7 +978,6 @@ def ensure_status_column(
         [
             "Status Approval",
             "Approval Status",
-            "Status",
         ],
         fallback=None,
     )
@@ -1140,7 +1137,7 @@ def get_pdf_styles():
 
 def build_pdf_header(elements, header_left, header_right):
 
-    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "CLX.png")
+    logo_path = "assets/CLX.png"
 
     if os.path.exists(logo_path):
 
@@ -2370,8 +2367,8 @@ def generate_project_pdf_from_database(
     col_sow = find_column(
         matched,
         [
-            "WO Release",
             "SOW",
+            "WO Release",
         ],
         fallback=None,
     )
@@ -2458,6 +2455,19 @@ def generate_project_pdf_from_database(
         "date_spk": date_spk,
     }
 
+    sow_details = pd.DataFrame()
+    try:
+        master = load_master_sow()
+        if not master.empty:
+            sow_key = find_column(master, ["SOW", "Jenis SOW", "Master SOW", "Pekerjaan"], fallback=None)
+            if sow_key:
+                sow_details = master[
+                    master[sow_key].astype(str).str.strip().str.casefold()
+                    == sow_type.strip().casefold()
+                ].copy()
+    except Exception:
+        pass
+
     (
         no_spk,
         pdf_bytes,
@@ -2465,7 +2475,7 @@ def generate_project_pdf_from_database(
         selected_wo,
         selected_sites,
         spk_metadata,
-        pd.DataFrame(),
+        sow_details,
         approved=approved,
     )
 
@@ -3190,7 +3200,7 @@ def show_spk_page():
 
                     edited_display_df = st.data_editor(
                         site_editor_df,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         key=(
                             f"project_site_editor_"
@@ -3417,7 +3427,6 @@ def show_spk_page():
                                 "pic_name": final_pic_name,
                                 "pic_phone": pic_phone,
                                 "sow_type": selected_sow_type,
-                                "date_spk": datetime.datetime.now().strftime("%d/%m/%Y"),
                             }
 
                             (
@@ -3700,7 +3709,7 @@ def show_spk_page():
 
                 st.dataframe(
                     preview_df,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -4270,7 +4279,7 @@ def show_spk_page():
             key="coo_pin_input",
         )
 
-        if pin_input == get_coo_approval_pin():
+        if pin_input == COO_PIN_SECRET:
 
             st.success(
                 "🔓 Akses Diterima! "
@@ -4573,7 +4582,7 @@ def show_spk_page():
                                     spk_details[
                                         display_columns
                                     ],
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
 
@@ -4581,7 +4590,7 @@ def show_spk_page():
 
                                 st.dataframe(
                                     spk_details,
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
 
@@ -5072,7 +5081,7 @@ def show_spk_page():
 
                                 st.dataframe(
                                     selected_rows,
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
 
