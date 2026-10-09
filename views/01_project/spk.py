@@ -1,6 +1,8 @@
 import datetime
 import io
 import os
+import re
+from html import escape as html_escape
 from typing import List
 
 import pandas as pd
@@ -28,7 +30,17 @@ from core.database import get_google_sheet_connection
 # CONFIGURATION
 # ==============================================================================
 
-COO_PIN_SECRET = "1234"
+# Set COO_APPROVAL_PIN in environment or Streamlit secrets in production.
+# Legacy fallback preserves existing deployments; change it before deployment.
+def get_coo_approval_pin():
+    pin = os.environ.get("COO_APPROVAL_PIN", "")
+    if not pin:
+        try:
+            pin = str(st.secrets.get("COO_APPROVAL_PIN", ""))
+        except Exception:
+            pass
+    return pin or "1234"
+
 
 SHEET_QUERY = "Query"
 SHEET_DROPDOWN = "Master Dropdown"
@@ -345,6 +357,10 @@ def is_sheet_error_value(value):
     """Return True when Google Sheets returned an error token."""
     text = safe_str(value).strip().upper()
     return text in SHEET_ERROR_VALUES
+
+
+def pdf_text(value, default="-"):
+    return html_escape(safe_str(value, default), quote=False)
 
 
 def safe_str(value, default=""):
@@ -814,44 +830,44 @@ def generate_ms_number(
 # SEQUENCE
 # ==============================================================================
 
-def get_next_spk_sequence_from_rows(rows):
+def _next_sequence_from_rows(rows, kind="PROJECT", sow_type=None):
+    """Next sequence from existing SPK numbers, scoped by month/year and type.
+
+    Uses max existing sequence rather than count, preventing reuse after gaps.
+    Project sequences are shared across Survey/Cons in each target sheet.
+    """
+    now = datetime.datetime.now()
+    roman = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII")
+    period = f"/{roman[now.month - 1]}/{now.year}"
     if not rows or len(rows) <= 1:
         return 1
-
-    spk_ids = set()
-
+    header = [normalize_header(x).lower() for x in rows[0]]
+    try:
+        number_index = next(i for i, x in enumerate(header) if x in ("no. spk", "no spk", "spk number"))
+    except StopIteration:
+        number_index = 1
+    maximum = 0
     for row in rows[1:]:
+        if len(row) <= number_index:
+            continue
+        number = safe_str(row[number_index]).upper()
+        if not number.endswith(period.upper()):
+            continue
+        if kind == "MS":
+            match = re.fullmatch(r"(\d+)/CLX/MS/[IVX]+/\d{4}", number)
+        else:
+            match = re.fullmatch(r"(\d+)/CLX/SPK/(?:SURVEY|CONS)/[IVX]+/\d{4}", number)
+        if match:
+            maximum = max(maximum, int(match.group(1)))
+    return maximum + 1
 
-        if len(row) > 1:
 
-            value = safe_str(
-                row[1]
-            )
-
-            if value:
-                spk_ids.add(value)
-
-    return len(spk_ids) + 1
+def get_next_spk_sequence_from_rows(rows):
+    return _next_sequence_from_rows(rows, "PROJECT")
 
 
 def get_next_ms_sequence_from_rows(rows):
-    if not rows or len(rows) <= 1:
-        return 1
-
-    spk_ids = set()
-
-    for row in rows[1:]:
-
-        if len(row) > 1:
-
-            value = safe_str(
-                row[1]
-            )
-
-            if value:
-                spk_ids.add(value)
-
-    return len(spk_ids) + 1
+    return _next_sequence_from_rows(rows, "MS")
 
 
 # ==============================================================================
@@ -1124,7 +1140,7 @@ def get_pdf_styles():
 
 def build_pdf_header(elements, header_left, header_right):
 
-    logo_path = "assets/CLX.png"
+    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "CLX.png")
 
     if os.path.exists(logo_path):
 
@@ -1240,9 +1256,7 @@ def generate_spk_pdf_bytes(
         "-",
     )
 
-    date_str = datetime.datetime.now().strftime(
-        "%d %B %Y"
-    )
+    date_str = safe_str(spk_metadata.get("date_spk")) or datetime.datetime.now().strftime("%d/%m/%Y")
 
     elements.append(
         Paragraph(
@@ -3403,6 +3417,7 @@ def show_spk_page():
                                 "pic_name": final_pic_name,
                                 "pic_phone": pic_phone,
                                 "sow_type": selected_sow_type,
+                                "date_spk": datetime.datetime.now().strftime("%d/%m/%Y"),
                             }
 
                             (
@@ -4255,7 +4270,7 @@ def show_spk_page():
             key="coo_pin_input",
         )
 
-        if pin_input == COO_PIN_SECRET:
+        if pin_input == get_coo_approval_pin():
 
             st.success(
                 "🔓 Akses Diterima! "
