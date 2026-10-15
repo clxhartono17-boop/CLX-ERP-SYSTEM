@@ -72,6 +72,7 @@ MAX_SITE_SELECTION = 15
 DEFAULT_CHARGING_TYPES = [
     "6S1P",
     "12S1P",
+    "12S3P",
     "DC20",
     "DC30",
     "DC60",
