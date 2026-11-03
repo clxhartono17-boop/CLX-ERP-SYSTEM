@@ -1256,95 +1256,37 @@ def calculate_detail_total(
 # FIXED BOQ CALCULATION ENGINE
 # ==============================================================================
 def recalculate_boq_totals(df_boq):
-    """
-    Recalculate BOQ totals dengan struktur hierarchy template yang benar.
-
-    PERBAIKAN UTAMA:
-    ------------------------------------------------------------------
-    1. Detail row:
-       TOTAL PRICE = Qty × UNIT PRICE
-
-    2. Section utama:
-       A, B, C, D, E, F, G, H
-
-    3. Sub-section:
-       I, II, III, IV, V, VI, VII, VIII, IX, X, dst.
-
-    4. Parent section yang memiliki subsection tidak otomatis
-       menjumlahkan seluruh detail sampai section berikutnya.
-
-       Contoh:
-
-       B - CIVIL WORK
-           I   - Foundation Charger
-           II  - Foundation Panel
-       C - ...
-
-       B tidak boleh mengambil I + II lagi apabila workbook
-       sudah mempunyai TOTAL PRICE khusus untuk B.
-
-    5. Section utama yang memiliki UNIT PRICE sendiri tetap
-       dianggap sebagai actual cost row.
-
-       Contoh:
-
-       H - Biaya transport
-           Qty = 1
-           Unit Price = 1.000.000
-
-       H dihitung:
-           1 × 1.000.000 = 1.000.000
-
-    6. Duplicate section label seperti E tetap didukung.
-
-       Contoh:
-
-       E - ELECTRICAL
-       E - GROUNDING
-
-       Keduanya dihitung sebagai section terpisah berdasarkan
-       posisi row.
-
-    7. Row terakhir:
-
-       I - Total
-
-       TIDAK dianggap sebagai subsection karena Item = "Total".
-
-    8. DPP hanya menjumlahkan actual cost/detail rows.
-
-       Section header tidak dijumlahkan lagi.
-
-       Subsection header tidak dijumlahkan lagi.
-
-    9. Negative UNIT PRICE tetap dihitung.
-
-    10. VAT = DPP × 11%.
-
-    11. Grand Total = DPP + VAT.
-    """
-
     if df_boq is None or df_boq.empty:
-        return (
-            df_boq,
-            0.0,
-            0.0,
-            0.0,
-        )
+        return (df_boq, 0.0, 0.0, 0.0)
 
     df = df_boq.copy()
+
+    # ------------------------------------------------------------------
+    # 0. CLEANUP TEMPLATE'S NATIVE TOTAL ROWS
+    # Menghapus poin "I" - Total bawaan template agar tidak double saat pembacaan
+    # ------------------------------------------------------------------
+    drop_idx = []
+    for i, row in df.iterrows():
+        no = clean_text(row.get("NO", "")).upper()
+        item = clean_text(row.get("Item", "")).upper()
+        
+        # Hapus jika NO adalah "I" dan item mengandung kata "TOTAL" atau kosong
+        if no == "I" and ("TOTAL" in item or "KESELURUHAN" in item or item == ""):
+            drop_idx.append(i)
+        # Hapus baris rangkuman bawah lainnya bawaan template
+        elif not no and any(x in item for x in ["SUB TOTAL", "SUBTOTAL", "GRAND TOTAL", "VAT", "PPN"]):
+            drop_idx.append(i)
+        elif "TOTAL" in no and not item:
+            drop_idx.append(i)
+
+    if drop_idx:
+        df = df.drop(index=drop_idx).reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # REQUIRED COLUMNS
     # ------------------------------------------------------------------
     required = [
-        "NO",
-        "Item",
-        "Unit/Volume",
-        "Satuan/Uom",
-        "MERK",
-        "UNIT PRICE",
-        "TOTAL PRICE",
+        "NO", "Item", "Unit/Volume", "Satuan/Uom", "MERK", "UNIT PRICE", "TOTAL PRICE",
     ]
 
     for col in required:
@@ -1354,436 +1296,137 @@ def recalculate_boq_totals(df_boq):
     # ------------------------------------------------------------------
     # SECTION UTAMA
     # ------------------------------------------------------------------
-    top_level_labels = {
-        "A",
-        "B",
-        "C",
-        "D",
-        "E",
-        "F",
-        "G",
-        "H",
-    }
+    top_level_labels = {"A", "B", "C", "D", "E", "F", "G", "H"}
 
     # ------------------------------------------------------------------
     # SUBSECTION
     # ------------------------------------------------------------------
     subsection_labels = {
-        "I",
-        "II",
-        "III",
-        "IV",
-        "V",
-        "VI",
-        "VII",
-        "VIII",
-        "IX",
-        "X",
-        "XI",
-        "XII",
-        "XIII",
-        "XIV",
-        "XV",
-        "XVI",
-        "XVII",
-        "XVIII",
-        "XIX",
-        "XX",
+        "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", 
+        "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX",
     }
 
     # ------------------------------------------------------------------
     # 1. ACTUAL DETAIL / COST ROW
-    #
-    # Row dengan UNIT PRICE != 0 dianggap sebagai cost row.
-    #
-    # Ini termasuk:
-    # - detail material
-    # - price adjustment
-    # - transport
-    # - cost line lainnya
     # ------------------------------------------------------------------
-    line_totals = [
-        0.0
-        for _ in range(len(df))
-    ]
+    line_totals = [0.0 for _ in range(len(df))]
+    is_detail = [False for _ in range(len(df))]
 
-    is_detail = [
-        False
-        for _ in range(len(df))
-    ]
-
-    for pos, (_, row) in enumerate(
-        df.iterrows()
-    ):
-
-        unit_price = parse_price(
-            row.get(
-                "UNIT PRICE",
-                0,
-            )
-        )
-
-        qty = parse_qty_num(
-            row.get(
-                "Unit/Volume",
-                0,
-            )
-        )
+    for pos, (_, row) in enumerate(df.iterrows()):
+        unit_price = parse_price(row.get("UNIT PRICE", 0))
+        qty = parse_qty_num(row.get("Unit/Volume", 0))
 
         if unit_price != 0:
-
-            total = (
-                qty
-                * unit_price
-            )
-
+            total = qty * unit_price
             line_totals[pos] = total
             is_detail[pos] = True
 
     # ------------------------------------------------------------------
     # 2. FIND TOP LEVEL SECTION
-    #
-    # Tidak menggunakan dictionary berdasarkan label karena E bisa
-    # muncul lebih dari sekali.
-    #
-    # Kita menyimpan POSITION sehingga:
-    #
-    # E #1
-    # E #2
-    #
-    # tetap dianggap berbeda.
     # ------------------------------------------------------------------
     top_positions = []
-
-    for pos, (_, row) in enumerate(
-        df.iterrows()
-    ):
-
-        no = clean_text(
-            row.get(
-                "NO",
-                "",
-            )
-        ).upper()
-
+    for pos, (_, row) in enumerate(df.iterrows()):
+        no = clean_text(row.get("NO", "")).upper()
         if no in top_level_labels:
             top_positions.append(pos)
 
     # ------------------------------------------------------------------
     # 3. FIND SUBSECTION
-    #
-    # IMPORTANT:
-    #
-    # "I - Total" di bagian paling bawah bukan subsection.
     # ------------------------------------------------------------------
     subsection_positions = []
+    for pos, (_, row) in enumerate(df.iterrows()):
+        no = clean_text(row.get("NO", "")).upper()
+        item = clean_text(row.get("Item", "")).upper()
 
-    for pos, (_, row) in enumerate(
-        df.iterrows()
-    ):
-
-        no = clean_text(
-            row.get(
-                "NO",
-                "",
-            )
-        ).upper()
-
-        item = clean_text(
-            row.get(
-                "Item",
-                "",
-            )
-        ).upper()
-
-        # Row "I - Total" harus dianggap summary/final total,
-        # bukan subsection.
         if (
             no in subsection_labels
-            and item not in {
-                "TOTAL",
-                "GRAND TOTAL",
-                "SUB TOTAL",
-                "SUBTOTAL",
-            }
+            and item not in {"TOTAL", "GRAND TOTAL", "SUB TOTAL", "SUBTOTAL"}
         ):
-            subsection_positions.append(
-                pos
-            )
+            subsection_positions.append(pos)
 
     # ------------------------------------------------------------------
     # 4. INITIAL DISPLAY TOTALS
     # ------------------------------------------------------------------
-    display_totals = [
-        None
-        for _ in range(len(df))
-    ]
-
-    # Actual detail row.
+    display_totals = [None for _ in range(len(df))]
     for pos in range(len(df)):
-
         if is_detail[pos]:
-            display_totals[pos] = (
-                line_totals[pos]
-            )
+            display_totals[pos] = line_totals[pos]
 
     # ------------------------------------------------------------------
     # 5. SUBSECTION TOTAL
-    #
-    # Contoh:
-    #
-    # I
-    #   detail
-    #   detail
-    #
-    # II
-    #   detail
-    #
-    # I hanya mengambil detail sampai sebelum II.
     # ------------------------------------------------------------------
-    for sub_index, sub_pos in enumerate(
-        subsection_positions
-    ):
-
+    for sub_index, sub_pos in enumerate(subsection_positions):
         next_sub_pos = (
-            subsection_positions[
-                sub_index + 1
-            ]
-            if (
-                sub_index + 1
-                < len(
-                    subsection_positions
-                )
-            )
+            subsection_positions[sub_index + 1]
+            if (sub_index + 1 < len(subsection_positions))
             else len(df)
         )
-
-        # Cari top-level section berikutnya.
-        next_top_after = [
-            p
-            for p in top_positions
-            if p > sub_pos
-        ]
-
-        next_top_pos = (
-            min(next_top_after)
-            if next_top_after
-            else len(df)
-        )
-
-        # Boundary terdekat.
-        end_pos = min(
-            next_sub_pos,
-            next_top_pos,
-        )
+        next_top_after = [p for p in top_positions if p > sub_pos]
+        next_top_pos = min(next_top_after) if next_top_after else len(df)
+        end_pos = min(next_sub_pos, next_top_pos)
 
         subtotal = 0.0
-
-        for i in range(
-            sub_pos + 1,
-            end_pos,
-        ):
-
+        for i in range(sub_pos + 1, end_pos):
             if is_detail[i]:
-                subtotal += (
-                    line_totals[i]
-                )
+                subtotal += line_totals[i]
 
-        display_totals[
-            sub_pos
-        ] = subtotal
+        display_totals[sub_pos] = subtotal
 
     # ------------------------------------------------------------------
     # 6. TOP LEVEL SECTION TOTAL
     # ------------------------------------------------------------------
-    for top_index, top_pos in enumerate(
-        top_positions
-    ):
-
+    for top_index, top_pos in enumerate(top_positions):
         row = df.iloc[top_pos]
+        unit_price = parse_price(row.get("UNIT PRICE", 0))
 
-        unit_price = parse_price(
-            row.get(
-                "UNIT PRICE",
-                0,
-            )
-        )
-
-        # --------------------------------------------------------------
-        # CASE A
-        #
-        # Section sendiri mempunyai Unit Price.
-        #
-        # Contoh:
-        #
-        # H | Biaya transport | Qty 1 | 1.000.000
-        # --------------------------------------------------------------
         if unit_price != 0:
-
-            display_totals[
-                top_pos
-            ] = line_totals[top_pos]
-
+            display_totals[top_pos] = line_totals[top_pos]
             continue
 
-        # --------------------------------------------------------------
-        # Cari top-level berikutnya.
-        #
-        # Karena E dapat muncul dua kali, kita menggunakan posisi.
-        # --------------------------------------------------------------
         next_top_pos = (
-            top_positions[
-                top_index + 1
-            ]
-            if (
-                top_index + 1
-                < len(top_positions)
-            )
+            top_positions[top_index + 1]
+            if (top_index + 1 < len(top_positions))
             else len(df)
         )
 
-        # --------------------------------------------------------------
-        # Cari subsection yang berada di bawah section ini.
-        # --------------------------------------------------------------
         child_subsections = [
-            p
-            for p in subsection_positions
-            if (
-                top_pos < p
-                < next_top_pos
-            )
+            p for p in subsection_positions
+            if (top_pos < p < next_top_pos)
         ]
 
-        # --------------------------------------------------------------
-        # CASE B
-        #
-        # Section memiliki subsection.
-        #
-        # Contoh aktual template:
-        #
-        # B - CIVIL WORK
-        # I - Foundation Charger
-        # II - Foundation Panel
-        #
-        # Template memiliki TOTAL PRICE sendiri pada B.
-        #
-        # Kita pertahankan nilai tersebut agar tidak mengubah
-        # struktur template dan tidak double count.
-        # --------------------------------------------------------------
         if child_subsections:
-
-            existing_total = parse_price(
-                row.get(
-                    "TOTAL PRICE",
-                    0,
-                )
-            )
-
+            existing_total = parse_price(row.get("TOTAL PRICE", 0))
             if existing_total != 0:
-
-                display_totals[
-                    top_pos
-                ] = existing_total
-
+                display_totals[top_pos] = existing_total
             else:
-
-                # Jika template tidak menyediakan total parent,
-                # fallback menggunakan detail langsung sebelum
-                # subsection pertama.
-                first_subsection = min(
-                    child_subsections
-                )
-
+                first_subsection = min(child_subsections)
                 subtotal = 0.0
-
-                for i in range(
-                    top_pos + 1,
-                    first_subsection,
-                ):
-
+                for i in range(top_pos + 1, first_subsection):
                     if is_detail[i]:
-                        subtotal += (
-                            line_totals[i]
-                        )
-
-                display_totals[
-                    top_pos
-                ] = subtotal
-
+                        subtotal += line_totals[i]
+                display_totals[top_pos] = subtotal
             continue
 
-        # --------------------------------------------------------------
-        # CASE C
-        #
-        # Section normal tanpa subsection.
-        #
-        # Contoh:
-        #
-        # G
-        #   1
-        #   2
-        #   3
-        #
-        # H
-        #
-        # Maka G berhenti sebelum H.
-        # --------------------------------------------------------------
         subtotal = 0.0
-
-        for i in range(
-            top_pos + 1,
-            next_top_pos,
-        ):
-
-            # Jangan memasukkan subsection header.
+        for i in range(top_pos + 1, next_top_pos):
             if i in subsection_positions:
                 continue
-
             if is_detail[i]:
-                subtotal += (
-                    line_totals[i]
-                )
+                subtotal += line_totals[i]
 
-        display_totals[
-            top_pos
-        ] = subtotal
+        display_totals[top_pos] = subtotal
 
     # ------------------------------------------------------------------
     # 7. PRESERVE EXISTING TOTAL UNTUK ROW SPECIAL / SUMMARY
-    #
-    # Contoh:
-    #
-    # I | Total
-    #
-    # Row ini bukan cost row dan bukan subsection.
-    #
-    # Maka TOTAL PRICE template tetap dipertahankan.
     # ------------------------------------------------------------------
-    for pos, (_, row) in enumerate(
-        df.iterrows()
-    ):
-
+    for pos, (_, row) in enumerate(df.iterrows()):
         if display_totals[pos] is not None:
             continue
-
-        existing = parse_price(
-            row.get(
-                "TOTAL PRICE",
-                0,
-            )
-        )
-
+        existing = parse_price(row.get("TOTAL PRICE", 0))
         if existing != 0:
-
-            display_totals[
-                pos
-            ] = existing
-
+            display_totals[pos] = existing
         else:
-
-            display_totals[
-                pos
-            ] = None
+            display_totals[pos] = None
 
     # ------------------------------------------------------------------
     # 8. UPDATE TOTAL PRICE COLUMN
@@ -1791,46 +1434,17 @@ def recalculate_boq_totals(df_boq):
     df["TOTAL PRICE"] = display_totals
 
     # ------------------------------------------------------------------
-    # 9. ACTUAL DPP
-    #
-    # HANYA actual detail/cost rows.
-    #
-    # Jangan menjumlahkan:
-    # - A section total
-    # - B section total
-    # - I subsection total
-    # - II subsection total
-    # - C section total
-    # - D section total
-    # - E section total
-    # - F section total
-    # - G section total
-    # - H section total
-    #
-    # Dengan demikian tidak terjadi double counting.
+    # 9, 10, 11. ACTUAL DPP, VAT, GRAND TOTAL
     # ------------------------------------------------------------------
     subtotal = sum(
         line_totals[pos]
         for pos in range(len(df))
         if is_detail[pos]
     )
-
-    # ------------------------------------------------------------------
-    # 10. VAT 11%
-    # ------------------------------------------------------------------
     vat = subtotal * 0.11
-
-    # ------------------------------------------------------------------
-    # 11. GRAND TOTAL
-    # ------------------------------------------------------------------
     grand = subtotal + vat
 
-    return (
-        df,
-        subtotal,
-        vat,
-        grand,
-    )
+    return (df, subtotal, vat, grand)
 
 
 def _old_template_offsets(region):
@@ -6395,7 +6009,7 @@ def _render_boq_create():
 
         st.info(
             "💡 Khusus **CABLING AND ACCESSORIES INSTALLATION** "
-            "(Poin 1-3), Qty/Volume dapat diubah. "
+            "(Poin E/G), Qty/Volume dapat diubah. "
             "TOTAL PRICE akan otomatis mengikuti Qty × UNIT PRICE."
         )
 
@@ -6404,125 +6018,50 @@ def _render_boq_create():
 
         for idx, row in df_boq.iterrows():
 
-            no = str(
-                row.get(
-                    "NO",
-                    "",
-                )
-            ).strip().upper()
+            no = str(row.get("NO", "")).strip().upper()
+            item = str(row.get("Item", "")).upper()
 
-            item = str(
-                row.get(
-                    "Item",
-                    "",
-                )
-            ).upper()
+            # Matikan atau hidupkan status deteksi berdasarkan section utama
+            if no in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]:
+                if no in ["E", "G"]: 
+                    e_start = True
+                else:
+                    e_start = False
 
-            if (
-                "CABLING AND ACCESSORIES"
-                in item
-                or no == "E"
-            ):
-
+            # Fallback jika penamaan CABLING ditulis langsung sebagai item
+            if "CABLING AND ACCESSORIES" in item:
                 e_start = True
-                continue
 
-            elif no in [
-                "A",
-                "B",
-                "C",
-                "D",
-                "F",
-            ]:
-
-                e_start = False
-
-            if (
-                e_start
-                and no in [
-                    "1",
-                    "2",
-                    "3",
-                ]
-            ):
-
-                editable_indices.append(
-                    idx
-                )
+            # Semua item dengan nilai numerik di bawah section CABLING dapat diedit (tidak di-limit ke 1,2,3)
+            if e_start and no.isdigit():
+                editable_indices.append(idx)
 
         cols = st.columns(3)
 
-        for idx in editable_indices:
+        for i, idx in enumerate(editable_indices):
+            no = str(df_boq.loc[idx, "NO"])
+            item = str(df_boq.loc[idx, "Item"])
+            q = parse_qty_num(df_boq.loc[idx, "Unit/Volume"])
 
-            no = str(
-                df_boq.loc[
-                    idx,
-                    "NO",
-                ]
-            )
-
-            item = str(
-                df_boq.loc[
-                    idx,
-                    "Item",
-                ]
-            )
-
-            q = parse_qty_num(
-                df_boq.loc[
-                    idx,
-                    "Unit/Volume",
-                ]
-            )
-
-            target = cols[
-                0
-                if no == "1"
-                else (
-                    1
-                    if no == "2"
-                    else 2
-                )
-            ]
+            # Rotasi penempatan kolom agar tidak error jika melebihi 3 iterasi
+            target = cols[i % 3]
 
             with target:
-
                 nq = st.number_input(
-                    f"Qty Poin {no}: "
-                    f"{item[:25]}...",
+                    f"Qty Poin {no}: {item[:25]}...",
                     min_value=0.0,
                     value=float(q),
                     step=1.0,
-                    key=(
-                        f"qty_e_{no}_"
-                        f"{selected_label}_"
-                        f"{template_name}"
-                    ),
+                    key=f"qty_e_{no}_{idx}_{selected_label}_{template_name}"
                 )
 
-                df_boq.loc[
-                    idx,
-                    "Unit/Volume",
-                ] = (
-                    str(
-                        int(nq)
-                    )
-                    if nq.is_integer()
-                    else nq
+                df_boq.loc[idx, "Unit/Volume"] = (
+                    str(int(nq)) if nq.is_integer() else nq
                 )
 
-                df_boq.loc[
-                    idx,
-                    "TOTAL PRICE",
-                ] = calculate_detail_total(
-                    df_boq.loc[
-                        idx,
-                        "Unit/Volume",
-                    ],
-                    df_boq.loc[
-                        idx,
-                        "UNIT PRICE",
-                    ],
+                df_boq.loc[idx, "TOTAL PRICE"] = calculate_detail_total(
+                    nq,
+                    df_boq.loc[idx, "UNIT PRICE"],
                 )
 
     else:
