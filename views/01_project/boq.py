@@ -1,10 +1,10 @@
+import ast
 import datetime
 import hashlib
 import io
 import os
 import re
 import sys
-import ast
 from xml.sax.saxutils import escape as xml_escape
 
 import pandas as pd
@@ -46,12 +46,57 @@ except ModuleNotFoundError:
 
 
 # ==============================================================================
-# TEMPLATE CONSTANTS
+# TEMPLATE & COMPANY CONSTANTS
 # ==============================================================================
 OLD_TEMPLATE_FILENAME = "Template BOQ Vgreen.xlsx"
 NEW_TEMPLATE_FILENAME = "New Template BOQ Sept 2026 All Charger.xlsx"
 
 BOQ_EDITOR_VERSION = "QTY_TEMPLATE_AUTO_TOTAL_V14"
+
+COMPANY_OPTIONS = ["CLX", "Sunrise"]
+
+COMPANY_CONFIGS = {
+    "CLX": {
+        "code": "CLX",
+        "name": "PT. Connectivity Leads eXcellence",
+        "subtitle": "EV Charging & Battery Swapping Infrastructure Services",
+        "logo_candidates": ["CLX.png", "clx.png"],
+        "primary_hex": "#1B365D",
+        "border_primary_hex": "#1B365D",
+        "accent_hex": "#0284C7",
+        "badge_text_hex": "#0284C7",
+        "title_text_hex": "#1B365D",
+        "section_bg_hex": "#DCE7F5",
+        "subsection_bg_hex": "#EDF2F7",
+        "zebra_bg_hex": "#F8FAFC",
+        "card_bg_hex": "#F1F5F9",
+        "header_text_hex": "#FFFFFF",
+        "section_text_hex": "#1B365D",
+        "grand_text_hex": "#FFFFFF",
+        "ms_header_hex": "#2C3E50",
+        "ms_header_text_hex": "#FFFFFF",
+    },
+    "Sunrise": {
+        "code": "SUNRISE",
+        "name": "PT. Sunrise",
+        "subtitle": "EV Charging & Battery Swapping Infrastructure Services",
+        "logo_candidates": ["SUNRISE.png", "Sunrise.png", "sunrise.png"],
+        "primary_hex": "#FACC15",
+        "border_primary_hex": "#CA8A04",
+        "accent_hex": "#EAB308",
+        "badge_text_hex": "#B45309",
+        "title_text_hex": "#854D0E",
+        "section_bg_hex": "#FEF08A",
+        "subsection_bg_hex": "#FEF9C3",
+        "zebra_bg_hex": "#FFFBEB",
+        "card_bg_hex": "#FEFCE8",
+        "header_text_hex": "#0F172A",
+        "section_text_hex": "#0F172A",
+        "grand_text_hex": "#0F172A",
+        "ms_header_hex": "#FACC15",
+        "ms_header_text_hex": "#0F172A",
+    },
+}
 
 TEMPLATE_OPTIONS = {
     "Template BOQ Vgreen Lama": OLD_TEMPLATE_FILENAME,
@@ -98,6 +143,38 @@ BOQ_MS_HELPER_HEADERS = [
 # ==============================================================================
 # GENERIC HELPERS
 # ==============================================================================
+def normalize_company_key(company):
+    c = clean_text(company).upper()
+    if "SUNRISE" in c or c == "SR":
+        return "Sunrise"
+    return "CLX"
+
+
+def get_company_config(company):
+    return COMPANY_CONFIGS[normalize_company_key(company)]
+
+
+def detect_company_from_boq_no(boq_no):
+    s = clean_text(boq_no).upper()
+    if "/SUNRISE/" in s or "/SR/" in s:
+        return "Sunrise"
+    return "CLX"
+
+
+def replace_boq_company_code(boq_no, company):
+    raw = clean_text(boq_no)
+    if not raw or raw == "-":
+        return raw
+    target_code = get_company_config(company)["code"]
+    updated = re.sub(
+        r"^(\d+)/(?:CLX|SUNRISE|SR)(/BOQ/)",
+        rf"\1/{target_code}\2",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    return updated
+
+
 def parse_price(val):
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return 0.0
@@ -365,7 +442,7 @@ def normalize_charger_type(charging_type):
     )
 
 
-def generate_boq_number(sequence_num=1):
+def generate_boq_number(sequence_num=1, company="CLX"):
     now = datetime.datetime.now()
 
     roman = {
@@ -383,10 +460,11 @@ def generate_boq_number(sequence_num=1):
         12: "XII",
     }[now.month]
 
-    return f"{int(sequence_num):04d}/CLX/BOQ/{roman}/{now.year}"
+    company_code = get_company_config(company)["code"]
+    return f"{int(sequence_num):04d}/{company_code}/BOQ/{roman}/{now.year}"
 
 
-def generate_boq_ms_number(sequence_num=1, date_obj=None):
+def generate_boq_ms_number(sequence_num=1, date_obj=None, company="CLX"):
     now = date_obj or datetime.datetime.now()
 
     roman = {
@@ -404,7 +482,8 @@ def generate_boq_ms_number(sequence_num=1, date_obj=None):
         12: "XII",
     }[now.month]
 
-    return f"{int(sequence_num):04d}/CLX/BOQ/MS/{roman}/{now.year}"
+    company_code = get_company_config(company)["code"]
+    return f"{int(sequence_num):04d}/{company_code}/BOQ/MS/{roman}/{now.year}"
 
 
 def get_template_path(filename):
@@ -468,31 +547,22 @@ def get_template_path(filename):
     return candidates[0]
 
 
-def get_logo_path():
-    candidates = [
-        os.path.join(
-            CURRENT_DIR,
-            "assets",
-            "templates",
-            "CLX.png",
-        ),
-        os.path.join(
-            ROOT_DIR,
-            "assets",
-            "templates",
-            "CLX.png",
-        ),
-        os.path.join(
-            CWD,
-            "assets",
-            "templates",
-            "CLX.png",
-        ),
+def get_logo_path(company="CLX"):
+    cfg = get_company_config(company)
+    logo_filenames = cfg["logo_candidates"]
+
+    base_dirs = [
+        os.path.join(CURRENT_DIR, "assets", "templates"),
+        os.path.join(ROOT_DIR, "assets", "templates"),
+        os.path.join(CWD, "assets", "templates"),
+        os.path.join(CWD, "CLX-ERP-SYSTEM", "assets", "templates"),
     ]
 
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+    for base_dir in base_dirs:
+        for fname in logo_filenames:
+            candidate = os.path.join(base_dir, fname)
+            if os.path.exists(candidate):
+                return candidate
 
     return None
 
@@ -842,7 +912,10 @@ def _next_boq_sequence():
         if m:
             max_no = max(max_no, int(m.group(1)))
 
-        m2 = re.match(r"^(\d+)/CLX/BOQ/", clean_text(r.get("BOQ No.", "")).upper())
+        m2 = re.match(
+            r"^(\d+)/(?:CLX|SUNRISE|SR)/BOQ/",
+            clean_text(r.get("BOQ No.", "")).upper(),
+        )
         if m2:
             max_no = max(max_no, int(m2.group(1)))
 
@@ -964,6 +1037,7 @@ def save_to_db_boq(
     grand_total,
     epc_name="-",
     template_name="Template BOQ Vgreen Lama",
+    company="CLX",
 ):
     try:
         sh = get_google_sheet_connection()
@@ -992,13 +1066,16 @@ def save_to_db_boq(
             if m:
                 max_no = max(max_no, int(m.group(1)))
             if len(r) > 1:
-                m2 = re.match(r"^(\d+)/CLX/BOQ/", clean_text(r[1]).upper())
+                m2 = re.match(
+                    r"^(\d+)/(?:CLX|SUNRISE|SR)/BOQ/",
+                    clean_text(r[1]).upper(),
+                )
                 if m2:
                     max_no = max(max_no, int(m2.group(1)))
 
         no_urut = max_no + 1
 
-        boq_no = generate_boq_number(sequence_num=no_urut)
+        boq_no = generate_boq_number(sequence_num=no_urut, company=company)
 
         new_row = [
             no_urut,
@@ -1029,6 +1106,7 @@ def update_db_boq_row(
     grand_total,
     epc_name,
     template_name=None,
+    new_boq_no=None,
 ):
     try:
         sh = get_google_sheet_connection()
@@ -1038,6 +1116,9 @@ def update_db_boq_row(
 
         worksheet = sh.worksheet("DB BOQ")
         ensure_db_boq_headers(worksheet)
+
+        if new_boq_no:
+            worksheet.update_cell(row_idx, 2, new_boq_no)
 
         worksheet.update_cell(row_idx, 3, new_site_name)
         worksheet.update_cell(row_idx, 4, charger_capacity)
@@ -1917,7 +1998,7 @@ def edit_boq_sections(
 
 
 # ==============================================================================
-# BOQ PDF (MODERN CORPORATE LAYOUT — FIT ONE PAGE A4)
+# BOQ PDF (MODERN CORPORATE LAYOUT — FIT ONE PAGE A4, CLX & SUNRISE THEMES)
 # ==============================================================================
 class _BoqNumberedCanvas(pdf_canvas.Canvas):
     def __init__(self, *args, **kwargs):
@@ -1925,6 +2006,7 @@ class _BoqNumberedCanvas(pdf_canvas.Canvas):
             "company_name", "PT. Connectivity Leads eXcellence"
         )
         self.doc_ref = kwargs.pop("doc_ref", "")
+        self.footer_line_hex = kwargs.pop("footer_line_hex", "#CBD5E1")
         super().__init__(*args, **kwargs)
         self._saved_page_states = []
 
@@ -1947,8 +2029,8 @@ class _BoqNumberedCanvas(pdf_canvas.Canvas):
         y_text = 10
 
         self.saveState()
-        self.setStrokeColor(colors.HexColor("#CBD5E1"))
-        self.setLineWidth(0.6)
+        self.setStrokeColor(colors.HexColor(self.footer_line_hex))
+        self.setLineWidth(0.8)
         self.line(margin_x, y_line, page_width - margin_x, y_line)
 
         self.setFont("Helvetica", 7)
@@ -1977,6 +2059,7 @@ def generate_boq_pdf(
     boq_no="-",
     epc_name="-",
     date_obj=None,
+    company="CLX",
 ):
     buffer = io.BytesIO()
     page_w, page_h = A4
@@ -2000,13 +2083,21 @@ def generate_boq_pdf(
     dt = date_obj or datetime.datetime.now()
     date_str = dt.strftime("%d %B %Y")
 
-    # Palet warna korporat modern
-    NAVY_PRIMARY = colors.HexColor("#1B365D")
-    BLUE_ACCENT = colors.HexColor("#0284C7")
-    SECTION_BG = colors.HexColor("#DCE7F5")
-    SUBSECTION_BG = colors.HexColor("#EDF2F7")
-    ZEBRA_BG = colors.HexColor("#F8FAFC")
-    CARD_BG = colors.HexColor("#F1F5F9")
+    company_key = normalize_company_key(company)
+    cfg = get_company_config(company_key)
+
+    # Palet warna dinamis: Navy/Blue untuk CLX, Yellow Highlight untuk Sunrise
+    PRIMARY_BG = colors.HexColor(cfg["primary_hex"])
+    BORDER_PRIMARY = colors.HexColor(cfg["border_primary_hex"])
+    ACCENT_COLOR = colors.HexColor(cfg["accent_hex"])
+    TITLE_TEXT_COLOR = colors.HexColor(cfg["title_text_hex"])
+    SECTION_BG = colors.HexColor(cfg["section_bg_hex"])
+    SUBSECTION_BG = colors.HexColor(cfg["subsection_bg_hex"])
+    ZEBRA_BG = colors.HexColor(cfg["zebra_bg_hex"])
+    CARD_BG = colors.HexColor(cfg["card_bg_hex"])
+    HEADER_TEXT_COLOR = colors.HexColor(cfg["header_text_hex"])
+    SECTION_TEXT_COLOR = colors.HexColor(cfg["section_text_hex"])
+    GRAND_TEXT_COLOR = colors.HexColor(cfg["grand_text_hex"])
     BORDER_LIGHT = colors.HexColor("#CBD5E1")
     TEXT_DARK = colors.HexColor("#0F172A")
     TEXT_MUTED = colors.HexColor("#475569")
@@ -2022,7 +2113,7 @@ def generate_boq_pdf(
     all_nos = [clean_text(x).upper() for x in pdf_df["NO"].tolist()]
     has_roman_ii = "II" in all_nos
 
-    logo_path = get_logo_path()
+    logo_path = get_logo_path(company_key)
 
     # Lebar kolom total = 551 pt (pas dengan lebar konten A4 margin 22 pt)
     col_widths = [24, 217, 36, 38, 86, 75, 75]
@@ -2035,15 +2126,15 @@ def generate_boq_pdf(
             return max(floor, round(base * scale, 2))
 
         company_style = ParagraphStyle(
-            f"DocCompanyTitle_{scale}",
+            f"DocCompanyTitle_{company_key}_{scale}",
             parent=styles["Normal"],
             fontName="Helvetica-Bold",
             fontSize=sz(10.5, 8.5),
             leading=sz(12.5, 10.0),
-            textColor=NAVY_PRIMARY,
+            textColor=TITLE_TEXT_COLOR,
         )
         company_sub_style = ParagraphStyle(
-            f"DocCompanySub_{scale}",
+            f"DocCompanySub_{company_key}_{scale}",
             parent=styles["Normal"],
             fontName="Helvetica",
             fontSize=sz(7.8, 6.5),
@@ -2051,16 +2142,16 @@ def generate_boq_pdf(
             textColor=TEXT_MUTED,
         )
         doc_badge_style = ParagraphStyle(
-            f"DocBadgeTitle_{scale}",
+            f"DocBadgeTitle_{company_key}_{scale}",
             parent=styles["Normal"],
             fontName="Helvetica-Bold",
             fontSize=sz(13.0, 10.0),
             leading=sz(15.0, 11.5),
             alignment=2,
-            textColor=NAVY_PRIMARY,
+            textColor=TITLE_TEXT_COLOR,
         )
         doc_meta_right_style = ParagraphStyle(
-            f"DocMetaRight_{scale}",
+            f"DocMetaRight_{company_key}_{scale}",
             parent=styles["Normal"],
             fontName="Helvetica",
             fontSize=sz(8.0, 6.6),
@@ -2069,7 +2160,7 @@ def generate_boq_pdf(
             textColor=TEXT_DARK,
         )
         info_label_style = ParagraphStyle(
-            f"DocInfoLabel_{scale}",
+            f"DocInfoLabel_{company_key}_{scale}",
             parent=styles["Normal"],
             fontName="Helvetica-Bold",
             fontSize=sz(7.6, 6.3),
@@ -2077,7 +2168,7 @@ def generate_boq_pdf(
             textColor=TEXT_MUTED,
         )
         info_val_style = ParagraphStyle(
-            f"DocInfoVal_{scale}",
+            f"DocInfoVal_{company_key}_{scale}",
             parent=styles["Normal"],
             fontName="Helvetica-Bold",
             fontSize=sz(8.0, 6.5),
@@ -2086,48 +2177,64 @@ def generate_boq_pdf(
         )
 
         th_left = ParagraphStyle(
-            f"BoqThLeft_{scale}",
+            f"BoqThLeft_{company_key}_{scale}",
             parent=styles["Normal"],
             fontName="Helvetica-Bold",
             fontSize=sz(7.6, 6.0),
             leading=sz(9.2, 7.2),
-            textColor=colors.white,
+            textColor=HEADER_TEXT_COLOR,
         )
-        th_center = ParagraphStyle(f"BoqThCenter_{scale}", parent=th_left, alignment=1)
-        th_right = ParagraphStyle(f"BoqThRight_{scale}", parent=th_left, alignment=2)
+        th_center = ParagraphStyle(
+            f"BoqThCenter_{company_key}_{scale}", parent=th_left, alignment=1
+        )
+        th_right = ParagraphStyle(
+            f"BoqThRight_{company_key}_{scale}", parent=th_left, alignment=2
+        )
 
         cell_left = ParagraphStyle(
-            f"BoqCellLeft_{scale}",
+            f"BoqCellLeft_{company_key}_{scale}",
             parent=styles["Normal"],
             fontName="Helvetica",
             fontSize=sz(7.5, 5.7),
             leading=sz(9.1, 6.8),
             textColor=TEXT_DARK,
         )
-        cell_center = ParagraphStyle(f"BoqCellCenter_{scale}", parent=cell_left, alignment=1)
-        cell_right = ParagraphStyle(f"BoqCellRight_{scale}", parent=cell_left, alignment=2)
+        cell_center = ParagraphStyle(
+            f"BoqCellCenter_{company_key}_{scale}", parent=cell_left, alignment=1
+        )
+        cell_right = ParagraphStyle(
+            f"BoqCellRight_{company_key}_{scale}", parent=cell_left, alignment=2
+        )
 
         sec_left = ParagraphStyle(
-            f"BoqSecLeft_{scale}",
+            f"BoqSecLeft_{company_key}_{scale}",
             parent=cell_left,
             fontName="Helvetica-Bold",
             fontSize=sz(7.9, 6.0),
             leading=sz(9.6, 7.1),
-            textColor=NAVY_PRIMARY,
+            textColor=SECTION_TEXT_COLOR,
         )
-        sec_center = ParagraphStyle(f"BoqSecCenter_{scale}", parent=sec_left, alignment=1)
-        sec_right = ParagraphStyle(f"BoqSecRight_{scale}", parent=sec_left, alignment=2)
+        sec_center = ParagraphStyle(
+            f"BoqSecCenter_{company_key}_{scale}", parent=sec_left, alignment=1
+        )
+        sec_right = ParagraphStyle(
+            f"BoqSecRight_{company_key}_{scale}", parent=sec_left, alignment=2
+        )
 
         subsec_left = ParagraphStyle(
-            f"BoqSubSecLeft_{scale}",
+            f"BoqSubSecLeft_{company_key}_{scale}",
             parent=cell_left,
             fontName="Helvetica-Bold",
             fontSize=sz(7.6, 5.8),
             leading=sz(9.2, 6.9),
             textColor=TEXT_DARK,
         )
-        subsec_center = ParagraphStyle(f"BoqSubSecCenter_{scale}", parent=subsec_left, alignment=1)
-        subsec_right = ParagraphStyle(f"BoqSubSecRight_{scale}", parent=subsec_left, alignment=2)
+        subsec_center = ParagraphStyle(
+            f"BoqSubSecCenter_{company_key}_{scale}", parent=subsec_left, alignment=1
+        )
+        subsec_right = ParagraphStyle(
+            f"BoqSubSecRight_{company_key}_{scale}", parent=subsec_left, alignment=2
+        )
 
         # 1. Kop Surat & Logo Perusahaan
         logo_block = []
@@ -2146,9 +2253,9 @@ def generate_boq_pdf(
             except Exception:
                 pass
 
-        logo_block.append(Paragraph("PT. Connectivity Leads eXcellence", company_style))
+        logo_block.append(Paragraph(_esc_pdf_text(cfg["name"]), company_style))
         logo_block.append(
-            Paragraph("EV Charging &amp; Battery Swapping Infrastructure Services", company_sub_style)
+            Paragraph(_esc_pdf_text(cfg["subtitle"]), company_sub_style)
         )
 
         right_header_block = [
@@ -2157,7 +2264,7 @@ def generate_boq_pdf(
             Paragraph(f"<b>No. Dokumen:</b> {_esc_pdf_text(boq_no or '-')}", doc_meta_right_style),
             Paragraph(f"<b>Tanggal:</b> {_esc_pdf_text(date_str)}", doc_meta_right_style),
             Paragraph(
-                f"<font color='#0284C7'><b>CHARGING WORK {_esc_pdf_text(charger_capacity)}</b></font>",
+                f"<font color='{cfg['badge_text_hex']}'><b>CHARGING WORK {_esc_pdf_text(charger_capacity)}</b></font>",
                 doc_meta_right_style,
             ),
         ]
@@ -2174,7 +2281,7 @@ def generate_boq_pdf(
                     ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                     ("TOPPADDING", (0, 0), (-1, -1), 0),
                     ("BOTTOMPADDING", (0, 0), (-1, -1), pad(5, 2.5)),
-                    ("LINEBELOW", (0, 0), (-1, 0), 1.8, NAVY_PRIMARY),
+                    ("LINEBELOW", (0, 0), (-1, 0), 2.0, PRIMARY_BG),
                 ]
             )
         )
@@ -2206,7 +2313,7 @@ def generate_boq_pdf(
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, -1), CARD_BG),
-                    ("LINEBEFORE", (0, 0), (0, -1), 3.0, BLUE_ACCENT),
+                    ("LINEBEFORE", (0, 0), (0, -1), 3.2, ACCENT_COLOR),
                     ("BOX", (0, 0), (-1, -1), 0.5, BORDER_LIGHT),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                     ("TOPPADDING", (0, 0), (-1, -1), pad(2.5, 1.2)),
@@ -2231,7 +2338,7 @@ def generate_boq_pdf(
         ]
 
         dynamic_styles = [
-            ("BACKGROUND", (0, 0), (-1, 0), NAVY_PRIMARY),
+            ("BACKGROUND", (0, 0), (-1, 0), PRIMARY_BG),
             ("TOPPADDING", (0, 0), (-1, 0), pad(4.0, 2.0)),
             ("BOTTOMPADDING", (0, 0), (-1, 0), pad(4.0, 2.0)),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -2278,7 +2385,7 @@ def generate_boq_pdf(
                         ("BACKGROUND", (0, row_idx), (-1, row_idx), SECTION_BG),
                         ("TOPPADDING", (0, row_idx), (-1, row_idx), pad(3.0, 1.3)),
                         ("BOTTOMPADDING", (0, row_idx), (-1, row_idx), pad(3.0, 1.3)),
-                        ("LINEABOVE", (0, row_idx), (-1, row_idx), 0.65, NAVY_PRIMARY),
+                        ("LINEABOVE", (0, row_idx), (-1, row_idx), 0.65, BORDER_PRIMARY),
                         ("LINEBELOW", (0, row_idx), (-1, row_idx), 0.45, BORDER_LIGHT),
                     ]
                 )
@@ -2335,7 +2442,7 @@ def generate_boq_pdf(
 
         # 4. Ringkasan Total (Menggunakan SPAN agar label tidak terpotong)
         sum_label_style = ParagraphStyle(
-            f"BoqSumLabel_{scale}",
+            f"BoqSumLabel_{company_key}_{scale}",
             parent=cell_right,
             fontName="Helvetica-Bold",
             fontSize=sz(8.0, 6.5),
@@ -2343,12 +2450,12 @@ def generate_boq_pdf(
             textColor=TEXT_DARK,
         )
         grand_label_style = ParagraphStyle(
-            f"BoqGrandLabel_{scale}",
+            f"BoqGrandLabel_{company_key}_{scale}",
             parent=cell_right,
             fontName="Helvetica-Bold",
             fontSize=sz(8.8, 7.2),
             leading=sz(10.5, 8.4),
-            textColor=colors.white,
+            textColor=GRAND_TEXT_COLOR,
         )
 
         table_data.extend(
@@ -2374,17 +2481,17 @@ def generate_boq_pdf(
         dynamic_styles.extend(
             [
                 ("GRID", (0, 0), (-1, last_item_row), 0.35, BORDER_LIGHT),
-                ("BOX", (0, 0), (-1, -1), 0.8, NAVY_PRIMARY),
+                ("BOX", (0, 0), (-1, -1), 0.85, BORDER_PRIMARY),
                 ("SPAN", (0, -3), (5, -3)),
                 ("BACKGROUND", (0, -3), (-1, -3), CARD_BG),
-                ("LINEABOVE", (0, -3), (-1, -3), 0.9, NAVY_PRIMARY),
+                ("LINEABOVE", (0, -3), (-1, -3), 0.9, BORDER_PRIMARY),
                 ("TOPPADDING", (0, -3), (-1, -2), pad(3.0, 1.5)),
                 ("BOTTOMPADDING", (0, -3), (-1, -2), pad(3.0, 1.5)),
                 ("SPAN", (0, -2), (5, -2)),
                 ("BACKGROUND", (0, -2), (-1, -2), CARD_BG),
                 ("LINEBELOW", (0, -2), (-1, -2), 0.45, BORDER_LIGHT),
                 ("SPAN", (0, -1), (5, -1)),
-                ("BACKGROUND", (0, -1), (-1, -1), NAVY_PRIMARY),
+                ("BACKGROUND", (0, -1), (-1, -1), PRIMARY_BG),
                 ("TOPPADDING", (0, -1), (-1, -1), pad(4.5, 2.5)),
                 ("BOTTOMPADDING", (0, -1), (-1, -1), pad(4.5, 2.5)),
             ]
@@ -2434,12 +2541,15 @@ def generate_boq_pdf(
     else:
         elements = chosen_elements
 
+    footer_line = cfg["primary_hex"] if company_key == "Sunrise" else "#CBD5E1"
+
     doc.build(
         elements,
         canvasmaker=lambda *args, **kwargs: _BoqNumberedCanvas(
             *args,
-            company_name="PT. Connectivity Leads eXcellence",
+            company_name=cfg["name"],
             doc_ref=clean_text(boq_no),
+            footer_line_hex=footer_line,
             **kwargs,
         ),
     )
@@ -2552,7 +2662,10 @@ def _next_boq_ms_sequence():
         if m:
             max_no = max(max_no, int(m.group(1)))
 
-        m2 = re.match(r"^(\d+)/CLX/BOQ/MS/", r["No. BOQ"].upper())
+        m2 = re.match(
+            r"^(\d+)/(?:CLX|SUNRISE|SR)/BOQ/MS/",
+            r["No. BOQ"].upper(),
+        )
         if m2:
             max_no = max(max_no, int(m2.group(1)))
 
@@ -2663,6 +2776,7 @@ def _get_pdf_asset_path(filename):
         os.path.join(CURRENT_DIR, "assets", "templates", filename),
         os.path.join(ROOT_DIR, "assets", "templates", filename),
         os.path.join(CWD, "assets", "templates", filename),
+        os.path.join(CWD, "CLX-ERP-SYSTEM", "assets", "templates", filename),
     ]
 
     for path in candidates:
@@ -2702,36 +2816,40 @@ def _draw_pdf_asset(canvas, path, x, y_top, max_width, max_height):
         pass
 
 
-def _boq_ms_pdf_header_footer(canvas, doc):
+def _boq_ms_pdf_header_footer(canvas, doc, company="CLX"):
     canvas.saveState()
     page_width, page_height = portrait(A5)
     left = 10
     usable_width = page_width - 20
+    company_key = normalize_company_key(company)
+    cfg = get_company_config(company_key)
 
-    header_path = _get_pdf_asset_path("header.png")
-    footer_path = _get_pdf_asset_path("Footer.png")
+    header_path = _get_pdf_asset_path("header.png") if company_key == "CLX" else None
+    footer_path = _get_pdf_asset_path("Footer.png") if company_key == "CLX" else None
 
     if header_path:
         _draw_pdf_asset(canvas, header_path, left, page_height - 4, usable_width, 42)
     else:
-        logo_path = _get_pdf_asset_path("CLX.png") or get_logo_path()
+        logo_path = get_logo_path(company_key)
         if logo_path:
             _draw_pdf_asset(canvas, logo_path, left, page_height - 7, 95, 34)
 
         canvas.setFont("Helvetica-Bold", 8)
         canvas.drawRightString(page_width - 10, page_height - 18, "BOQ MS / REPLACEMENT MATERIAL")
         canvas.setFont("Helvetica", 6)
-        canvas.drawRightString(page_width - 10, page_height - 28, "PT. Connectivity Leads eXcellence")
-        canvas.setLineWidth(0.5)
+        canvas.drawRightString(page_width - 10, page_height - 28, cfg["name"])
+        canvas.setStrokeColor(colors.HexColor(cfg["border_primary_hex"]))
+        canvas.setLineWidth(0.8 if company_key == "Sunrise" else 0.5)
         canvas.line(left, page_height - 40, page_width - 10, page_height - 40)
 
     if footer_path:
         _draw_pdf_asset(canvas, footer_path, left, 34, usable_width, 30)
     else:
+        canvas.setStrokeColor(colors.HexColor(cfg["border_primary_hex"]))
         canvas.setLineWidth(0.5)
         canvas.line(left, 34, page_width - 10, 34)
         canvas.setFont("Helvetica", 6)
-        canvas.drawString(left, 22, "PT. Connectivity Leads eXcellence")
+        canvas.drawString(left, 22, cfg["name"])
         canvas.drawRightString(page_width - 10, 22, f"Page {doc.page}")
 
     canvas.restoreState()
@@ -2749,8 +2867,15 @@ def generate_boq_ms_pdf(
     issue_note="",
     photo_bytes=None,
     date_obj=None,
+    company=None,
 ):
     buf = io.BytesIO()
+    resolved_company = company or detect_company_from_boq_no(boq_no)
+    company_key = normalize_company_key(resolved_company)
+    cfg = get_company_config(company_key)
+
+    ms_header_bg = colors.HexColor(cfg["ms_header_hex"])
+    ms_header_fg = colors.HexColor(cfg["ms_header_text_hex"])
 
     doc = SimpleDocTemplate(
         buf,
@@ -2781,7 +2906,7 @@ def generate_boq_ms_pdf(
         fontSize=6,
         leading=7,
         alignment=1,
-        textColor=colors.white,
+        textColor=ms_header_fg,
     )
 
     story = []
@@ -2844,8 +2969,8 @@ def generate_boq_ms_pdf(
         TableStyle(
             [
                 ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2C3E50")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("BACKGROUND", (0, 0), (-1, 0), ms_header_bg),
+                ("TEXTCOLOR", (0, 0), (-1, 0), ms_header_fg),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (0, 0), (-1, 0), "CENTER"),
                 ("TOPPADDING", (0, 0), (-1, -1), 2),
@@ -2859,6 +2984,15 @@ def generate_boq_ms_pdf(
     vat = total * 0.11
     grand = total + vat
 
+    sm_styles = [
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]
+    if company_key == "Sunrise":
+        sm_styles.append(("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FEF08A")))
+
     sm = Table(
         [
             [Paragraph("DPP", bold), Paragraph(format_currency(total), bold)],
@@ -2867,16 +3001,7 @@ def generate_boq_ms_pdf(
         ],
         colWidths=[285, 95],
     )
-    sm.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-            ]
-        )
-    )
+    sm.setStyle(TableStyle(sm_styles))
 
     story.append(sm)
     story.append(Spacer(1, 5))
@@ -2892,8 +3017,8 @@ def generate_boq_ms_pdf(
         TableStyle(
             [
                 ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2C3E50")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("BACKGROUND", (0, 0), (-1, 0), ms_header_bg),
+                ("TEXTCOLOR", (0, 0), (-1, 0), ms_header_fg),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("TOPPADDING", (0, 0), (-1, -1), 3),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
@@ -2904,8 +3029,8 @@ def generate_boq_ms_pdf(
 
     doc.build(
         story,
-        onFirstPage=_boq_ms_pdf_header_footer,
-        onLaterPages=_boq_ms_pdf_header_footer,
+        onFirstPage=lambda c, d: _boq_ms_pdf_header_footer(c, d, company=company_key),
+        onLaterPages=lambda c, d: _boq_ms_pdf_header_footer(c, d, company=company_key),
     )
 
     buf.seek(0)
@@ -2925,12 +3050,22 @@ def _render_boq_create():
     site_options, site_data_map = fetch_query_site_options(exclude_saved=True)
     PLACEHOLDER_OPTION = "-- Pilih Site Name & Charger --"
 
-    template_name = st.selectbox(
-        "Template yang digunakan",
-        list(TEMPLATE_OPTIONS.keys()),
-        index=1,
-        key="create_boq_template",
-    )
+    col_comp, col_tmpl = st.columns([1, 2])
+    with col_comp:
+        selected_company = st.radio(
+            "Output Perusahaan / Kop BOQ",
+            COMPANY_OPTIONS,
+            index=0,
+            horizontal=True,
+            key="create_boq_company",
+        )
+    with col_tmpl:
+        template_name = st.selectbox(
+            "Template yang digunakan",
+            list(TEMPLATE_OPTIONS.keys()),
+            index=1,
+            key="create_boq_template",
+        )
 
     selected_label = st.selectbox(
         "Pilih Site Name & Charger",
@@ -3008,11 +3143,17 @@ def _render_boq_create():
 
     st.dataframe(display, use_container_width=True, hide_index=True)
 
-    c1, c2 = st.columns([2, 1])
-    c1.success(f"✅ Tabel BOQ Aktif: **{selected_site}** | Tipe: **{charging_type}** | Wilayah: **{region_normalized}**")
-    c2.metric("Grand Total (Inc. VAT 11%)", format_currency(grand_total))
+    preview_boq_no = generate_boq_number(
+        sequence_num=_next_boq_sequence(),
+        company=selected_company,
+    )
 
-    preview_boq_no = generate_boq_number(sequence_num=_next_boq_sequence())
+    c1, c2 = st.columns([2, 1])
+    c1.success(
+        f"✅ Tabel BOQ Aktif: **{selected_site}** | Tipe: **{charging_type}** | "
+        f"Wilayah: **{region_normalized}** | Output: **{selected_company}** (`{preview_boq_no}`)"
+    )
+    c2.metric("Grand Total (Inc. VAT 11%)", format_currency(grand_total))
 
     pdf_bytes = generate_boq_pdf(
         selected_site,
@@ -3025,11 +3166,13 @@ def _render_boq_create():
         grand_total,
         boq_no=preview_boq_no,
         epc_name=epc_name,
+        company=selected_company,
     )
 
+    company_code = get_company_config(selected_company)["code"]
     safe_site = re.sub(r'[\\/*?:"<>|]', "_", str(selected_site))
     safe_charger = re.sub(r'[\\/*?:"<>|]', "_", str(charging_type))
-    filename_pdf = f"BOQ_{safe_charger}_{region_normalized}_{safe_site}.pdf"
+    filename_pdf = f"BOQ_{company_code}_{safe_charger}_{region_normalized}_{safe_site}.pdf"
 
     b1, b2 = st.columns(2)
     with b1:
@@ -3041,6 +3184,7 @@ def _render_boq_create():
                 grand_total,
                 epc_name,
                 template_name,
+                company=selected_company,
             )
             if boq_no:
                 update_google_sheet_summary(selected_site, selected_site, sub_total, grand_total)
@@ -3069,15 +3213,31 @@ def _render_boq_edit():
     key = st.selectbox("Pilih Nomor BOQ", sorted(options), key="edit_boq_selector")
     data = options[key]
 
+    old_boq_no = data.get("BOQ No.", "-")
     old_site = data.get("Site Name", "")
     old_charger = data.get("Charger Type", "")
     template_name = template_name_from_db_value(data.get("Template", ""))
+    default_company = detect_company_from_boq_no(old_boq_no)
 
-    template_name = st.selectbox(
-        "Pilih Template",
-        list(TEMPLATE_OPTIONS.keys()),
-        index=list(TEMPLATE_OPTIONS.keys()).index(template_name),
-    )
+    col_comp, col_tmpl = st.columns([1, 2])
+    with col_comp:
+        selected_company = st.radio(
+            "Output Perusahaan / Kop BOQ",
+            COMPANY_OPTIONS,
+            index=COMPANY_OPTIONS.index(default_company),
+            horizontal=True,
+            key=f"edit_boq_company_{key}",
+        )
+    with col_tmpl:
+        template_name = st.selectbox(
+            "Pilih Template",
+            list(TEMPLATE_OPTIONS.keys()),
+            index=list(TEMPLATE_OPTIONS.keys()).index(template_name),
+            key=f"edit_boq_template_{key}",
+        )
+
+    active_boq_no = replace_boq_company_code(old_boq_no, selected_company)
+    st.caption(f"Nomor BOQ Aktif: `{active_boq_no}`")
 
     _, qmap = fetch_query_site_options(exclude_saved=False)
     meta = next(
@@ -3116,18 +3276,30 @@ def _render_boq_edit():
         sub,
         vat,
         grand,
-        boq_no=data.get("BOQ No.", "-"),
+        boq_no=active_boq_no,
         epc_name=epc,
+        company=selected_company,
     )
 
+    company_code = get_company_config(selected_company)["code"]
     safe_site = re.sub(r'[\\/*?:"<>|]', "_", str(site))
     safe_charger = re.sub(r'[\\/*?:"<>|]', "_", str(charger))
-    filename_updated = f"BOQ_{safe_charger}_{region}_{safe_site}_Updated.pdf"
+    filename_updated = f"BOQ_{company_code}_{safe_charger}_{region}_{safe_site}_Updated.pdf"
 
     a, b = st.columns(2)
     with a:
         if st.button("💾 Save & Update BOQ Database", type="primary"):
-            if update_db_boq_row(data["row_idx"], old_site, site, charger, sub, grand, epc, template_name):
+            if update_db_boq_row(
+                data["row_idx"],
+                old_site,
+                site,
+                charger,
+                sub,
+                grand,
+                epc,
+                template_name,
+                new_boq_no=active_boq_no,
+            ):
                 st.cache_data.clear()
                 st.rerun()
 
