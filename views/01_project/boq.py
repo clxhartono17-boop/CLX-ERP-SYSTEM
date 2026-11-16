@@ -14,6 +14,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.platypus import (
     Image,
+    KeepInFrame,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -1174,6 +1175,8 @@ def recalculate_boq_totals(df_boq):
             line_totals[pos] = total
             is_detail[pos] = True
 
+    # Deteksi apakah "I" adalah sub-section Romawi (mis. I & II di bawah B. CIVIL WORK)
+    # atau section utama setelah H
     all_nos = [clean_text(r.get("NO", "")).upper() for _, r in df.iterrows()]
     has_roman_ii = "II" in all_nos
 
@@ -1914,7 +1917,7 @@ def edit_boq_sections(
 
 
 # ==============================================================================
-# BOQ PDF (MODERN CORPORATE LAYOUT)
+# BOQ PDF (MODERN CORPORATE LAYOUT — FIT ONE PAGE A4)
 # ==============================================================================
 class _BoqNumberedCanvas(pdf_canvas.Canvas):
     def __init__(self, *args, **kwargs):
@@ -1939,16 +1942,16 @@ class _BoqNumberedCanvas(pdf_canvas.Canvas):
 
     def _draw_footer(self, total_pages):
         page_width, _ = A4
-        margin_x = 28
-        y_line = 30
-        y_text = 18
+        margin_x = 22
+        y_line = 20
+        y_text = 10
 
         self.saveState()
         self.setStrokeColor(colors.HexColor("#CBD5E1"))
         self.setLineWidth(0.6)
         self.line(margin_x, y_line, page_width - margin_x, y_line)
 
-        self.setFont("Helvetica", 7.5)
+        self.setFont("Helvetica", 7)
         self.setFillColor(colors.HexColor("#64748B"))
         left_label = f"{self.company_name}  |  Bill of Quantity (BOQ)"
         if self.doc_ref and self.doc_ref != "-":
@@ -1976,15 +1979,22 @@ def generate_boq_pdf(
     date_obj=None,
 ):
     buffer = io.BytesIO()
-    margin_x = 28
+    page_w, page_h = A4
+    margin_x = 22
+    top_margin = 16
+    bottom_margin = 26
+
+    avail_w = page_w - (2 * margin_x)            # ~551.28 pt
+    avail_h = page_h - top_margin - bottom_margin  # ~799.89 pt
+    safe_target_h = avail_h - 14.0               # toleransi padding internal frame
 
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
         rightMargin=margin_x,
         leftMargin=margin_x,
-        topMargin=26,
-        bottomMargin=42,
+        topMargin=top_margin,
+        bottomMargin=bottom_margin,
     )
 
     dt = date_obj or datetime.datetime.now()
@@ -2002,212 +2012,6 @@ def generate_boq_pdf(
     TEXT_MUTED = colors.HexColor("#475569")
 
     styles = getSampleStyleSheet()
-
-    company_style = ParagraphStyle(
-        "DocCompanyTitle",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=11,
-        leading=13,
-        textColor=NAVY_PRIMARY,
-    )
-    company_sub_style = ParagraphStyle(
-        "DocCompanySub",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8,
-        leading=10,
-        textColor=TEXT_MUTED,
-    )
-    doc_badge_style = ParagraphStyle(
-        "DocBadgeTitle",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=14,
-        leading=16,
-        alignment=2,
-        textColor=NAVY_PRIMARY,
-    )
-    doc_meta_right_style = ParagraphStyle(
-        "DocMetaRight",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8.5,
-        leading=11,
-        alignment=2,
-        textColor=TEXT_DARK,
-    )
-    info_label_style = ParagraphStyle(
-        "DocInfoLabel",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8,
-        leading=10.5,
-        textColor=TEXT_MUTED,
-    )
-    info_val_style = ParagraphStyle(
-        "DocInfoVal",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8.5,
-        leading=11,
-        textColor=TEXT_DARK,
-    )
-
-    th_left = ParagraphStyle(
-        "BoqThLeft",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8,
-        leading=10,
-        textColor=colors.white,
-    )
-    th_center = ParagraphStyle("BoqThCenter", parent=th_left, alignment=1)
-    th_right = ParagraphStyle("BoqThRight", parent=th_left, alignment=2)
-
-    cell_left = ParagraphStyle(
-        "BoqCellLeft",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8,
-        leading=10.5,
-        textColor=TEXT_DARK,
-    )
-    cell_center = ParagraphStyle("BoqCellCenter", parent=cell_left, alignment=1)
-    cell_right = ParagraphStyle("BoqCellRight", parent=cell_left, alignment=2)
-
-    sec_left = ParagraphStyle(
-        "BoqSecLeft",
-        parent=cell_left,
-        fontName="Helvetica-Bold",
-        fontSize=8.5,
-        leading=11,
-        textColor=NAVY_PRIMARY,
-    )
-    sec_center = ParagraphStyle("BoqSecCenter", parent=sec_left, alignment=1)
-    sec_right = ParagraphStyle("BoqSecRight", parent=sec_left, alignment=2)
-
-    subsec_left = ParagraphStyle(
-        "BoqSubSecLeft",
-        parent=cell_left,
-        fontName="Helvetica-Bold",
-        fontSize=8,
-        leading=10.5,
-        textColor=TEXT_DARK,
-    )
-    subsec_center = ParagraphStyle("BoqSubSecCenter", parent=subsec_left, alignment=1)
-    subsec_right = ParagraphStyle("BoqSubSecRight", parent=subsec_left, alignment=2)
-
-    elements = []
-
-    # 1. Kop Surat & Logo Perusahaan
-    logo_path = get_logo_path()
-    logo_block = []
-    if logo_path and os.path.exists(logo_path):
-        try:
-            from reportlab.lib.utils import ImageReader
-            ir = ImageReader(logo_path)
-            iw, ih = ir.getSize()
-            if iw and ih:
-                target_h = 34.0
-                target_w = min(130.0, target_h * (float(iw) / float(ih)))
-                img = Image(logo_path, width=target_w, height=target_h)
-                img.hAlign = "LEFT"
-                logo_block.append(img)
-                logo_block.append(Spacer(1, 3))
-        except Exception:
-            pass
-
-    logo_block.append(Paragraph("PT. Connectivity Leads eXcellence", company_style))
-    logo_block.append(
-        Paragraph("EV Charging &amp; Battery Swapping Infrastructure Services", company_sub_style)
-    )
-
-    right_header_block = [
-        Paragraph("BILL OF QUANTITY", doc_badge_style),
-        Spacer(1, 2),
-        Paragraph(f"<b>No. Dokumen:</b> {_esc_pdf_text(boq_no or '-')}", doc_meta_right_style),
-        Paragraph(f"<b>Tanggal:</b> {_esc_pdf_text(date_str)}", doc_meta_right_style),
-        Paragraph(
-            f"<font color='#0284C7'><b>CHARGING WORK {_esc_pdf_text(charger_capacity)}</b></font>",
-            doc_meta_right_style,
-        ),
-    ]
-
-    header_table = Table(
-        [[logo_block, right_header_block]],
-        colWidths=[289, 250],
-    )
-    header_table.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("TOPPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-                ("LINEBELOW", (0, 0), (-1, 0), 2.0, NAVY_PRIMARY),
-            ]
-        )
-    )
-    elements.append(header_table)
-    elements.append(Spacer(1, 10))
-
-    # 2. Kartu Informasi Site & Proyek (2 Kolom)
-    meta_rows = [
-        [
-            Paragraph("Site Name", info_label_style),
-            Paragraph(f": {_esc_pdf_text(site_name)}", info_val_style),
-            Paragraph("Charger Capacity", info_label_style),
-            Paragraph(f": {_esc_pdf_text(charger_capacity)}", info_val_style),
-        ],
-        [
-            Paragraph("Site Location", info_label_style),
-            Paragraph(f": {_esc_pdf_text(site_location)}", info_val_style),
-            Paragraph("Region / Area", info_label_style),
-            Paragraph(f": {_esc_pdf_text(region)} ISLAND", info_val_style),
-        ],
-        [
-            Paragraph("EPC / Partner", info_label_style),
-            Paragraph(f": {_esc_pdf_text(epc_name or '-')}", info_val_style),
-            Paragraph("Plan Reference", info_label_style),
-            Paragraph(": NEW PLAN BOQ VGREEN", info_val_style),
-        ],
-    ]
-
-    meta_table = Table(meta_rows, colWidths=[72, 222, 82, 163])
-    meta_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), CARD_BG),
-                ("LINEBEFORE", (0, 0), (0, -1), 3.0, BLUE_ACCENT),
-                ("BOX", (0, 0), (-1, -1), 0.5, BORDER_LIGHT),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-            ]
-        )
-    )
-    elements.append(meta_table)
-    elements.append(Spacer(1, 10))
-
-    # 3. Tabel Rincian BOQ (Total lebar = 539 pt)
-    col_widths = [28, 213, 38, 40, 72, 74, 74]
-
-    table_data = [
-        [
-            Paragraph("NO", th_center),
-            Paragraph("ITEM DESCRIPTION", th_left),
-            Paragraph("QTY", th_right),
-            Paragraph("UNIT", th_center),
-            Paragraph("BRAND / MERK", th_left),
-            Paragraph("UNIT PRICE", th_right),
-            Paragraph("TOTAL PRICE", th_right),
-        ]
-    ]
-
     pdf_df, _, _, _ = recalculate_boq_totals(df_boq)
 
     alpha_parents = {"A", "B", "C", "D", "E", "F", "G", "H", "J"}
@@ -2218,172 +2022,417 @@ def generate_boq_pdf(
     all_nos = [clean_text(x).upper() for x in pdf_df["NO"].tolist()]
     has_roman_ii = "II" in all_nos
 
-    dynamic_styles = [
-        ("BACKGROUND", (0, 0), (-1, 0), NAVY_PRIMARY),
-        ("TOPPADDING", (0, 0), (-1, 0), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-    ]
+    logo_path = get_logo_path()
 
-    detail_zebra_counter = 0
+    # Lebar kolom total = 551 pt (pas dengan lebar konten A4 margin 22 pt)
+    col_widths = [24, 217, 36, 38, 86, 75, 75]
 
-    for _, row in pdf_df.iterrows():
-        no_raw = clean_text(row.get("NO", "")).upper()
-        item_raw = clean_text(row.get("Item", ""))
-        qty_raw = row.get("Unit/Volume", "")
-        unit_raw = clean_text(row.get("Satuan/Uom", ""))
-        merk_raw = clean_text(row.get("MERK", ""))
+    def _build_scaled_elements(scale):
+        def sz(base, floor=5.4):
+            return max(floor, round(base * scale, 2))
 
-        up = parse_price(row.get("UNIT PRICE", 0))
-        tp = parse_price(row.get("TOTAL PRICE", 0))
+        def pad(base, floor=0.7):
+            return max(floor, round(base * scale, 2))
 
-        is_parent = (no_raw in alpha_parents) or (no_raw == "I" and not has_roman_ii)
-        is_sub = (no_raw in roman_subsections) and not is_parent
+        company_style = ParagraphStyle(
+            f"DocCompanyTitle_{scale}",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=sz(10.5, 8.5),
+            leading=sz(12.5, 10.0),
+            textColor=NAVY_PRIMARY,
+        )
+        company_sub_style = ParagraphStyle(
+            f"DocCompanySub_{scale}",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=sz(7.8, 6.5),
+            leading=sz(9.5, 8.0),
+            textColor=TEXT_MUTED,
+        )
+        doc_badge_style = ParagraphStyle(
+            f"DocBadgeTitle_{scale}",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=sz(13.0, 10.0),
+            leading=sz(15.0, 11.5),
+            alignment=2,
+            textColor=NAVY_PRIMARY,
+        )
+        doc_meta_right_style = ParagraphStyle(
+            f"DocMetaRight_{scale}",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=sz(8.0, 6.6),
+            leading=sz(10.0, 8.2),
+            alignment=2,
+            textColor=TEXT_DARK,
+        )
+        info_label_style = ParagraphStyle(
+            f"DocInfoLabel_{scale}",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=sz(7.6, 6.3),
+            leading=sz(9.5, 7.8),
+            textColor=TEXT_MUTED,
+        )
+        info_val_style = ParagraphStyle(
+            f"DocInfoVal_{scale}",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=sz(8.0, 6.5),
+            leading=sz(9.8, 8.0),
+            textColor=TEXT_DARK,
+        )
 
-        row_idx = len(table_data)
+        th_left = ParagraphStyle(
+            f"BoqThLeft_{scale}",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=sz(7.6, 6.0),
+            leading=sz(9.2, 7.2),
+            textColor=colors.white,
+        )
+        th_center = ParagraphStyle(f"BoqThCenter_{scale}", parent=th_left, alignment=1)
+        th_right = ParagraphStyle(f"BoqThRight_{scale}", parent=th_left, alignment=2)
 
-        if is_parent:
-            detail_zebra_counter = 0
-            up_str = format_currency(up) if up != 0 else ""
-            tp_str = format_currency(tp) if tp != 0 else "-"
-            qty_str = _format_qty_clean(qty_raw) if parse_qty_num(qty_raw) != 0 else ""
+        cell_left = ParagraphStyle(
+            f"BoqCellLeft_{scale}",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=sz(7.5, 5.7),
+            leading=sz(9.1, 6.8),
+            textColor=TEXT_DARK,
+        )
+        cell_center = ParagraphStyle(f"BoqCellCenter_{scale}", parent=cell_left, alignment=1)
+        cell_right = ParagraphStyle(f"BoqCellRight_{scale}", parent=cell_left, alignment=2)
 
-            table_data.append(
+        sec_left = ParagraphStyle(
+            f"BoqSecLeft_{scale}",
+            parent=cell_left,
+            fontName="Helvetica-Bold",
+            fontSize=sz(7.9, 6.0),
+            leading=sz(9.6, 7.1),
+            textColor=NAVY_PRIMARY,
+        )
+        sec_center = ParagraphStyle(f"BoqSecCenter_{scale}", parent=sec_left, alignment=1)
+        sec_right = ParagraphStyle(f"BoqSecRight_{scale}", parent=sec_left, alignment=2)
+
+        subsec_left = ParagraphStyle(
+            f"BoqSubSecLeft_{scale}",
+            parent=cell_left,
+            fontName="Helvetica-Bold",
+            fontSize=sz(7.6, 5.8),
+            leading=sz(9.2, 6.9),
+            textColor=TEXT_DARK,
+        )
+        subsec_center = ParagraphStyle(f"BoqSubSecCenter_{scale}", parent=subsec_left, alignment=1)
+        subsec_right = ParagraphStyle(f"BoqSubSecRight_{scale}", parent=subsec_left, alignment=2)
+
+        # 1. Kop Surat & Logo Perusahaan
+        logo_block = []
+        if logo_path and os.path.exists(logo_path):
+            try:
+                from reportlab.lib.utils import ImageReader
+                ir = ImageReader(logo_path)
+                iw, ih = ir.getSize()
+                if iw and ih:
+                    target_h = max(18.0, 26.0 * scale)
+                    target_w = min(115.0, target_h * (float(iw) / float(ih)))
+                    img = Image(logo_path, width=target_w, height=target_h)
+                    img.hAlign = "LEFT"
+                    logo_block.append(img)
+                    logo_block.append(Spacer(1, pad(2, 1)))
+            except Exception:
+                pass
+
+        logo_block.append(Paragraph("PT. Connectivity Leads eXcellence", company_style))
+        logo_block.append(
+            Paragraph("EV Charging &amp; Battery Swapping Infrastructure Services", company_sub_style)
+        )
+
+        right_header_block = [
+            Paragraph("BILL OF QUANTITY", doc_badge_style),
+            Spacer(1, pad(1.5, 0.5)),
+            Paragraph(f"<b>No. Dokumen:</b> {_esc_pdf_text(boq_no or '-')}", doc_meta_right_style),
+            Paragraph(f"<b>Tanggal:</b> {_esc_pdf_text(date_str)}", doc_meta_right_style),
+            Paragraph(
+                f"<font color='#0284C7'><b>CHARGING WORK {_esc_pdf_text(charger_capacity)}</b></font>",
+                doc_meta_right_style,
+            ),
+        ]
+
+        header_table = Table(
+            [[logo_block, right_header_block]],
+            colWidths=[295, 256],
+        )
+        header_table.setStyle(
+            TableStyle(
                 [
-                    Paragraph(_esc_pdf_text(no_raw), sec_center),
-                    Paragraph(_esc_pdf_text(item_raw), sec_left),
-                    Paragraph(_esc_pdf_text(qty_str), sec_right),
-                    Paragraph(_esc_pdf_text(unit_raw), sec_center),
-                    Paragraph(_esc_pdf_text(merk_raw), sec_left),
-                    Paragraph(up_str, sec_right),
-                    Paragraph(tp_str, sec_right),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), pad(5, 2.5)),
+                    ("LINEBELOW", (0, 0), (-1, 0), 1.8, NAVY_PRIMARY),
                 ]
             )
-            dynamic_styles.extend(
-                [
-                    ("BACKGROUND", (0, row_idx), (-1, row_idx), SECTION_BG),
-                    ("TOPPADDING", (0, row_idx), (-1, row_idx), 5),
-                    ("BOTTOMPADDING", (0, row_idx), (-1, row_idx), 5),
-                    ("LINEABOVE", (0, row_idx), (-1, row_idx), 0.7, NAVY_PRIMARY),
-                    ("LINEBELOW", (0, row_idx), (-1, row_idx), 0.5, BORDER_LIGHT),
-                ]
-            )
+        )
 
-        elif is_sub:
-            detail_zebra_counter = 0
-            tp_str = format_currency(tp) if tp != 0 else "-"
-            table_data.append(
-                [
-                    Paragraph(_esc_pdf_text(no_raw), subsec_center),
-                    Paragraph(_esc_pdf_text(item_raw), subsec_left),
-                    Paragraph("", subsec_right),
-                    Paragraph("", subsec_center),
-                    Paragraph("", subsec_left),
-                    Paragraph("", subsec_right),
-                    Paragraph(tp_str, subsec_right),
-                ]
-            )
-            dynamic_styles.extend(
-                [
-                    ("BACKGROUND", (0, row_idx), (-1, row_idx), SUBSECTION_BG),
-                    ("TOPPADDING", (0, row_idx), (-1, row_idx), 4),
-                    ("BOTTOMPADDING", (0, row_idx), (-1, row_idx), 4),
-                ]
-            )
-
-        else:
-            up_str = format_currency(up) if up != 0 else "-"
-            tp_str = format_currency(tp) if tp != 0 else "-"
-            qty_str = _format_qty_clean(qty_raw)
-
-            table_data.append(
-                [
-                    Paragraph(_esc_pdf_text(no_raw), cell_center),
-                    Paragraph(_esc_pdf_text(item_raw), cell_left),
-                    Paragraph(_esc_pdf_text(qty_str), cell_right),
-                    Paragraph(_esc_pdf_text(unit_raw), cell_center),
-                    Paragraph(_esc_pdf_text(merk_raw), cell_left),
-                    Paragraph(up_str, cell_right),
-                    Paragraph(tp_str, cell_right),
-                ]
-            )
-            bg = ZEBRA_BG if (detail_zebra_counter % 2 == 1) else colors.white
-            detail_zebra_counter += 1
-            dynamic_styles.extend(
-                [
-                    ("BACKGROUND", (0, row_idx), (-1, row_idx), bg),
-                    ("TOPPADDING", (0, row_idx), (-1, row_idx), 3.5),
-                    ("BOTTOMPADDING", (0, row_idx), (-1, row_idx), 3.5),
-                ]
-            )
-
-    last_item_row = len(table_data) - 1
-
-    # 4. Ringkasan Total (Menggunakan SPAN agar label tidak terpotong)
-    sum_label_style = ParagraphStyle(
-        "BoqSumLabel",
-        parent=cell_right,
-        fontName="Helvetica-Bold",
-        fontSize=8.5,
-        textColor=TEXT_DARK,
-    )
-    grand_label_style = ParagraphStyle(
-        "BoqGrandLabel",
-        parent=cell_right,
-        fontName="Helvetica-Bold",
-        fontSize=9.5,
-        textColor=colors.white,
-    )
-
-    table_data.extend(
-        [
+        # 2. Kartu Informasi Site & Proyek (2 Kolom)
+        meta_rows = [
             [
-                Paragraph("Sub Total (Exc. VAT)", sum_label_style),
-                "", "", "", "", "",
-                Paragraph(format_currency(sub_total), sum_label_style),
+                Paragraph("Site Name", info_label_style),
+                Paragraph(f": {_esc_pdf_text(site_name)}", info_val_style),
+                Paragraph("Charger Capacity", info_label_style),
+                Paragraph(f": {_esc_pdf_text(charger_capacity)}", info_val_style),
             ],
             [
-                Paragraph("VAT / PPN 11%", sum_label_style),
-                "", "", "", "", "",
-                Paragraph(format_currency(vat), sum_label_style),
+                Paragraph("Site Location", info_label_style),
+                Paragraph(f": {_esc_pdf_text(site_location)}", info_val_style),
+                Paragraph("Region / Area", info_label_style),
+                Paragraph(f": {_esc_pdf_text(region)} ISLAND", info_val_style),
             ],
             [
-                Paragraph("TOTAL CONTRACTOR PRICE (INC. VAT 11%)", grand_label_style),
-                "", "", "", "", "",
-                Paragraph(format_currency(grand_total), grand_label_style),
+                Paragraph("EPC / Partner", info_label_style),
+                Paragraph(f": {_esc_pdf_text(epc_name or '-')}", info_val_style),
+                Paragraph("Plan Reference", info_label_style),
+                Paragraph(": NEW PLAN BOQ VGREEN", info_val_style),
             ],
         ]
-    )
 
-    dynamic_styles.extend(
-        [
-            ("GRID", (0, 0), (-1, last_item_row), 0.35, BORDER_LIGHT),
-            ("BOX", (0, 0), (-1, -1), 0.8, NAVY_PRIMARY),
-            ("SPAN", (0, -3), (5, -3)),
-            ("BACKGROUND", (0, -3), (-1, -3), CARD_BG),
-            ("LINEABOVE", (0, -3), (-1, -3), 1.0, NAVY_PRIMARY),
-            ("TOPPADDING", (0, -3), (-1, -2), 4.5),
-            ("BOTTOMPADDING", (0, -3), (-1, -2), 4.5),
-            ("SPAN", (0, -2), (5, -2)),
-            ("BACKGROUND", (0, -2), (-1, -2), CARD_BG),
-            ("LINEBELOW", (0, -2), (-1, -2), 0.5, BORDER_LIGHT),
-            ("SPAN", (0, -1), (5, -1)),
-            ("BACKGROUND", (0, -1), (-1, -1), NAVY_PRIMARY),
-            ("TOPPADDING", (0, -1), (-1, -1), 6.5),
-            ("BOTTOMPADDING", (0, -1), (-1, -1), 6.5),
+        meta_table = Table(meta_rows, colWidths=[70, 228, 82, 171])
+        meta_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), CARD_BG),
+                    ("LINEBEFORE", (0, 0), (0, -1), 3.0, BLUE_ACCENT),
+                    ("BOX", (0, 0), (-1, -1), 0.5, BORDER_LIGHT),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 0), (-1, -1), pad(2.5, 1.2)),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), pad(2.5, 1.2)),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+
+        # 3. Tabel Rincian BOQ (Total lebar = 551 pt)
+        table_data = [
+            [
+                Paragraph("NO", th_center),
+                Paragraph("ITEM DESCRIPTION", th_left),
+                Paragraph("QTY", th_right),
+                Paragraph("UNIT", th_center),
+                Paragraph("BRAND / MERK", th_left),
+                Paragraph("UNIT PRICE", th_right),
+                Paragraph("TOTAL PRICE", th_right),
+            ]
         ]
-    )
 
-    t = Table(
-        table_data,
-        colWidths=col_widths,
-        repeatRows=1,
-    )
-    t.setStyle(TableStyle(dynamic_styles))
+        dynamic_styles = [
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY_PRIMARY),
+            ("TOPPADDING", (0, 0), (-1, 0), pad(4.0, 2.0)),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), pad(4.0, 2.0)),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ]
 
-    elements.append(t)
+        detail_zebra_counter = 0
+
+        for _, row in pdf_df.iterrows():
+            no_raw = clean_text(row.get("NO", "")).upper()
+            item_raw = clean_text(row.get("Item", ""))
+            qty_raw = row.get("Unit/Volume", "")
+            unit_raw = clean_text(row.get("Satuan/Uom", ""))
+            merk_raw = clean_text(row.get("MERK", ""))
+
+            up = parse_price(row.get("UNIT PRICE", 0))
+            tp = parse_price(row.get("TOTAL PRICE", 0))
+
+            is_parent = (no_raw in alpha_parents) or (no_raw == "I" and not has_roman_ii)
+            is_sub = (no_raw in roman_subsections) and not is_parent
+
+            row_idx = len(table_data)
+
+            if is_parent:
+                detail_zebra_counter = 0
+                up_str = format_currency(up) if up != 0 else ""
+                tp_str = format_currency(tp) if tp != 0 else "-"
+                qty_str = _format_qty_clean(qty_raw) if parse_qty_num(qty_raw) != 0 else ""
+
+                table_data.append(
+                    [
+                        Paragraph(_esc_pdf_text(no_raw), sec_center),
+                        Paragraph(_esc_pdf_text(item_raw), sec_left),
+                        Paragraph(_esc_pdf_text(qty_str), sec_right),
+                        Paragraph(_esc_pdf_text(unit_raw), sec_center),
+                        Paragraph(_esc_pdf_text(merk_raw), sec_left),
+                        Paragraph(up_str, sec_right),
+                        Paragraph(tp_str, sec_right),
+                    ]
+                )
+                dynamic_styles.extend(
+                    [
+                        ("BACKGROUND", (0, row_idx), (-1, row_idx), SECTION_BG),
+                        ("TOPPADDING", (0, row_idx), (-1, row_idx), pad(3.0, 1.3)),
+                        ("BOTTOMPADDING", (0, row_idx), (-1, row_idx), pad(3.0, 1.3)),
+                        ("LINEABOVE", (0, row_idx), (-1, row_idx), 0.65, NAVY_PRIMARY),
+                        ("LINEBELOW", (0, row_idx), (-1, row_idx), 0.45, BORDER_LIGHT),
+                    ]
+                )
+
+            elif is_sub:
+                detail_zebra_counter = 0
+                tp_str = format_currency(tp) if tp != 0 else "-"
+                table_data.append(
+                    [
+                        Paragraph(_esc_pdf_text(no_raw), subsec_center),
+                        Paragraph(_esc_pdf_text(item_raw), subsec_left),
+                        Paragraph("", subsec_right),
+                        Paragraph("", subsec_center),
+                        Paragraph("", subsec_left),
+                        Paragraph("", subsec_right),
+                        Paragraph(tp_str, subsec_right),
+                    ]
+                )
+                dynamic_styles.extend(
+                    [
+                        ("BACKGROUND", (0, row_idx), (-1, row_idx), SUBSECTION_BG),
+                        ("TOPPADDING", (0, row_idx), (-1, row_idx), pad(2.5, 1.1)),
+                        ("BOTTOMPADDING", (0, row_idx), (-1, row_idx), pad(2.5, 1.1)),
+                    ]
+                )
+
+            else:
+                up_str = format_currency(up) if up != 0 else "-"
+                tp_str = format_currency(tp) if tp != 0 else "-"
+                qty_str = _format_qty_clean(qty_raw)
+
+                table_data.append(
+                    [
+                        Paragraph(_esc_pdf_text(no_raw), cell_center),
+                        Paragraph(_esc_pdf_text(item_raw), cell_left),
+                        Paragraph(_esc_pdf_text(qty_str), cell_right),
+                        Paragraph(_esc_pdf_text(unit_raw), cell_center),
+                        Paragraph(_esc_pdf_text(merk_raw), cell_left),
+                        Paragraph(up_str, cell_right),
+                        Paragraph(tp_str, cell_right),
+                    ]
+                )
+                bg = ZEBRA_BG if (detail_zebra_counter % 2 == 1) else colors.white
+                detail_zebra_counter += 1
+                dynamic_styles.extend(
+                    [
+                        ("BACKGROUND", (0, row_idx), (-1, row_idx), bg),
+                        ("TOPPADDING", (0, row_idx), (-1, row_idx), pad(2.2, 0.85)),
+                        ("BOTTOMPADDING", (0, row_idx), (-1, row_idx), pad(2.2, 0.85)),
+                    ]
+                )
+
+        last_item_row = len(table_data) - 1
+
+        # 4. Ringkasan Total (Menggunakan SPAN agar label tidak terpotong)
+        sum_label_style = ParagraphStyle(
+            f"BoqSumLabel_{scale}",
+            parent=cell_right,
+            fontName="Helvetica-Bold",
+            fontSize=sz(8.0, 6.5),
+            leading=sz(9.6, 7.6),
+            textColor=TEXT_DARK,
+        )
+        grand_label_style = ParagraphStyle(
+            f"BoqGrandLabel_{scale}",
+            parent=cell_right,
+            fontName="Helvetica-Bold",
+            fontSize=sz(8.8, 7.2),
+            leading=sz(10.5, 8.4),
+            textColor=colors.white,
+        )
+
+        table_data.extend(
+            [
+                [
+                    Paragraph("Sub Total (Exc. VAT)", sum_label_style),
+                    "", "", "", "", "",
+                    Paragraph(format_currency(sub_total), sum_label_style),
+                ],
+                [
+                    Paragraph("VAT / PPN 11%", sum_label_style),
+                    "", "", "", "", "",
+                    Paragraph(format_currency(vat), sum_label_style),
+                ],
+                [
+                    Paragraph("TOTAL CONTRACTOR PRICE (INC. VAT 11%)", grand_label_style),
+                    "", "", "", "", "",
+                    Paragraph(format_currency(grand_total), grand_label_style),
+                ],
+            ]
+        )
+
+        dynamic_styles.extend(
+            [
+                ("GRID", (0, 0), (-1, last_item_row), 0.35, BORDER_LIGHT),
+                ("BOX", (0, 0), (-1, -1), 0.8, NAVY_PRIMARY),
+                ("SPAN", (0, -3), (5, -3)),
+                ("BACKGROUND", (0, -3), (-1, -3), CARD_BG),
+                ("LINEABOVE", (0, -3), (-1, -3), 0.9, NAVY_PRIMARY),
+                ("TOPPADDING", (0, -3), (-1, -2), pad(3.0, 1.5)),
+                ("BOTTOMPADDING", (0, -3), (-1, -2), pad(3.0, 1.5)),
+                ("SPAN", (0, -2), (5, -2)),
+                ("BACKGROUND", (0, -2), (-1, -2), CARD_BG),
+                ("LINEBELOW", (0, -2), (-1, -2), 0.45, BORDER_LIGHT),
+                ("SPAN", (0, -1), (5, -1)),
+                ("BACKGROUND", (0, -1), (-1, -1), NAVY_PRIMARY),
+                ("TOPPADDING", (0, -1), (-1, -1), pad(4.5, 2.5)),
+                ("BOTTOMPADDING", (0, -1), (-1, -1), pad(4.5, 2.5)),
+            ]
+        )
+
+        t = Table(
+            table_data,
+            colWidths=col_widths,
+            repeatRows=1,
+        )
+        t.setStyle(TableStyle(dynamic_styles))
+
+        sp1 = Spacer(1, pad(6.0, 3.0))
+        sp2 = Spacer(1, pad(6.0, 3.0))
+        built = [header_table, sp1, meta_table, sp2, t]
+
+        total_h = 0.0
+        for item in built:
+            _, ih = item.wrap(avail_w, avail_h)
+            total_h += ih
+
+        return built, total_h
+
+    # Auto-fit: pilih tingkat kepadatan paling nyaman yang muat 1 halaman A4 penuh
+    chosen_elements = None
+    chosen_h = 0.0
+    for sc in (1.06, 1.00, 0.94, 0.88, 0.82, 0.76, 0.70, 0.65, 0.60):
+        candidate_elements, measured_h = _build_scaled_elements(sc)
+        chosen_elements = candidate_elements
+        chosen_h = measured_h
+        if measured_h <= safe_target_h:
+            break
+
+    # Pengaman akhir: jika item custom sangat banyak sehingga tetap melebihi tinggi A4,
+    # KeepInFrame otomatis menyesuaikan skala agar 100% Fit One Page A4.
+    if chosen_h > safe_target_h:
+        elements = [
+            KeepInFrame(
+                avail_w,
+                safe_target_h,
+                chosen_elements,
+                mode="shrink",
+                hAlign="CENTER",
+                vAlign="TOP",
+            )
+        ]
+    else:
+        elements = chosen_elements
 
     doc.build(
         elements,
