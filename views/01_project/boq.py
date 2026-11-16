@@ -28,10 +28,12 @@ import streamlit as st
 # SAFE IMPORT / ROOT CONFIGURATION
 # ==============================================================================
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../"))
 ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
 
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+for _p in [ROOT_DIR, PARENT_DIR]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 CWD = os.getcwd()
 
@@ -77,8 +79,8 @@ COMPANY_CONFIGS = {
         "ms_header_text_hex": "#FFFFFF",
     },
     "Sunrise": {
-        "code": "SUNRISE",
-        "name": "PT. Sunrise",
+        "code": "SI",
+        "name": "PT. Sunrise Internusa",
         "subtitle": "EV Charging & Battery Swapping Infrastructure Services",
         "logo_candidates": ["SUNRISE.png", "Sunrise.png", "sunrise.png"],
         "primary_hex": "#FACC15",
@@ -86,7 +88,7 @@ COMPANY_CONFIGS = {
         "accent_hex": "#EAB308",
         "badge_text_hex": "#B45309",
         "title_text_hex": "#854D0E",
-        "section_bg_hex": "#FEF08A",
+        "section_bg_hex": "#FDE047",
         "subsection_bg_hex": "#FEF9C3",
         "zebra_bg_hex": "#FFFBEB",
         "card_bg_hex": "#FEFCE8",
@@ -145,7 +147,7 @@ BOQ_MS_HELPER_HEADERS = [
 # ==============================================================================
 def normalize_company_key(company):
     c = clean_text(company).upper()
-    if "SUNRISE" in c or c == "SR":
+    if "SUNRISE" in c or c in {"SI", "SR"}:
         return "Sunrise"
     return "CLX"
 
@@ -156,7 +158,15 @@ def get_company_config(company):
 
 def detect_company_from_boq_no(boq_no):
     s = clean_text(boq_no).upper()
-    if "/SUNRISE/" in s or "/SR/" in s:
+    if "/SI/" in s or "/SUNRISE/" in s or "/SR/" in s:
+        return "Sunrise"
+    return "CLX"
+
+
+def detect_company_from_context(boq_no="", epc_name=""):
+    b = clean_text(boq_no).upper()
+    e = clean_text(epc_name).upper()
+    if "/SI/" in b or "/SUNRISE/" in b or "/SR/" in b or "SUNRISE" in e:
         return "Sunrise"
     return "CLX"
 
@@ -167,7 +177,7 @@ def replace_boq_company_code(boq_no, company):
         return raw
     target_code = get_company_config(company)["code"]
     updated = re.sub(
-        r"^(\d+)/(?:CLX|SUNRISE|SR)(/BOQ/)",
+        r"^(\d+)/(?:CLX|SI|SUNRISE|SR)(/BOQ/)",
         rf"\1/{target_code}\2",
         raw,
         flags=re.IGNORECASE,
@@ -486,41 +496,34 @@ def generate_boq_ms_number(sequence_num=1, date_obj=None, company="CLX"):
     return f"{int(sequence_num):04d}/{company_code}/BOQ/MS/{roman}/{now.year}"
 
 
-def get_template_path(filename):
-    candidates = [
-        os.path.join(
-            CURRENT_DIR,
-            "assets",
-            "templates",
-            filename,
-        ),
-        os.path.join(
-            ROOT_DIR,
-            "assets",
-            "templates",
-            filename,
-        ),
-        os.path.join(
-            CWD,
-            "assets",
-            "templates",
-            filename,
-        ),
-        os.path.join(
-            CWD,
-            "assets",
-            "templates",
-            "boq",
-            filename,
-        ),
+def _candidate_asset_dirs():
+    dirs = [
+        os.path.join(CURRENT_DIR, "assets", "templates"),
+        os.path.join(PARENT_DIR, "assets", "templates"),
+        os.path.join(ROOT_DIR, "assets", "templates"),
+        os.path.join(CWD, "assets", "templates"),
+        os.path.join(CWD, "CLX-ERP-SYSTEM", "assets", "templates"),
+        os.path.join(CWD, "assets", "templates", "boq"),
     ]
+    seen = set()
+    unique_dirs = []
+    for d in dirs:
+        norm = os.path.abspath(d)
+        if norm not in seen:
+            seen.add(norm)
+            unique_dirs.append(norm)
+    return unique_dirs
 
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+
+def get_template_path(filename):
+    asset_dirs = _candidate_asset_dirs()
+
+    for base_dir in asset_dirs:
+        candidate = os.path.join(base_dir, filename)
+        if os.path.exists(candidate):
+            return candidate
 
     base, ext = os.path.splitext(filename)
-
     variants = [
         f"{base}(4){ext}",
         f"{base} (4){ext}",
@@ -529,40 +532,38 @@ def get_template_path(filename):
     ]
 
     for variant in variants:
-        for root in [
-            CURRENT_DIR,
-            ROOT_DIR,
-            CWD,
-        ]:
-            candidate = os.path.join(
-                root,
-                "assets",
-                "templates",
-                variant,
-            )
-
+        for base_dir in asset_dirs:
+            candidate = os.path.join(base_dir, variant)
             if os.path.exists(candidate):
                 return candidate
 
-    return candidates[0]
+    return os.path.join(asset_dirs[0], filename)
 
 
 def get_logo_path(company="CLX"):
     cfg = get_company_config(company)
     logo_filenames = cfg["logo_candidates"]
+    target_lower = {f.lower() for f in logo_filenames}
+    asset_dirs = _candidate_asset_dirs()
 
-    base_dirs = [
-        os.path.join(CURRENT_DIR, "assets", "templates"),
-        os.path.join(ROOT_DIR, "assets", "templates"),
-        os.path.join(CWD, "assets", "templates"),
-        os.path.join(CWD, "CLX-ERP-SYSTEM", "assets", "templates"),
-    ]
-
-    for base_dir in base_dirs:
+    # 1. Exact path match
+    for base_dir in asset_dirs:
         for fname in logo_filenames:
             candidate = os.path.join(base_dir, fname)
-            if os.path.exists(candidate):
+            if os.path.isfile(candidate):
                 return candidate
+
+    # 2. Case-insensitive scan di folder assets/templates
+    for base_dir in asset_dirs:
+        if os.path.isdir(base_dir):
+            try:
+                for entry in os.listdir(base_dir):
+                    if entry.lower() in target_lower:
+                        full_path = os.path.join(base_dir, entry)
+                        if os.path.isfile(full_path):
+                            return full_path
+            except Exception:
+                pass
 
     return None
 
@@ -913,7 +914,7 @@ def _next_boq_sequence():
             max_no = max(max_no, int(m.group(1)))
 
         m2 = re.match(
-            r"^(\d+)/(?:CLX|SUNRISE|SR)/BOQ/",
+            r"^(\d+)/(?:CLX|SI|SUNRISE|SR)/BOQ/",
             clean_text(r.get("BOQ No.", "")).upper(),
         )
         if m2:
@@ -1067,7 +1068,7 @@ def save_to_db_boq(
                 max_no = max(max_no, int(m.group(1)))
             if len(r) > 1:
                 m2 = re.match(
-                    r"^(\d+)/(?:CLX|SUNRISE|SR)/BOQ/",
+                    r"^(\d+)/(?:CLX|SI|SUNRISE|SR)/BOQ/",
                     clean_text(r[1]).upper(),
                 )
                 if m2:
@@ -2030,7 +2031,7 @@ class _BoqNumberedCanvas(pdf_canvas.Canvas):
 
         self.saveState()
         self.setStrokeColor(colors.HexColor(self.footer_line_hex))
-        self.setLineWidth(0.8)
+        self.setLineWidth(0.9)
         self.line(margin_x, y_line, page_width - margin_x, y_line)
 
         self.setFont("Helvetica", 7)
@@ -2059,7 +2060,7 @@ def generate_boq_pdf(
     boq_no="-",
     epc_name="-",
     date_obj=None,
-    company="CLX",
+    company=None,
 ):
     buffer = io.BytesIO()
     page_w, page_h = A4
@@ -2083,7 +2084,8 @@ def generate_boq_pdf(
     dt = date_obj or datetime.datetime.now()
     date_str = dt.strftime("%d %B %Y")
 
-    company_key = normalize_company_key(company)
+    resolved_company = company or detect_company_from_context(boq_no=boq_no, epc_name=epc_name)
+    company_key = normalize_company_key(resolved_company)
     cfg = get_company_config(company_key)
 
     # Palet warna dinamis: Navy/Blue untuk CLX, Yellow Highlight untuk Sunrise
@@ -2281,7 +2283,7 @@ def generate_boq_pdf(
                     ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                     ("TOPPADDING", (0, 0), (-1, -1), 0),
                     ("BOTTOMPADDING", (0, 0), (-1, -1), pad(5, 2.5)),
-                    ("LINEBELOW", (0, 0), (-1, 0), 2.0, PRIMARY_BG),
+                    ("LINEBELOW", (0, 0), (-1, 0), 2.2, PRIMARY_BG),
                 ]
             )
         )
@@ -2313,7 +2315,7 @@ def generate_boq_pdf(
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, -1), CARD_BG),
-                    ("LINEBEFORE", (0, 0), (0, -1), 3.2, ACCENT_COLOR),
+                    ("LINEBEFORE", (0, 0), (0, -1), 3.4, ACCENT_COLOR),
                     ("BOX", (0, 0), (-1, -1), 0.5, BORDER_LIGHT),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                     ("TOPPADDING", (0, 0), (-1, -1), pad(2.5, 1.2)),
@@ -2541,7 +2543,7 @@ def generate_boq_pdf(
     else:
         elements = chosen_elements
 
-    footer_line = cfg["primary_hex"] if company_key == "Sunrise" else "#CBD5E1"
+    footer_line = cfg["border_primary_hex"] if company_key == "Sunrise" else "#CBD5E1"
 
     doc.build(
         elements,
@@ -2663,7 +2665,7 @@ def _next_boq_ms_sequence():
             max_no = max(max_no, int(m.group(1)))
 
         m2 = re.match(
-            r"^(\d+)/(?:CLX|SUNRISE|SR)/BOQ/MS/",
+            r"^(\d+)/(?:CLX|SI|SUNRISE|SR)/BOQ/MS/",
             r["No. BOQ"].upper(),
         )
         if m2:
@@ -2772,16 +2774,10 @@ def _boq_ms_picker(material_df, selected_keys=None, key="boq_ms_picker"):
 
 
 def _get_pdf_asset_path(filename):
-    candidates = [
-        os.path.join(CURRENT_DIR, "assets", "templates", filename),
-        os.path.join(ROOT_DIR, "assets", "templates", filename),
-        os.path.join(CWD, "assets", "templates", filename),
-        os.path.join(CWD, "CLX-ERP-SYSTEM", "assets", "templates", filename),
-    ]
-
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+    for base_dir in _candidate_asset_dirs():
+        candidate = os.path.join(base_dir, filename)
+        if os.path.isfile(candidate):
+            return candidate
     return None
 
 
@@ -2991,7 +2987,7 @@ def generate_boq_ms_pdf(
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ]
     if company_key == "Sunrise":
-        sm_styles.append(("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FEF08A")))
+        sm_styles.append(("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FDE047")))
 
     sm = Table(
         [
@@ -3050,23 +3046,6 @@ def _render_boq_create():
     site_options, site_data_map = fetch_query_site_options(exclude_saved=True)
     PLACEHOLDER_OPTION = "-- Pilih Site Name & Charger --"
 
-    col_comp, col_tmpl = st.columns([1, 2])
-    with col_comp:
-        selected_company = st.radio(
-            "Output Perusahaan / Kop BOQ",
-            COMPANY_OPTIONS,
-            index=0,
-            horizontal=True,
-            key="create_boq_company",
-        )
-    with col_tmpl:
-        template_name = st.selectbox(
-            "Template yang digunakan",
-            list(TEMPLATE_OPTIONS.keys()),
-            index=1,
-            key="create_boq_template",
-        )
-
     selected_label = st.selectbox(
         "Pilih Site Name & Charger",
         [PLACEHOLDER_OPTION] + sorted(site_options),
@@ -3080,6 +3059,24 @@ def _render_boq_create():
 
     meta = site_data_map[selected_label]
     selected_site = meta.get("Site Name", selected_label)
+    default_company = detect_company_from_context(epc_name=meta.get("EPC Name", ""))
+
+    col_comp, col_tmpl = st.columns([1, 2])
+    with col_comp:
+        selected_company = st.radio(
+            "Output Perusahaan / Kop BOQ",
+            COMPANY_OPTIONS,
+            index=COMPANY_OPTIONS.index(default_company),
+            horizontal=True,
+            key=f"create_boq_company_{selected_label}",
+        )
+    with col_tmpl:
+        template_name = st.selectbox(
+            "Template yang digunakan",
+            list(TEMPLATE_OPTIONS.keys()),
+            index=1,
+            key="create_boq_template",
+        )
 
     c1, c2 = st.columns(2)
     site_address = c2.text_input(
@@ -3147,13 +3144,19 @@ def _render_boq_create():
         sequence_num=_next_boq_sequence(),
         company=selected_company,
     )
+    cfg_active = get_company_config(selected_company)
 
     c1, c2 = st.columns([2, 1])
     c1.success(
         f"✅ Tabel BOQ Aktif: **{selected_site}** | Tipe: **{charging_type}** | "
-        f"Wilayah: **{region_normalized}** | Output: **{selected_company}** (`{preview_boq_no}`)"
+        f"Wilayah: **{region_normalized}** | Output: **{cfg_active['name']}** (`{preview_boq_no}`)"
     )
     c2.metric("Grand Total (Inc. VAT 11%)", format_currency(grand_total))
+
+    if get_logo_path(selected_company) is None:
+        st.warning(
+            f"⚠️ File logo `{cfg_active['logo_candidates'][0]}` belum ditemukan di folder `assets/templates/`."
+        )
 
     pdf_bytes = generate_boq_pdf(
         selected_site,
@@ -3169,7 +3172,7 @@ def _render_boq_create():
         company=selected_company,
     )
 
-    company_code = get_company_config(selected_company)["code"]
+    company_code = cfg_active["code"]
     safe_site = re.sub(r'[\\/*?:"<>|]', "_", str(selected_site))
     safe_charger = re.sub(r'[\\/*?:"<>|]', "_", str(charging_type))
     filename_pdf = f"BOQ_{company_code}_{safe_charger}_{region_normalized}_{safe_site}.pdf"
@@ -3216,8 +3219,9 @@ def _render_boq_edit():
     old_boq_no = data.get("BOQ No.", "-")
     old_site = data.get("Site Name", "")
     old_charger = data.get("Charger Type", "")
+    old_epc = data.get("EPC Name", "-")
     template_name = template_name_from_db_value(data.get("Template", ""))
-    default_company = detect_company_from_boq_no(old_boq_no)
+    default_company = detect_company_from_context(boq_no=old_boq_no, epc_name=old_epc)
 
     col_comp, col_tmpl = st.columns([1, 2])
     with col_comp:
@@ -3237,7 +3241,13 @@ def _render_boq_edit():
         )
 
     active_boq_no = replace_boq_company_code(old_boq_no, selected_company)
-    st.caption(f"Nomor BOQ Aktif: `{active_boq_no}`")
+    cfg_active = get_company_config(selected_company)
+    st.caption(f"Output: **{cfg_active['name']}** | Nomor BOQ Aktif: `{active_boq_no}`")
+
+    if get_logo_path(selected_company) is None:
+        st.warning(
+            f"⚠️ File logo `{cfg_active['logo_candidates'][0]}` belum ditemukan di folder `assets/templates/`."
+        )
 
     _, qmap = fetch_query_site_options(exclude_saved=False)
     meta = next(
@@ -3251,7 +3261,7 @@ def _render_boq_edit():
 
     site = st.text_input("Site Name", old_site)
     charger = normalize_charger_type(st.text_input("Charger Type", old_charger))
-    epc = st.text_input("EPC Name", data.get("EPC Name", "-"))
+    epc = st.text_input("EPC Name", old_epc)
     address = st.text_input("Address", meta.get("Address", "-"))
     province = map_to_standard_province(meta.get("Province", ""))
 
@@ -3281,7 +3291,7 @@ def _render_boq_edit():
         company=selected_company,
     )
 
-    company_code = get_company_config(selected_company)["code"]
+    company_code = cfg_active["code"]
     safe_site = re.sub(r'[\\/*?:"<>|]', "_", str(site))
     safe_charger = re.sub(r'[\\/*?:"<>|]', "_", str(charger))
     filename_updated = f"BOQ_{company_code}_{safe_charger}_{region}_{safe_site}_Updated.pdf"
