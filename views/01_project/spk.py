@@ -1603,8 +1603,48 @@ def generate_spk_pdf_bytes(
 
 
 # ==============================================================================
-# PDF - OPERATION (MAINTENANCE SERVICE)
+# PDF - OPERATION (MAINTENANCE SERVICE EVCS & BSS)
 # ==============================================================================
+
+def _build_ms_scope_paragraph(pekerjaan, sow_type, cell_style):
+    combined_label = f"{safe_str(sow_type)} {safe_str(pekerjaan)}".lower()
+
+    if "evcs" in combined_label:
+        scope_html = (
+            f"<b>{esc_pdf(pekerjaan)} (AC &amp; DC Charger)</b><br/>"
+            "<b>1. Preventive Maintenance (PM):</b> Pembersihan unit, <i>charging gun</i>, layar HMI, "
+            "dan filter udara kabinet; pengecekan panel listrik (MDP/SDP), <i>grounding</i>, MCB/SPD, "
+            "serta uji fungsi <i>Emergency Stop</i> dan koneksi OCPP/jaringan.<br/>"
+            "<b>2. Corrective Maintenance (CM):</b> Penanganan tiket gangguan lapangan "
+            "(<i>troubleshooting</i>), <i>reset</i> sistem, serta penggantian <i>sparepart</i> rusak "
+            "sesuai persetujuan tim teknis &amp; SLA.<br/>"
+            "<b>3. Inspeksi Area, K3 &amp; Pelaporan:</b> Pengecekan kondisi sipil (<i>pedestal</i>, "
+            "marka, penerangan), penerapan standar K3 kelistrikan, serta penyampaian <i>checklist</i> "
+            "digital, foto dokumentasi (<i>Before-After</i>), dan laporan SLA bulanan."
+        )
+    elif "bss" in combined_label:
+        scope_html = (
+            f"<b>{esc_pdf(pekerjaan)} (Battery Swapping Station)</b><br/>"
+            "<b>1. Preventive Maintenance (PM):</b> Pembersihan kabinet dan slot baterai; pengecekan "
+            "mekanisme <i>door lock</i>, pin konektor daya &amp; komunikasi, modul <i>charger</i> per slot, "
+            "sistem <i>grounding</i>, kipas pendingin, sensor suhu/asap, dan sinkronisasi IoT.<br/>"
+            "<b>2. Corrective Maintenance (CM):</b> Penanganan gangguan operasional slot/kabinet "
+            "(<i>troubleshooting</i>), <i>reset</i> sistem, serta penggantian komponen/modul sesuai "
+            "persetujuan tim teknis &amp; SLA.<br/>"
+            "<b>3. Inspeksi Area, K3 &amp; Pelaporan:</b> Pengecekan kondisi fisik area sekitar site, "
+            "penerapan standar K3 kelistrikan, serta penyampaian <i>checklist</i> digital, foto dokumentasi "
+            "(<i>Before-After</i>), dan laporan SLA bulanan."
+        )
+    else:
+        scope_html = (
+            f"<b>{esc_pdf(pekerjaan)}</b><br/>"
+            "Melaksanakan kegiatan Preventive Maintenance (PM), Corrective Maintenance (CM), "
+            "pengecekan berkala perangkat, serta pelaporan SLA harian/bulanan sesuai ketentuan "
+            "PT. Connectivity Leads eXcellence."
+        )
+
+    return Paragraph(scope_html, cell_style)
+
 
 def generate_ms_pdf_bytes(spk_metadata, approved=False):
     buffer = io.BytesIO()
@@ -1702,13 +1742,7 @@ def generate_ms_pdf_bytes(spk_metadata, approved=False):
             ],
             [
                 Paragraph("1", st_styles["cell_center"]),
-                Paragraph(
-                    f"<b>{esc_pdf(pekerjaan)}</b><br/>"
-                    "Melaksanakan kegiatan Preventive Maintenance (PM), Corrective Maintenance (CM), "
-                    "pengecekan berkala perangkat, serta pelaporan SLA harian/bulanan sesuai ketentuan "
-                    "PT. Connectivity Leads eXcellence.",
-                    st_styles["cell_body"],
-                ),
+                _build_ms_scope_paragraph(pekerjaan, sow_type, st_styles["cell_body"]),
                 Paragraph(
                     f"<b>{esc_pdf(periode_start)}</b><br/>s/d<br/><b>{esc_pdf(periode_end)}</b>",
                     st_styles["cell_center"],
@@ -2023,6 +2057,16 @@ def generate_ms_pdf_from_database(
     periode_start = safe_str(row[col_start]) if col_start else "-"
     periode_end = safe_str(row[col_end]) if col_end else "-"
 
+    pekerjaan_lower = pekerjaan.lower()
+    if is_maintenance_sow(pekerjaan):
+        inferred_sow = pekerjaan
+    elif "evcs" in pekerjaan_lower:
+        inferred_sow = MAINTENANCE_SOW_EVCS
+    elif "bss" in pekerjaan_lower:
+        inferred_sow = MAINTENANCE_SOW_BSS
+    else:
+        inferred_sow = "Maintenance Service"
+
     spk_metadata = {
         "no_spk": safe_str(selected_spk),
         "date_spk": date_spk,
@@ -2030,7 +2074,7 @@ def generate_ms_pdf_from_database(
         "mitra": mitra,
         "periode_start": periode_start,
         "periode_end": periode_end,
-        "sow_type": pekerjaan if is_maintenance_sow(pekerjaan) else "Maintenance Service",
+        "sow_type": inferred_sow,
     }
 
     return generate_ms_pdf_bytes(spk_metadata, approved=approved)
