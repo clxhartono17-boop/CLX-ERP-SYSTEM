@@ -48,10 +48,13 @@ STATUS_REJECTED = "Rejected by CSO"
 LEGACY_PENDING_STATUSES = {
     STATUS_PENDING.lower(),
     "pending coo approval",
+    "pending approval",
+    "pending",
 }
 LEGACY_APPROVED_STATUSES = {
     STATUS_APPROVED.lower(),
     "approved by coo",
+    "approved",
 }
 
 CACHE_TTL_SHEET = 120
@@ -324,7 +327,7 @@ def get_worksheet(sheet_name: str):
 
 
 # ==============================================================================
-# GENERIC HELPERS
+# GENERIC & STATUS HELPERS
 # ==============================================================================
 
 def normalize_header(value):
@@ -417,6 +420,42 @@ def safe_str(value, default=""):
     if text.upper() in SHEET_ERROR_VALUES:
         return default
     return text
+
+
+def _normalize_status_text(value):
+    return " ".join(safe_str(value).lower().split())
+
+
+def _is_approved_status(status_val):
+    s = _normalize_status_text(status_val)
+    return s in LEGACY_APPROVED_STATUSES or s.startswith("approved")
+
+
+def _is_rejected_status(status_val):
+    s = _normalize_status_text(status_val)
+    return s in {
+        STATUS_REJECTED.lower(),
+        "rejected by coo",
+        "rejected by cso",
+        "rejected",
+        "reject",
+    } or s.startswith("rejected")
+
+
+def _is_pending_status(status_val, no_spk_val=""):
+    if _is_approved_status(status_val) or _is_rejected_status(status_val):
+        return False
+    s = _normalize_status_text(status_val)
+    if not s:
+        spk_clean = safe_str(no_spk_val)
+        return bool(spk_clean) and spk_clean != "-"
+    return (
+        s in LEGACY_PENDING_STATUSES
+        or "pending" in s
+        or "waiting" in s
+        or "menunggu" in s
+        or s == "draft"
+    )
 
 
 def esc_pdf(value, default="-"):
@@ -768,9 +807,13 @@ def ensure_ms_sheet(sh):
 
 def ensure_status_column(sheet, df):
     df = normalize_dataframe_headers(df.copy())
-    status_col = find_column(df, ["Status Approval", "Approval Status"], fallback=None)
+    status_col = find_column(
+        df,
+        ["Status Approval", "Approval Status", "Status"],
+        fallback=None,
+    )
 
-    if status_col:
+    if status_col and status_col != "_excel_row":
         return df, status_col
 
     status_col = "Status Approval"
@@ -802,7 +845,6 @@ def ensure_status_column(sheet, df):
 # MODERN CORPORATE PDF ENGINE (A4, HIGHLIGHTED SECTIONS, 3-SIGNER BLOCK)
 # ==============================================================================
 
-# Palet Warna Korporat Modern CLX
 COLOR_NAVY = colors.HexColor("#1B365D")
 COLOR_BLUE_ACCENT = colors.HexColor("#0284C7")
 COLOR_HIGHLIGHT_BG = colors.HexColor("#EFF6FF")
@@ -1027,7 +1069,6 @@ def build_pdf_header(elements, st_styles):
         ),
     ]
 
-    # Total lebar = 534 pt
     t_header = Table(
         [[logo_cell, company_block]],
         colWidths=[134, 400],
@@ -1189,7 +1230,6 @@ def _build_three_party_signature_block(
         textColor=COLOR_TEXT_MUTED,
     )
 
-    # Tanda tangan Vendor Management otomatis dimuat dalam setiap pembuatan SPK
     vm_sig_img = build_vm_signature_image(max_width=1.45 * inch, max_height=0.62 * inch)
     vm_sig_cell = (
         vm_sig_img
@@ -1197,7 +1237,6 @@ def _build_three_party_signature_block(
         else Paragraph("(Verified by Vendor Management)", sign_placeholder)
     )
 
-    # Tanda tangan CSO muncul setelah SPK disetujui oleh CSO
     cso_sig_img = (
         build_cso_signature_image(max_width=1.45 * inch, max_height=0.62 * inch)
         if approved
@@ -1212,7 +1251,6 @@ def _build_three_party_signature_block(
         )
     )
 
-    # Lebar masing-masing kolom = 178 pt (total = 534 pt)
     sign_data = [
         [
             Paragraph("PELAKSANA PEKERJAAN", sign_header),
@@ -1320,9 +1358,6 @@ def generate_spk_pdf_bytes(
     pic_phone = safe_str(spk_metadata.get("pic_phone"), "-")
     display_wo = safe_str(selected_wo, "-")
 
-    # --------------------------------------------------------------------------
-    # KARTU INFORMASI PROYEK (2 KOLOM)
-    # --------------------------------------------------------------------------
     meta_table_data = [
         [
             Paragraph("Proyek", st_styles["meta_label"]),
@@ -1491,7 +1526,6 @@ def generate_spk_pdf_bytes(
             if r_i % 2 == 0:
                 site_table_style.append(("BACKGROUND", (0, r_i), (-1, r_i), COLOR_ZEBRA_BG))
 
-        # Total lebar = 534 pt
         t_site = Table(
             site_rows,
             colWidths=[26, 134, 68, 96, 72, 86, 52],
@@ -2773,12 +2807,18 @@ def show_spk_page():
             if get_cso_signature_path() is None:
                 st.warning("⚠️ File tanda tangan `assets/Sign CSO.jpg` belum ditemukan di folder `assets/`.")
 
-            db_approval_type = st.radio(
-                "Pilih Kategori Database SPK",
-                options=[SHEET_CONS, SHEET_SURVEY, SHEET_MS],
-                horizontal=True,
-                key="approval_db_choice",
-            )
+            col_db_sel, col_ref_btn = st.columns([4, 1])
+            with col_db_sel:
+                db_approval_type = st.radio(
+                    "Pilih Kategori Database SPK",
+                    options=[SHEET_CONS, SHEET_SURVEY, SHEET_MS],
+                    horizontal=True,
+                    key="approval_db_choice",
+                )
+            with col_ref_btn:
+                if st.button("🔄 Refresh Data", key="refresh_cso_approval_data"):
+                    clear_sheet_cache(db_approval_type)
+                    st.rerun()
 
             try:
                 sheet_appr = sh.worksheet(db_approval_type)
@@ -2829,9 +2869,14 @@ def show_spk_page():
                         df_appr[col_status].fillna("").astype(str).str.strip()
                     )
 
-                    pending_df = df_appr[
-                        df_appr[col_status].str.lower().isin(LEGACY_PENDING_STATUSES)
-                    ].copy()
+                    pending_mask = [
+                        _is_pending_status(st_val, spk_val)
+                        for st_val, spk_val in zip(
+                            df_appr[col_status].tolist(),
+                            df_appr[col_no_spk].tolist(),
+                        )
+                    ]
+                    pending_df = df_appr[pending_mask].copy()
 
                     st.markdown("---")
                     st.markdown(f"### 📋 Daftar SPK Menunggu Approval CSO ({len(pending_df)} baris)")
@@ -2878,6 +2923,9 @@ def show_spk_page():
                                 for col in ["Periode Start", "Periode End"]:
                                     if col in spk_details.columns:
                                         display_columns.append(col)
+
+                            if col_status and col_status in spk_details.columns and col_status not in display_columns:
+                                display_columns.append(col_status)
 
                             if display_columns:
                                 st.dataframe(
@@ -3014,11 +3062,7 @@ def show_spk_page():
                         st.error("❌ Kolom No. SPK atau Status Approval tidak ditemukan.")
                     else:
                         approved_df = df_download[
-                            df_download[col_status]
-                            .astype(str)
-                            .str.strip()
-                            .str.lower()
-                            .isin(LEGACY_APPROVED_STATUSES)
+                            df_download[col_status].apply(_is_approved_status)
                         ]
 
                         approved_spks = [
@@ -3092,11 +3136,7 @@ def show_spk_page():
                         st.error("❌ Kolom No. SPK atau Status Approval tidak ditemukan pada DB SPK MS.")
                     else:
                         approved_df = df_download[
-                            df_download[col_status]
-                            .astype(str)
-                            .str.strip()
-                            .str.lower()
-                            .isin(LEGACY_APPROVED_STATUSES)
+                            df_download[col_status].apply(_is_approved_status)
                         ]
 
                         approved_spks = [
