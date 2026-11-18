@@ -1196,7 +1196,7 @@ def calculate_detail_total(
 ):
     return (
         parse_qty_num(quantity)
-        * parse_price(unit_price)
+- parse_price(unit_price)
     )
 
 
@@ -2674,6 +2674,100 @@ def _next_boq_ms_sequence():
     return max_no + 1
 
 
+def save_to_db_boq_ms(
+    records,
+    sn_machine,
+    site_name,
+    charging_type,
+    period,
+    template_name,
+    region,
+    issue_note="",
+    photo_1="",
+    photo_2="",
+    date_obj=None,
+    company="CLX",
+):
+    try:
+        sh = get_google_sheet_connection()
+        if not sh:
+            return None
+
+        try:
+            ws = sh.worksheet(DB_BOQ_MS_SHEET)
+        except Exception:
+            ws = sh.add_worksheet(
+                title=DB_BOQ_MS_SHEET,
+                rows=1000,
+                cols=15,
+            )
+
+        _ensure_boq_ms_headers(ws)
+        existing_rows = ws.get_all_values()
+
+        max_no = 0
+        for r in existing_rows[1:]:
+            if not r:
+                continue
+            m = re.match(r"^(\d+)", clean_text(r[0]))
+            if m:
+                max_no = max(max_no, int(m.group(1)))
+            if len(r) > 2:
+                m2 = re.match(
+                    r"^(\d+)/(?:CLX|SI|SUNRISE|SR)/BOQ/MS/",
+                    clean_text(r[2]).upper(),
+                )
+                if m2:
+                    max_no = max(max_no, int(m2.group(1)))
+
+        no_urut = max_no + 1
+        dt = date_obj or datetime.datetime.now()
+        boq_ms_no = generate_boq_ms_number(
+            sequence_num=no_urut,
+            date_obj=dt,
+            company=company,
+        )
+        date_str = dt.strftime("%d-%m-%Y")
+
+        rows_to_append = []
+        for idx_item, r in enumerate(records):
+            qty = parse_qty_num(r.get("Qty", 0))
+            if qty <= 0:
+                continue
+            up = parse_price(r.get("Unit Price", 0))
+            dpp = calculate_detail_total(qty, up)
+            rows_to_append.append(
+                [
+                    no_urut + idx_item,
+                    date_str,
+                    boq_ms_no,
+                    str(sn_machine),
+                    str(site_name),
+                    str(charging_type),
+                    str(r.get("Item Name", "")),
+                    dpp,
+                    str(period),
+                    qty,
+                    template_db_value(template_name),
+                    str(region),
+                    str(issue_note),
+                    str(photo_1),
+                    str(photo_2),
+                ]
+            )
+
+        if not rows_to_append:
+            return None
+
+        for row_vals in rows_to_append:
+            ws.append_row(row_vals)
+
+        return boq_ms_no
+    except Exception as e:
+        st.error(f"❌ Gagal menyimpan ke DB BOQ MS: {e}")
+        return None
+
+
 def _material_rows_for_ms(df):
     if df is None or df.empty:
         return pd.DataFrame(
@@ -3317,6 +3411,195 @@ def _render_boq_edit():
         st.download_button("📥 Re-Download PDF BOQ", pdf, file_name=filename_updated, mime="application/pdf")
 
 
+def _render_boq_ms():
+    st.subheader("🧰 Create BOQ MS / Replacement Material")
+
+    if st.session_state.pop("boq_ms_saved_success", False):
+        saved_ms_no = st.session_state.pop("last_saved_boq_ms_no", "")
+        st.success(f"BOQ MS berhasil disimpan{f' ({saved_ms_no})' if saved_ms_no else ''}.")
+
+    site_options, site_data_map = fetch_query_site_options(exclude_saved=False)
+    PLACEHOLDER_OPTION = "-- Pilih Site Name & Charger --"
+
+    selected_label = st.selectbox(
+        "Pilih Site Name & Charger",
+        [PLACEHOLDER_OPTION] + sorted(site_options),
+        index=0,
+        key="create_boq_ms_site_selector",
+    )
+
+    if selected_label == PLACEHOLDER_OPTION:
+        st.info("💡 Silakan pilih **Site Name & Charger** untuk membuat BOQ MS.")
+        return
+
+    meta = site_data_map[selected_label]
+    selected_site = meta.get("Site Name", selected_label)
+    default_company = detect_company_from_context(epc_name=meta.get("EPC Name", ""))
+
+    col_comp, col_tmpl = st.columns([1, 2])
+    with col_comp:
+        selected_company = st.radio(
+            "Output Perusahaan / Kop BOQ MS",
+            COMPANY_OPTIONS,
+            index=COMPANY_OPTIONS.index(default_company),
+            horizontal=True,
+            key=f"ms_boq_company_{selected_label}",
+        )
+    with col_tmpl:
+        template_name = st.selectbox(
+            "Template Referensi Harga",
+            list(TEMPLATE_OPTIONS.keys()),
+            index=1,
+            key="ms_boq_template",
+        )
+
+    c1, c2, c3 = st.columns([1.5, 1.2, 1.3])
+    sn_machine = c1.text_input(
+        "SN Machine",
+        value="",
+        placeholder="Masukkan Serial Number mesin...",
+        key=f"ms_sn_machine_{selected_label}",
+    )
+    boq_date = c2.date_input(
+        "Tanggal BOQ MS",
+        value=datetime.date.today(),
+        key=f"ms_date_{selected_label}",
+    )
+    period_str = _period_text(boq_date)
+    c3.text_input(
+        "Periode (AUTO)",
+        value=period_str,
+        disabled=True,
+        key=f"ms_period_{selected_label}",
+    )
+
+    c4, c5, c6 = st.columns([1.5, 1.5, 1])
+    charging_type = normalize_charger_type(
+        c4.text_input(
+            "Charging Type",
+            value=meta.get("Charging Type", "DC20"),
+            key=f"ms_charger_{selected_label}",
+        )
+    )
+    raw_province = clean_text(meta.get("Province", ""))
+    province = map_to_standard_province(raw_province)
+    c5.text_input(
+        "BOQ Region (AUTO)",
+        value=province,
+        disabled=True,
+        key=f"ms_region_{selected_label}",
+    )
+    c6.caption(f"`{raw_province or '-'} → {province}`")
+
+    try:
+        df_boq, target_sheet, region_normalized = load_boq_dataframe(
+            charging_type,
+            province,
+            template_name,
+        )
+    except ValueError as e:
+        st.error(f"❌ Regional template mismatch: {e}")
+        return
+
+    if df_boq is None or df_boq.empty:
+        return
+
+    material_df = _material_rows_for_ms(df_boq)
+    if material_df.empty:
+        st.warning("⚠️ Tidak ada daftar material yang tersedia pada template ini.")
+        return
+
+    st.markdown(f"#### Pilih Material Replacement ({target_sheet} - {region_normalized})")
+    picker_key = f"boq_ms_picker_{hashlib.sha1(f'{selected_label}_{template_name}_{charging_type}'.encode()).hexdigest()[:12]}"
+    selected_df = _boq_ms_picker(material_df, key=picker_key)
+
+    issue_note = st.text_area(
+        "Issue Note / Keterangan Kerusakan",
+        value="",
+        placeholder="Tuliskan catatan kendala / alasan penggantian material...",
+        key=f"ms_issue_note_{selected_label}",
+    )
+
+    if selected_df.empty:
+        st.info("☑️ Centang minimal satu item material pada tabel di atas untuk membuat BOQ MS.")
+        return
+
+    records = selected_df.to_dict("records")
+    total_dpp = sum(
+        calculate_detail_total(r.get("Qty", 0), r.get("Unit Price", 0))
+        for r in records
+    )
+    total_ppn = total_dpp * 0.11
+    total_grand = total_dpp + total_ppn
+
+    dt_obj = datetime.datetime.combine(boq_date, datetime.time.min)
+    preview_ms_no = generate_boq_ms_number(
+        sequence_num=_next_boq_ms_sequence(),
+        date_obj=dt_obj,
+        company=selected_company,
+    )
+    cfg_active = get_company_config(selected_company)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total DPP", format_currency(total_dpp))
+    m2.metric("PPN 11%", format_currency(total_ppn))
+    m3.metric("Grand Total", format_currency(total_grand))
+
+    st.success(
+        f"✅ Preview BOQ MS: **{selected_site}** | Charger: **{charging_type}** | "
+        f"Periode: **{period_str}** | Output: **{cfg_active['name']}** (`{preview_ms_no}`)"
+    )
+
+    pdf_ms_bytes = generate_boq_ms_pdf(
+        records=records,
+        boq_no=preview_ms_no,
+        sn_machine=sn_machine or "-",
+        site_name=selected_site,
+        charging_type=charging_type,
+        period=period_str,
+        template_name=template_name,
+        region=region_normalized,
+        issue_note=issue_note,
+        date_obj=dt_obj,
+        company=selected_company,
+    )
+
+    company_code = cfg_active["code"]
+    safe_site = re.sub(r'[\\/*?:"<>|]', "_", str(selected_site))
+    safe_charger = re.sub(r'[\\/*?:"<>|]', "_", str(charging_type))
+    filename_ms_pdf = f"BOQ_MS_{company_code}_{safe_charger}_{safe_site}.pdf"
+
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("🚀 Simpan ke Database (DB BOQ MS)", type="primary", key=f"save_ms_{selected_label}"):
+            saved_no = save_to_db_boq_ms(
+                records=records,
+                sn_machine=sn_machine or "-",
+                site_name=selected_site,
+                charging_type=charging_type,
+                period=period_str,
+                template_name=template_name,
+                region=region_normalized,
+                issue_note=issue_note,
+                date_obj=dt_obj,
+                company=selected_company,
+            )
+            if saved_no:
+                st.session_state["boq_ms_saved_success"] = True
+                st.session_state["last_saved_boq_ms_no"] = saved_no
+                st.cache_data.clear()
+                st.rerun()
+
+    with b2:
+        st.download_button(
+            "📥 Download PDF BOQ MS",
+            pdf_ms_bytes,
+            file_name=filename_ms_pdf,
+            mime="application/pdf",
+            key=f"dl_ms_{selected_label}",
+        )
+
+
 def render():
     st.title("📝 Quotation & BOQ Manager")
     tab_create, tab_edit, tab_ms = st.tabs([
@@ -3330,7 +3613,7 @@ def render():
     with tab_edit:
         _render_boq_edit()
     with tab_ms:
-        pass  # modularized or managed via separate UI block
+        _render_boq_ms()
 
 
 if __name__ == "__main__":
