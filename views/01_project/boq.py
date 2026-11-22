@@ -11,7 +11,6 @@ import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, A5, portrait
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.platypus import (
     Image,
@@ -51,35 +50,12 @@ except ModuleNotFoundError:
 # ==============================================================================
 # TEMPLATE & COMPANY CONSTANTS
 # ==============================================================================
-TARGET_SPREADSHEET_ID = "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
-TARGET_DB_BOQ_MS_GID = 1703918628
-
 OLD_TEMPLATE_FILENAME = "Template BOQ Vgreen.xlsx"
 NEW_TEMPLATE_FILENAME = "New Template BOQ Sept 2026 All Charger.xlsx"
 
 BOQ_EDITOR_VERSION = "QTY_TEMPLATE_AUTO_TOTAL_V14"
 
 COMPANY_OPTIONS = ["CLX", "Sunrise"]
-
-STANDARD_CHARGER_TYPES = [
-    "6S1P",
-    "12S1P",
-    "12S3P",
-    "DC20",
-    "DC30",
-    "DC60",
-    "DC120",
-    "7KW",
-    "22KW",
-]
-
-STANDARD_REGIONS = [
-    "JAVA",
-    "SUMATERA",
-    "BALI NUSATENGGARA",
-    "KALIMANTAN",
-    "SULAWESI",
-]
 
 COMPANY_CONFIGS = {
     "CLX": {
@@ -296,18 +272,6 @@ def format_currency(value):
         return f"Rp. {num:,.0f}".replace(",", ".")
     except Exception:
         return "Rp. 0"
-
-
-def format_currency_ms(value):
-    try:
-        num = float(value)
-        if abs(num) < 0.005:
-            return "Rp0"
-        if num < 0:
-            return f"-Rp{abs(num):,.0f}"
-        return f"Rp{num:,.0f}"
-    except Exception:
-        return "Rp0"
 
 
 def _format_qty_clean(val):
@@ -582,12 +546,14 @@ def get_logo_path(company="CLX"):
     target_lower = {f.lower() for f in logo_filenames}
     asset_dirs = _candidate_asset_dirs()
 
+    # 1. Exact path match
     for base_dir in asset_dirs:
         for fname in logo_filenames:
             candidate = os.path.join(base_dir, fname)
             if os.path.isfile(candidate):
                 return candidate
 
+    # 2. Case-insensitive scan di folder assets/templates
     for base_dir in asset_dirs:
         if os.path.isdir(base_dir):
             try:
@@ -689,6 +655,7 @@ def find_column_by_keywords(
         ):
             return c
 
+    # Fallback pencarian parsial longgar
     for c in columns:
         s = clean_text(c).upper()
         for k in keywords:
@@ -758,6 +725,7 @@ def build_new_template_column_mapping(columns):
         except Exception:
             pass
 
+    # Mapping Presisi untuk Template Baru yang memiliki kolom MERK di kolom terpisah dari UNIT PRICE
     mapping["MERK"] = find_column_by_keywords(
         cols,
         ["MERK", "BRAND"],
@@ -781,37 +749,12 @@ def build_new_template_column_mapping(columns):
 # ==============================================================================
 def _get_book():
     try:
-        book = get_google_sheet_connection()
-        if book is not None:
-            return book
+        return get_google_sheet_connection()
     except Exception:
-        pass
-
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        creds_dict = None
-        for key in ["gcp_service_account", "google_service_account", "service_account", "gsheets"]:
-            if key in st.secrets:
-                creds_dict = dict(st.secrets[key])
-                break
-
-        if creds_dict and "private_key" in creds_dict:
-            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-            gc = gspread.authorize(creds)
-            return gc.open_by_key(TARGET_SPREADSHEET_ID)
-    except Exception:
-        pass
-
-    return None
+        return None
 
 
-def _get_ws(sheet_name, gid=None):
+def _get_ws(sheet_name):
     book = _get_book()
 
     if book is None:
@@ -820,20 +763,10 @@ def _get_ws(sheet_name, gid=None):
     try:
         return book.worksheet(sheet_name)
     except Exception:
-        pass
-
-    if gid is not None:
         try:
-            for ws in book.worksheets():
-                if getattr(ws, "id", None) == gid:
-                    return ws
+            return book.open_worksheet(sheet_name)
         except Exception:
-            pass
-
-    try:
-        return book.open_worksheet(sheet_name)
-    except Exception:
-        return None
+            return None
 
 
 def _values_to_df(values):
@@ -868,8 +801,8 @@ def _values_to_df(values):
     ttl=120,
     show_spinner=False,
 )
-def read_sheet_df(sheet_name, gid=None):
-    ws = _get_ws(sheet_name, gid=gid)
+def read_sheet_df(sheet_name):
+    ws = _get_ws(sheet_name)
 
     if ws is None:
         return pd.DataFrame()
@@ -1108,7 +1041,7 @@ def save_to_db_boq(
     company="CLX",
 ):
     try:
-        sh = _get_book()
+        sh = get_google_sheet_connection()
 
         if not sh:
             return None
@@ -1177,7 +1110,7 @@ def update_db_boq_row(
     new_boq_no=None,
 ):
     try:
-        sh = _get_book()
+        sh = get_google_sheet_connection()
 
         if not sh:
             return False
@@ -1222,7 +1155,7 @@ def update_google_sheet_summary(
     grand_total,
 ):
     try:
-        sh = _get_book()
+        sh = get_google_sheet_connection()
 
         if not sh:
             return False
@@ -2302,6 +2235,7 @@ def generate_boq_pdf(
         logo_block = []
         if logo_path and os.path.exists(logo_path):
             try:
+                from reportlab.lib.utils import ImageReader
                 ir = ImageReader(logo_path)
                 iw, ih = ir.getSize()
                 if iw and ih:
@@ -2614,7 +2548,7 @@ def generate_boq_pdf(
 
 
 # ==============================================================================
-# PERIOD & MS MODULES
+# PERIOD & BOQ MS MODULES (GABUNGAN LOGIKA BOQ MS DARI VERSI LAMA)
 # ==============================================================================
 def _period_text(date_obj):
     months = [
@@ -2652,19 +2586,19 @@ def _period_text(date_obj):
 
 def _ensure_boq_ms_headers(ws):
     headers = BOQ_MS_HEADERS + BOQ_MS_HELPER_HEADERS
-
     try:
         vals = ws.get_all_values()
         first = vals[0] if vals else []
-
-        if first[:15] != headers:
-            ws.update("A1:O1", [headers])
+        if first[:9] != BOQ_MS_HEADERS:
+            ws.update("A1:I1", [BOQ_MS_HEADERS])
+        vals = ws.get_all_values()
+        first = vals[0] if vals else []
+        full = BOQ_MS_HEADERS + BOQ_MS_HELPER_HEADERS
+        for col_idx, header in enumerate(full[9:], start=10):
+            if len(first) < col_idx or str(first[col_idx - 1]).strip() != header:
+                ws.update_cell(1, col_idx, header)
     except Exception:
-        try:
-            ws.update("A1:O1", [headers])
-        except Exception:
-            pass
-
+        ws.update("A1:O1", [headers])
     return headers
 
 
@@ -2673,7 +2607,7 @@ def _ensure_boq_ms_headers(ws):
     show_spinner=False,
 )
 def _read_boq_ms_records():
-    df = read_sheet_df(DB_BOQ_MS_SHEET, gid=TARGET_DB_BOQ_MS_GID)
+    df = read_sheet_df(DB_BOQ_MS_SHEET)
 
     if df.empty:
         return []
@@ -2730,181 +2664,13 @@ def _next_boq_ms_sequence():
     return max_no + 1
 
 
-def _get_ms_charger_type_options():
-    """Mengambil daftar pilihan Charging Type khusus untuk dropdown BOQ MS."""
-    types = list(STANDARD_CHARGER_TYPES)
-    seen = {t.upper() for t in types}
-
-    try:
-        df = read_sheet_df(QUERY_SHEET)
-        if not df.empty and len(df.columns) > 2:
-            charger_col = df.columns[2]
-            for val in df[charger_col].dropna().tolist():
-                norm = normalize_charger_type(val)
-                if norm and norm.upper() not in seen:
-                    seen.add(norm.upper())
-                    types.append(norm)
-    except Exception:
-        pass
-
-    return types
-
-
-def _upload_evident_photo_to_drive(photo_bytes, filename, mime_type="image/jpeg"):
-    """Opsional: Upload foto evident ke Google Drive jika kredensial tersedia, kembalikan URL atau nama file."""
-    if not photo_bytes:
-        return ""
-    try:
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaIoBaseUpload
-
-        creds_dict = None
-        for key in ["gcp_service_account", "google_service_account", "service_account", "gsheets"]:
-            if key in st.secrets:
-                creds_dict = dict(st.secrets[key])
-                break
-
-        if not creds_dict or "private_key" not in creds_dict:
-            return filename
-
-        scopes = ["https://www.googleapis.com/auth/drive"]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-        file_metadata = {"name": filename}
-        folder_id = st.secrets.get("gdrive_evident_folder_id", "")
-        if folder_id:
-            file_metadata["parents"] = [folder_id]
-
-        media = MediaIoBaseUpload(io.BytesIO(photo_bytes), mimetype=mime_type, resumable=False)
-        created = (
-            drive_service.files()
-            .create(body=file_metadata, media_body=media, fields="id, webViewLink")
-            .execute()
-        )
-        file_id = created.get("id")
-        if file_id:
-            try:
-                drive_service.permissions().create(
-                    fileId=file_id,
-                    body={"type": "anyone", "role": "reader"},
-                ).execute()
-            except Exception:
-                pass
-            return created.get("webViewLink", f"https://drive.google.com/file/d/{file_id}/view")
-    except Exception:
-        pass
-
-    return filename
-
-
-def save_to_db_boq_ms(
-    records,
-    sn_machine,
-    site_name,
-    charging_type,
-    period,
-    template_name,
-    region,
-    issue_note="",
-    photo_1="",
-    photo_2="",
-    date_obj=None,
-    company="CLX",
-):
-    try:
-        sh = _get_book()
-        if not sh:
-            st.error("❌ Koneksi ke Google Spreadsheet gagal. Periksa konfigurasi credentials.")
-            return None
-
-        ws = _get_ws(DB_BOQ_MS_SHEET, gid=TARGET_DB_BOQ_MS_GID)
-        if ws is None:
-            ws = sh.add_worksheet(
-                title=DB_BOQ_MS_SHEET,
-                rows=1000,
-                cols=15,
-            )
-
-        _ensure_boq_ms_headers(ws)
-        existing_rows = ws.get_all_values()
-
-        max_no = 0
-        for r in existing_rows[1:]:
-            if not r:
-                continue
-            m = re.match(r"^(\d+)", clean_text(r[0]))
-            if m:
-                max_no = max(max_no, int(m.group(1)))
-            if len(r) > 2:
-                m2 = re.match(
-                    r"^(\d+)/(?:CLX|SI|SUNRISE|SR)/BOQ/MS/",
-                    clean_text(r[2]).upper(),
-                )
-                if m2:
-                    max_no = max(max_no, int(m2.group(1)))
-
-        no_urut = max_no + 1
-        dt = date_obj or datetime.datetime.now()
-        boq_ms_no = generate_boq_ms_number(
-            sequence_num=no_urut,
-            date_obj=dt,
-            company=company,
-        )
-        date_str = f"{dt.day}-{dt.month:02d}-{dt.year}"
-
-        rows_to_append = []
-        for idx_item, r in enumerate(records):
-            qty = parse_qty_num(r.get("Qty", 0))
-            if qty <= 0:
-                continue
-            up = parse_price(r.get("Unit Price", 0))
-            dpp = calculate_detail_total(qty, up)
-            rows_to_append.append(
-                [
-                    no_urut + idx_item,
-                    date_str,
-                    boq_ms_no,
-                    str(sn_machine),
-                    str(site_name),
-                    str(charging_type),
-                    str(r.get("Item Name", "")),
-                    dpp,
-                    str(period),
-                    qty,
-                    template_db_value(template_name),
-                    str(region),
-                    str(issue_note),
-                    str(photo_1),
-                    str(photo_2),
-                ]
-            )
-
-        if not rows_to_append:
-            return None
-
-        try:
-            ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-        except Exception:
-            for row_vals in rows_to_append:
-                ws.append_row(row_vals, value_input_option="USER_ENTERED")
-
-        return boq_ms_no
-    except Exception as e:
-        st.error(f"❌ Gagal menyimpan ke DB BOQ MS: {e}")
-        return None
-
-
 def _material_rows_for_ms(df):
     if df is None or df.empty:
         return pd.DataFrame(
             columns=["Source Row", "NO", "Item Name", "Satuan", "Merk", "Unit Price"]
         )
 
-    parents = {
-        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J"
-    }
+    parents = {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}
 
     rows = []
     for i, r in df.iterrows():
@@ -2950,6 +2716,8 @@ def _boq_ms_picker(material_df, selected_keys=None, key="boq_ms_picker"):
             "Total DPP",
         ]
     ].copy()
+    view["Unit Price"] = view["Unit Price"].astype(float)
+    view["Total DPP"] = view["Total DPP"].astype(float)
 
     edited = st.data_editor(
         view,
@@ -2957,7 +2725,7 @@ def _boq_ms_picker(material_df, selected_keys=None, key="boq_ms_picker"):
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Pilih": st.column_config.CheckboxColumn("Pilih"),
+            "Pilih": st.column_config.CheckboxColumn("Pilih", help="Pilih material pengganti"),
             "NO": st.column_config.TextColumn("NO", disabled=True),
             "Item Name": st.column_config.TextColumn("Item Name", disabled=True),
             "Satuan": st.column_config.TextColumn("Satuan", disabled=True),
@@ -3008,6 +2776,7 @@ def _draw_pdf_asset(canvas, path, x, y_top, max_width, max_height):
         return
 
     try:
+        from reportlab.lib.utils import ImageReader
         reader = ImageReader(path)
         iw, ih = reader.getSize()
 
@@ -3031,26 +2800,6 @@ def _draw_pdf_asset(canvas, path, x, y_top, max_width, max_height):
         )
     except Exception:
         pass
-
-
-def _make_reportlab_image_from_bytes(img_bytes, max_w, max_h):
-    """Konversi raw image bytes menjadi objek ReportLab Image ter-scale proporsional."""
-    if not img_bytes:
-        return None
-    try:
-        buf = io.BytesIO(img_bytes)
-        reader = ImageReader(buf)
-        iw, ih = reader.getSize()
-        if not iw or not ih:
-            return None
-        scale = min(float(max_w) / float(iw), float(max_h) / float(ih))
-        w = iw * scale
-        h = ih * scale
-        img = Image(io.BytesIO(img_bytes), width=w, height=h)
-        img.hAlign = "CENTER"
-        return img
-    except Exception:
-        return None
 
 
 def _boq_ms_pdf_header_footer(canvas, doc, company="CLX"):
@@ -3102,7 +2851,7 @@ def generate_boq_ms_pdf(
     template_name,
     region,
     issue_note="",
-    photo_bytes_list=None,
+    photo_bytes=None,
     date_obj=None,
     company=None,
 ):
@@ -3119,70 +2868,59 @@ def generate_boq_ms_pdf(
         pagesize=portrait(A5),
         rightMargin=10,
         leftMargin=10,
-        topMargin=50,
-        bottomMargin=38,
+        topMargin=52,
+        bottomMargin=42,
     )
 
     styles = getSampleStyleSheet()
     title = ParagraphStyle(
         "ms_title",
         parent=styles["Title"],
-        fontName="Helvetica-Bold",
-        fontSize=11,
-        leading=13,
+        fontSize=12,
+        leading=14,
         alignment=1,
-        spaceBefore=0,
         spaceAfter=4,
     )
 
-    small = ParagraphStyle("ms_small", parent=styles["Normal"], fontSize=6.8, leading=8.5)
+    small = ParagraphStyle("ms_small", parent=styles["Normal"], fontSize=6.5, leading=8)
     bold = ParagraphStyle("ms_bold", parent=small, fontName="Helvetica-Bold")
-    bold_right = ParagraphStyle("ms_bold_right", parent=bold, alignment=2)
-    small_right = ParagraphStyle("ms_small_right", parent=small, alignment=2)
-
-    cell_left = ParagraphStyle("ms_cell_left", parent=small, fontSize=6.5, leading=8)
-    cell_center = ParagraphStyle("ms_cell_center", parent=cell_left, alignment=1)
-    cell_right = ParagraphStyle("ms_cell_right", parent=cell_left, alignment=2)
-
+    cell = ParagraphStyle("ms_cell", parent=small, fontSize=6, leading=7)
     table_header = ParagraphStyle(
         "ms_table_header",
         parent=small,
         fontName="Helvetica-Bold",
-        fontSize=6.5,
-        leading=8,
+        fontSize=6,
+        leading=7,
         alignment=1,
         textColor=ms_header_fg,
     )
 
     story = []
     dt = date_obj or datetime.datetime.now()
-    date_formatted = f"{dt.day}-{dt.month:02d}-{dt.year}"
 
     story.append(Paragraph("BOQ MS / REPLACEMENT MATERIAL", title))
 
     info = [
-        [Paragraph("No. BOQ", bold), Paragraph(_esc_pdf_text(boq_no), small)],
-        [Paragraph("Date", bold), Paragraph(_esc_pdf_text(date_formatted), small)],
-        [Paragraph("SN Machine", bold), Paragraph(_esc_pdf_text(sn_machine), small)],
-        [Paragraph("Site Name", bold), Paragraph(_esc_pdf_text(site_name), small)],
-        [Paragraph("Charging Type", bold), Paragraph(_esc_pdf_text(charging_type), small)],
-        [Paragraph("Periode", bold), Paragraph(_esc_pdf_text(period), small)],
+        [Paragraph("No. BOQ", bold), Paragraph(clean_text(boq_no), small)],
+        [Paragraph("Date", bold), Paragraph(dt.strftime("%d-%m-%Y"), small)],
+        [Paragraph("SN Machine", bold), Paragraph(clean_text(sn_machine), small)],
+        [Paragraph("Site Name", bold), Paragraph(clean_text(site_name), small)],
+        [Paragraph("Charging Type", bold), Paragraph(clean_text(charging_type), small)],
+        [Paragraph("Periode", bold), Paragraph(clean_text(period), small)],
     ]
 
-    ti = Table(info, colWidths=[68, 331])
+    ti = Table(info, colWidths=[65, 315])
     ti.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 2),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-                ("TOPPADDING", (0, 0), (-1, -1), 1.2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.2),
+                ("TOPPADDING", (0, 0), (-1, -1), 1.5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
             ]
         )
     )
 
-    story += [ti, Spacer(1, 5)]
+    story += [ti, Spacer(1, 4)]
 
     data = [
         [
@@ -3204,115 +2942,138 @@ def generate_boq_ms_pdf(
 
         data.append(
             [
-                Paragraph(str(i), cell_center),
-                Paragraph(_esc_pdf_text(r.get("Item Name", "")), cell_left),
-                Paragraph(_format_qty_clean(qty), cell_center),
-                Paragraph(format_currency_ms(up), cell_right),
-                Paragraph(format_currency_ms(dpp), cell_right),
+                Paragraph(str(i), cell),
+                Paragraph(clean_text(r.get("Item Name", "")), cell),
+                Paragraph(f"{qty:g}", cell),
+                Paragraph(format_currency(up), cell),
+                Paragraph(format_currency(dpp), cell),
             ]
         )
 
-    table = Table(data, colWidths=[24, 185, 36, 77, 77], repeatRows=1)
+    table = Table(data, colWidths=[22, 171, 35, 76, 76], repeatRows=1)
     table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
                 ("BACKGROUND", (0, 0), (-1, 0), ms_header_bg),
                 ("TEXTCOLOR", (0, 0), (-1, 0), ms_header_fg),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 2.5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
+                ("ALIGN", (0, 1), (0, -1), "CENTER"),
+                ("ALIGN", (2, 1), (2, -1), "CENTER"),
+                ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
             ]
         )
     )
 
-    story += [table, Spacer(1, 5)]
+    story += [table, Spacer(1, 4)]
 
     vat = total * 0.11
     grand = total + vat
 
     sm_styles = [
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 2.5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ]
     if company_key == "Sunrise":
         sm_styles.append(("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FDE047")))
 
     sm = Table(
         [
-            [Paragraph("DPP", bold), Paragraph(format_currency_ms(total), bold_right)],
-            [Paragraph("PPN 11%", small), Paragraph(format_currency(vat), small_right)],
-            [Paragraph("Grand Total", bold), Paragraph(format_currency(grand), bold_right)],
+            [Paragraph("DPP", bold), Paragraph(format_currency(total), bold)],
+            [Paragraph("PPN 11%", small), Paragraph(format_currency(vat), small)],
+            [Paragraph("Grand Total", bold), Paragraph(format_currency(grand), bold)],
         ],
-        colWidths=[299, 100],
+        colWidths=[285, 95],
     )
     sm.setStyle(TableStyle(sm_styles))
 
     story.append(sm)
     story.append(Spacer(1, 5))
 
-    issue_text = _esc_pdf_text(issue_note).replace("\n", "<br/>") or "-"
+    issue_text = clean_text(issue_note).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    issue_text = issue_text.replace("\n", "<br/>") or "-"
 
     issue_table = Table(
-        [[Paragraph("ISSUE NOTE", table_header)], [Paragraph(issue_text, cell_left)]],
-        colWidths=[399],
+        [[Paragraph("ISSUE NOTE", table_header)], [Paragraph(issue_text, cell)]],
+        colWidths=[380],
     )
     issue_table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
                 ("BACKGROUND", (0, 0), (-1, 0), ms_header_bg),
                 ("TEXTCOLOR", (0, 0), (-1, 0), ms_header_fg),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
                 ("TOPPADDING", (0, 0), (-1, -1), 3),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
             ]
         )
     )
     story.append(issue_table)
 
-    valid_photos = [p for p in (photo_bytes_list or []) if p]
-    if valid_photos:
+    # FOTO EVIDENT (Logika dari versi lama)
+    photos = [x for x in (photo_bytes or []) if x]
+    if photos:
         story.append(Spacer(1, 5))
-        max_photo_h = 155.0 if len(records) <= 3 else 115.0
-        col_photo_w = 199.5
-
-        img1 = _make_reportlab_image_from_bytes(valid_photos[0], col_photo_w - 12, max_photo_h)
-        img2 = (
-            _make_reportlab_image_from_bytes(valid_photos[1], col_photo_w - 12, max_photo_h)
-            if len(valid_photos) > 1
-            else ""
+        photo_title = Table(
+            [[Paragraph("FOTO EVIDENT", table_header)]],
+            colWidths=[380],
         )
+        photo_title.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), ms_header_bg),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), ms_header_fg),
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        story.append(photo_title)
+
+        photo_cells = []
+        for b in photos[:2]:
+            try:
+                from reportlab.lib.utils import ImageReader
+                reader = ImageReader(io.BytesIO(b))
+                iw, ih = reader.getSize()
+                max_w, max_h = 174, 115
+                scale = min(max_w / float(iw), max_h / float(ih)) if iw and ih else 1
+                w = iw * scale
+                h = ih * scale
+                photo_cells.append(Image(io.BytesIO(b), width=w, height=h))
+            except Exception:
+                photo_cells.append(Paragraph("Foto tidak dapat ditampilkan", cell))
+
+        while len(photo_cells) < 2:
+            photo_cells.append(Paragraph("", cell))
 
         photo_table = Table(
-            [
-                [Paragraph("FOTO EVIDENT", table_header), ""],
-                [img1 or "", img2 or ""],
-            ],
-            colWidths=[col_photo_w, col_photo_w],
+            [photo_cells[:2]],
+            colWidths=[190, 190],
         )
         photo_table.setStyle(
             TableStyle(
                 [
-                    ("SPAN", (0, 0), (1, 0)),
-                    ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
-                    ("BACKGROUND", (0, 0), (1, 0), ms_header_bg),
-                    ("TEXTCOLOR", (0, 0), (1, 0), ms_header_fg),
-                    ("ALIGN", (0, 1), (1, 1), "CENTER"),
-                    ("VALIGN", (0, 1), (1, 1), "MIDDLE"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
                 ]
             )
         )
@@ -3326,6 +3087,558 @@ def generate_boq_ms_pdf(
 
     buf.seek(0)
     return buf.getvalue()
+
+
+def _upload_boq_ms_photo(uploaded_file, boq_no):
+    """Upload evidence photo to Google Drive and return a shareable URL."""
+    if uploaded_file is None:
+        return ""
+    try:
+        sh = get_google_sheet_connection()
+        creds = getattr(sh, "auth", None) if sh else None
+        if creds is None:
+            return ""
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+
+        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+        q = "name='BOQ MS Evidence' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        res = drive.files().list(q=q, spaces="drive", fields="files(id,name)", pageSize=10).execute()
+        files = res.get("files", [])
+        if files:
+            folder_id = files[0]["id"]
+        else:
+            folder = drive.files().create(
+                body={"name": "BOQ MS Evidence", "mimeType": "application/vnd.google-apps.folder"},
+                fields="id",
+            ).execute()
+            folder_id = folder["id"]
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", uploaded_file.name)
+        filename = f"{boq_no.replace('/', '-')}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{safe}"
+        media = MediaIoBaseUpload(
+            io.BytesIO(uploaded_file.getvalue()),
+            mimetype=uploaded_file.type or "image/jpeg",
+            resumable=False,
+        )
+        created = drive.files().create(
+            body={"name": filename, "parents": [folder_id]},
+            media_body=media,
+            fields="id,webViewLink",
+        ).execute()
+        file_id = created["id"]
+        try:
+            drive.permissions().create(fileId=file_id, body={"type": "anyone", "role": "reader"}).execute()
+        except Exception:
+            pass
+        return created.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
+    except Exception as e:
+        st.warning(f"⚠️ Foto berhasil dibaca, tetapi upload ke Google Drive gagal: {e}")
+        return ""
+
+
+def _download_boq_ms_photo(url):
+    if not url:
+        return None
+    try:
+        sh = get_google_sheet_connection()
+        creds = getattr(sh, "auth", None) if sh else None
+        if creds is None:
+            return None
+        m = re.search(r"/d/([A-Za-z0-9_-]+)", url) or re.search(r"[?&]id=([A-Za-z0-9_-]+)", url)
+        if not m:
+            return None
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseDownload
+
+        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+        req = drive.files().get_media(fileId=m.group(1))
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        fh.seek(0)
+        return fh.getvalue()
+    except Exception:
+        return None
+
+
+def _save_boq_ms(
+    records,
+    sn_machine,
+    site_name,
+    charging_type,
+    template_name,
+    region,
+    issue_note="",
+    photo_files=None,
+    date_obj=None,
+    company="CLX",
+):
+    ws = _get_ws(DB_BOQ_MS_SHEET)
+    if ws is None:
+        raise RuntimeError(f"Worksheet '{DB_BOQ_MS_SHEET}' tidak ditemukan. Buat worksheet tersebut terlebih dahulu.")
+    _ensure_boq_ms_headers(ws)
+    dt = date_obj or datetime.datetime.now()
+    seq = _next_boq_ms_sequence()
+    boq_no = generate_boq_ms_number(seq, dt, company=company)
+    period = _period_text(dt)
+    photo_files = photo_files or []
+    photo_urls = []
+    for f in photo_files[:2]:
+        u = _upload_boq_ms_photo(f, boq_no)
+        photo_urls.append(u)
+    while len(photo_urls) < 2:
+        photo_urls.append("")
+    rows = []
+    for item in records:
+        rows.append(
+            [
+                seq,
+                dt.strftime("%d-%m-%Y"),
+                boq_no,
+                clean_text(sn_machine),
+                clean_text(site_name),
+                normalize_charger_type(charging_type),
+                clean_text(item["Item Name"]),
+                parse_price(item["Total DPP"]),
+                period,
+                parse_qty_num(item["Qty"]),
+                template_db_value(template_name),
+                clean_text(region),
+                clean_text(issue_note),
+                photo_urls[0],
+                photo_urls[1],
+            ]
+        )
+    if rows:
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    return boq_no, period, seq, photo_urls
+
+
+def _update_boq_ms(
+    boq_no,
+    records,
+    sn_machine,
+    site_name,
+    charging_type,
+    template_name,
+    region,
+    issue_note="",
+    photo_files=None,
+    date_text=None,
+    existing_photo_urls=None,
+):
+    ws = _get_ws(DB_BOQ_MS_SHEET)
+    if ws is None:
+        raise RuntimeError(f"Worksheet '{DB_BOQ_MS_SHEET}' tidak ditemukan.")
+    old = [r for r in _read_boq_ms_records() if r["No. BOQ"] == boq_no]
+    if not old:
+        raise RuntimeError("BOQ MS tidak ditemukan.")
+    seq = parse_qty_num(old[0]["No"])
+    dt = datetime.datetime.now()
+    try:
+        if date_text:
+            dt = datetime.datetime.strptime(date_text, "%d-%m-%Y")
+    except Exception:
+        pass
+    period = _period_text(dt)
+    existing_photo_urls = existing_photo_urls or [
+        old[0].get("Photo Evident 1", ""),
+        old[0].get("Photo Evident 2", ""),
+    ]
+    uploaded_urls = []
+    for f in (photo_files or [])[:2]:
+        u = _upload_boq_ms_photo(f, boq_no)
+        if u:
+            uploaded_urls.append(u)
+    photos = (uploaded_urls + existing_photo_urls)[:2]
+    while len(photos) < 2:
+        photos.append("")
+    for r in old:
+        ws.update(f"A{r['row_idx']}:O{r['row_idx']}", [[""] * 15])
+    new_rows = []
+    for item in records:
+        new_rows.append(
+            [
+                int(seq),
+                dt.strftime("%d-%m-%Y"),
+                boq_no,
+                clean_text(sn_machine),
+                clean_text(site_name),
+                normalize_charger_type(charging_type),
+                clean_text(item["Item Name"]),
+                parse_price(item["Total DPP"]),
+                period,
+                parse_qty_num(item["Qty"]),
+                template_db_value(template_name),
+                clean_text(region),
+                clean_text(issue_note),
+                photos[0],
+                photos[1],
+            ]
+        )
+    if not new_rows:
+        return period
+    ws.update(f"A{old[0]['row_idx']}:O{old[0]['row_idx']}", [new_rows[0]], value_input_option="USER_ENTERED")
+    if len(new_rows) > 1:
+        ws.insert_rows(new_rows[1:], row=old[0]["row_idx"] + 1, value_input_option="USER_ENTERED")
+    return period
+
+
+def _get_boq_ms_grouped():
+    records = _read_boq_ms_records()
+    groups = {}
+    for r in records:
+        groups.setdefault(r["No. BOQ"], []).append(r)
+    return groups
+
+
+def _records_to_pdf_items(records):
+    return [
+        {
+            "Item Name": r["Item Name"],
+            "Qty": r["Qty"],
+            "Unit Price": r["Price"] / r["Qty"] if r["Qty"] else 0,
+            "Total DPP": r["Price"],
+        }
+        for r in records
+    ]
+
+
+# ==============================================================================
+# BOQ MS UI (CREATE & EDIT)
+# ==============================================================================
+def render_boq_ms_create():
+    reset_no = int(st.session_state.get("boq_ms_create_reset_no", 0))
+    key_suffix = f"_{reset_no}"
+
+    st.subheader("➕ Create BOQ MS / Replacement Material")
+    st.info("Pilih template, charging type, lalu pilih material replacement. Qty hanya berlaku untuk material yang dipilih.")
+
+    col_comp, col_tmpl = st.columns([1, 2])
+    with col_comp:
+        selected_company = st.radio(
+            "Output Perusahaan / Kop BOQ MS",
+            COMPANY_OPTIONS,
+            index=0,
+            horizontal=True,
+            key=f"ms_create_company{key_suffix}",
+        )
+    with col_tmpl:
+        template_name = st.selectbox(
+            "Template",
+            list(TEMPLATE_OPTIONS.keys()),
+            index=1,
+            key=f"ms_create_template{key_suffix}",
+        )
+
+    charging_type = st.selectbox(
+        "Charging Type",
+        ["6S1P", "12S1P", "12S3P", "DC20", "DC30", "DC60"],
+        key=f"ms_create_charger{key_suffix}",
+    )
+    region = st.selectbox(
+        "Region / Island",
+        ["JAVA", "SUMATERA", "BALI NUSATENGGARA", "KALIMANTAN", "SULAWESI"],
+        key=f"ms_create_region{key_suffix}",
+    )
+
+    c1, c2 = st.columns(2)
+    sn_machine = c1.text_input("SN Machine", key=f"ms_create_sn{key_suffix}")
+    site_name = c2.text_input("Site Name", key=f"ms_create_site{key_suffix}")
+
+    issue_note = st.text_area(
+        "Issue Note",
+        placeholder="Tuliskan issue / alasan replacement material...",
+        key=f"ms_create_issue_note{key_suffix}",
+        height=90,
+    )
+    photos = st.file_uploader(
+        "📷 Foto Evident (Maks. 2 Foto)",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key=f"ms_create_photos{key_suffix}",
+        help="Upload maksimal 2 foto evidence.",
+    )
+
+    if len(photos) > 2:
+        st.error("❌ Maksimal 2 foto evident. Silakan hapus foto yang berlebih.")
+        return
+
+    if not site_name:
+        st.caption("Isi Site Name terlebih dahulu untuk melanjutkan.")
+        return
+
+    try:
+        df_template, _ms_sheet, _ms_region = load_boq_dataframe(charging_type, region, template_name)
+    except ValueError as e:
+        st.error(f"❌ Regional template mismatch: {e}")
+        return
+
+    if df_template is None or df_template.empty:
+        return
+
+    materials = _material_rows_for_ms(df_template)
+    if materials.empty:
+        st.warning("Tidak ada material detail yang ditemukan pada template/sheet tersebut.")
+        return
+
+    st.markdown("#### Pilih Replacement Material")
+    selected_df = _boq_ms_picker(materials, key=f"boq_ms_create_picker{key_suffix}")
+    if selected_df.empty:
+        st.warning("Belum ada material yang dipilih.")
+        return
+
+    total_dpp = float(selected_df["Total DPP"].sum())
+    vat = total_dpp * 0.11
+    grand = total_dpp + vat
+    today = datetime.datetime.now()
+    period = _period_text(today)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Item", len(selected_df))
+    c2.metric("DPP", format_currency(total_dpp))
+    c3.metric("Grand Total", format_currency(grand))
+    st.write(f"**Periode:** {period}")
+
+    preview_boq_no = generate_boq_ms_number(_next_boq_ms_sequence(), today, company=selected_company)
+    pdf = generate_boq_ms_pdf(
+        selected_df.to_dict("records"),
+        preview_boq_no,
+        sn_machine,
+        site_name,
+        charging_type,
+        period,
+        template_name,
+        region,
+        issue_note,
+        [f.getvalue() for f in photos],
+        today,
+        company=selected_company,
+    )
+
+    st.download_button(
+        "📄 Preview / Download PDF",
+        pdf,
+        file_name="BOQ_MS_PREVIEW.pdf",
+        mime="application/pdf",
+        key=f"ms_preview_pdf{key_suffix}",
+    )
+
+    if st.button("💾 Save BOQ MS", type="primary", key=f"ms_save{key_suffix}"):
+        try:
+            boq_no, period, seq, urls = _save_boq_ms(
+                selected_df.to_dict("records"),
+                sn_machine,
+                site_name,
+                charging_type,
+                template_name,
+                region,
+                issue_note,
+                photos,
+                today,
+                company=selected_company,
+            )
+            pdf = generate_boq_ms_pdf(
+                selected_df.to_dict("records"),
+                boq_no,
+                sn_machine,
+                site_name,
+                charging_type,
+                period,
+                template_name,
+                region,
+                issue_note,
+                [f.getvalue() for f in photos],
+                today,
+                company=selected_company,
+            )
+            st.cache_data.clear()
+            st.session_state["boq_ms_last_pdf"] = pdf
+            st.session_state["boq_ms_last_no"] = boq_no
+            st.session_state["boq_ms_create_reset_no"] = reset_no + 1
+            st.success(f"BOQ MS {boq_no} berhasil disimpan. Form Create BOQ MS dikosongkan kembali.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Gagal menyimpan BOQ MS: {e}")
+
+
+def render_boq_ms_edit():
+    st.subheader("✏️ Edit / Re-Download BOQ MS")
+    groups = _get_boq_ms_grouped()
+    if not groups:
+        st.info("Belum ada data pada DB BOQ MS.")
+        return
+
+    keys = list(groups.keys())
+    labels = [f"{k} — {groups[k][0]['Site Name']} — {groups[k][0]['Charging Type']}" for k in keys]
+    label = st.selectbox("Pilih BOQ MS", labels, key="ms_edit_select")
+    boq_no = keys[labels.index(label)]
+    records = groups[boq_no]
+    first = records[0]
+
+    default_company = detect_company_from_boq_no(boq_no)
+    template_name = template_name_from_db_value(first.get("Template", "BOQ BARU"))
+    region = first.get("Region") or "JAVA"
+    charger = normalize_charger_type(first["Charging Type"])
+
+    col_comp, col_tmpl = st.columns([1, 2])
+    with col_comp:
+        selected_company = st.radio(
+            "Output Perusahaan / Kop BOQ MS",
+            COMPANY_OPTIONS,
+            index=COMPANY_OPTIONS.index(default_company),
+            horizontal=True,
+            key=f"ms_edit_company_{boq_no}",
+        )
+    with col_tmpl:
+        template_name = st.selectbox(
+            "Template",
+            list(TEMPLATE_OPTIONS.keys()),
+            index=list(TEMPLATE_OPTIONS.keys()).index(template_name),
+            key="ms_edit_template",
+        )
+
+    sn = st.text_input("SN Machine", first.get("SN Machine", ""), key="ms_edit_sn")
+    site = st.text_input("Site Name", first.get("Site Name", ""), key="ms_edit_site")
+
+    charger_opts = ["6S1P", "12S1P", "12S3P", "DC20", "DC30", "DC60"]
+    charger = st.selectbox(
+        "Charging Type",
+        charger_opts,
+        index=charger_opts.index(charger) if charger in charger_opts else 0,
+        key="ms_edit_charger",
+    )
+
+    ropts = ["JAVA", "SUMATERA", "BALI NUSATENGGARA", "KALIMANTAN", "SULAWESI"]
+    region = st.selectbox(
+        "Region / Island",
+        ropts,
+        index=ropts.index(region) if region in ropts else 0,
+        key="ms_edit_region",
+    )
+
+    issue_note = st.text_area("Issue Note", first.get("Issue Note", ""), key="ms_edit_issue_note", height=90)
+    existing_urls = [first.get("Photo Evident 1", ""), first.get("Photo Evident 2", "")]
+    active_existing = [u for u in existing_urls if u]
+    if active_existing:
+        st.caption("📎 Existing Foto Evident: " + " | ".join(active_existing))
+
+    new_photos = st.file_uploader(
+        "📷 Ganti/Tambah Foto Evident (Maks. 2 Foto)",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key="ms_edit_photos",
+    )
+    if len(new_photos) > 2:
+        st.error("❌ Maksimal 2 foto evident.")
+        return
+
+    try:
+        df_template, _ms_sheet, _ms_region = load_boq_dataframe(charger, region, template_name)
+    except ValueError as e:
+        st.error(f"❌ Regional template mismatch: {e}")
+        return
+
+    if df_template is None or df_template.empty:
+        return
+
+    materials = _material_rows_for_ms(df_template)
+    existing_by_name = {}
+    for r in records:
+        existing_by_name.setdefault(r["Item Name"], []).append(r)
+
+    selected_keys = [int(m["Source Row"]) for _, m in materials.iterrows() if m["Item Name"] in existing_by_name]
+    selected_df = _boq_ms_picker(materials, selected_keys=selected_keys, key=f"boq_ms_edit_picker_{boq_no}")
+
+    for i, r in selected_df.iterrows():
+        matches = existing_by_name.get(r["Item Name"], [])
+        if matches:
+            q = matches[0].get("Qty", 0)
+            selected_df.at[i, "Qty"] = q
+            selected_df.at[i, "Total DPP"] = calculate_detail_total(q, r["Unit Price"])
+
+    if selected_df.empty:
+        st.warning("Belum ada material yang dipilih.")
+        return
+
+    total_dpp = float(selected_df["Total DPP"].sum())
+    vat = total_dpp * 0.11
+    grand = total_dpp + vat
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Item", len(selected_df))
+    c2.metric("DPP", format_currency(total_dpp))
+    c3.metric("Grand Total", format_currency(grand))
+
+    try:
+        dt = datetime.datetime.strptime(first.get("Date", ""), "%d-%m-%Y")
+    except Exception:
+        dt = datetime.datetime.now()
+    period = _period_text(dt)
+
+    photo_bytes = [f.getvalue() for f in new_photos[:2]]
+    if not photo_bytes:
+        for u in active_existing[:2]:
+            b = _download_boq_ms_photo(u)
+            if b:
+                photo_bytes.append(b)
+
+    pdf = generate_boq_ms_pdf(
+        selected_df.to_dict("records"),
+        boq_no,
+        sn,
+        site,
+        charger,
+        period,
+        template_name,
+        region,
+        issue_note,
+        photo_bytes,
+        dt,
+        company=selected_company,
+    )
+
+    a, b = st.columns(2)
+    with a:
+        if st.button("💾 Update BOQ MS", type="primary", key=f"ms_update_{boq_no}"):
+            try:
+                _update_boq_ms(
+                    boq_no,
+                    selected_df.to_dict("records"),
+                    sn,
+                    site,
+                    charger,
+                    template_name,
+                    region,
+                    issue_note,
+                    new_photos,
+                    first.get("Date", ""),
+                    existing_urls,
+                )
+                st.cache_data.clear()
+                st.success(f"BOQ MS {boq_no} berhasil di-update.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Gagal update BOQ MS: {e}")
+    with b:
+        st.download_button(
+            "⬇️ Re-Download PDF",
+            pdf,
+            file_name=f"{boq_no.replace('/', '-')}.pdf",
+            mime="application/pdf",
+            key=f"ms_redownload_{boq_no}",
+        )
+
+
+def _render_boq_ms():
+    st.header("🧰 BOQ MS — Replacement Material")
+    tab1, tab2 = st.tabs(["➕ Create BOQ MS", "✏️ Edit / Re-Download BOQ MS"])
+    with tab1:
+        render_boq_ms_create()
+    with tab2:
+        render_boq_ms_edit()
 
 
 # ==============================================================================
@@ -3610,241 +3923,6 @@ def _render_boq_edit():
 
     with b:
         st.download_button("📥 Re-Download PDF BOQ", pdf, file_name=filename_updated, mime="application/pdf")
-
-
-def _render_boq_ms():
-    st.subheader("🧰 Create BOQ MS / Replacement Material")
-
-    if st.session_state.pop("boq_ms_saved_success", False):
-        saved_ms_no = st.session_state.pop("last_saved_boq_ms_no", "")
-        st.success(f"BOQ MS berhasil disimpan ke sheet **DB BOQ MS**{f' ({saved_ms_no})' if saved_ms_no else ''}.")
-
-    charger_type_options = _get_ms_charger_type_options()
-    PLACEHOLDER_CHARGER = "-- Pilih Charging Type --"
-
-    col_chg, col_comp, col_tmpl = st.columns([1.2, 1.1, 1.5])
-    with col_chg:
-        selected_charger_label = st.selectbox(
-            "Charging Type",
-            [PLACEHOLDER_CHARGER] + charger_type_options,
-            index=0,
-            key="create_boq_ms_charger_selector",
-        )
-    with col_comp:
-        selected_company = st.radio(
-            "Output Perusahaan / Kop BOQ MS",
-            COMPANY_OPTIONS,
-            index=0,
-            horizontal=True,
-            key="ms_boq_company",
-        )
-    with col_tmpl:
-        template_name = st.selectbox(
-            "Template Referensi Harga",
-            list(TEMPLATE_OPTIONS.keys()),
-            index=1,
-            key="ms_boq_template",
-        )
-
-    if selected_charger_label == PLACEHOLDER_CHARGER:
-        st.info("💡 Silakan pilih **Charging Type** terlebih dahulu untuk membuat BOQ MS.")
-        return
-
-    charging_type = normalize_charger_type(selected_charger_label)
-
-    # Site Name & Serial Number Charger diinput secara manual khusus untuk BOQ MS
-    c1, c2 = st.columns(2)
-    manual_site_name = c1.text_input(
-        "Site Name (Manual)",
-        value="",
-        placeholder="Masukkan nama lokasi / site secara manual...",
-        key="ms_manual_site_name",
-    )
-    sn_machine = c2.text_input(
-        "SN Machine (Manual)",
-        value="",
-        placeholder="Masukkan Serial Number charger secara manual...",
-        key="ms_manual_sn_machine",
-    )
-
-    c3, c4, c5 = st.columns([1.2, 1.2, 1.2])
-    boq_date = c3.date_input(
-        "Tanggal BOQ MS",
-        value=datetime.date.today(),
-        key="ms_date_input",
-    )
-    period_str = _period_text(boq_date)
-    c4.text_input(
-        "Periode (AUTO)",
-        value=period_str,
-        disabled=True,
-        key="ms_period_auto",
-    )
-    province = c5.selectbox(
-        "BOQ Region",
-        STANDARD_REGIONS,
-        index=0,
-        key="ms_region_selector",
-    )
-
-    try:
-        df_boq, target_sheet, region_normalized = load_boq_dataframe(
-            charging_type,
-            province,
-            template_name,
-        )
-    except ValueError as e:
-        st.error(f"❌ Regional template mismatch: {e}")
-        return
-
-    if df_boq is None or df_boq.empty:
-        return
-
-    material_df = _material_rows_for_ms(df_boq)
-    if material_df.empty:
-        st.warning("⚠️ Tidak ada daftar material yang tersedia pada template ini.")
-        return
-
-    st.markdown(f"#### Pilih Material Replacement ({target_sheet} - {region_normalized})")
-    picker_key = f"boq_ms_picker_{hashlib.sha1(f'{charging_type}_{province}_{template_name}'.encode()).hexdigest()[:12]}"
-    selected_df = _boq_ms_picker(material_df, key=picker_key)
-
-    issue_note = st.text_area(
-        "Issue Note / Keterangan Kerusakan",
-        value="",
-        placeholder="Tuliskan catatan kendala / alasan penggantian material (contoh: MCCB Panel Down, Charger Offline)...",
-        key="ms_issue_note_manual",
-    )
-
-    st.markdown("#### 📷 Upload Foto Evident (Maks. 2 Foto)")
-    p1_col, p2_col = st.columns(2)
-    with p1_col:
-        photo_file_1 = st.file_uploader(
-            "Photo Evident 1",
-            type=["png", "jpg", "jpeg", "webp"],
-            key="ms_photo_1_manual",
-        )
-        if photo_file_1 is not None:
-            st.image(photo_file_1, caption="Preview Photo Evident 1", use_container_width=True)
-    with p2_col:
-        photo_file_2 = st.file_uploader(
-            "Photo Evident 2",
-            type=["png", "jpg", "jpeg", "webp"],
-            key="ms_photo_2_manual",
-        )
-        if photo_file_2 is not None:
-            st.image(photo_file_2, caption="Preview Photo Evident 2", use_container_width=True)
-
-    photo_bytes_1 = photo_file_1.getvalue() if photo_file_1 is not None else None
-    photo_bytes_2 = photo_file_2.getvalue() if photo_file_2 is not None else None
-    photo_bytes_list = [b for b in (photo_bytes_1, photo_bytes_2) if b]
-
-    if selected_df.empty:
-        st.info("☑️ Centang minimal satu item material pada tabel di atas untuk membuat BOQ MS.")
-        return
-
-    records = selected_df.to_dict("records")
-    total_dpp = sum(
-        calculate_detail_total(r.get("Qty", 0), r.get("Unit Price", 0))
-        for r in records
-    )
-    total_ppn = total_dpp * 0.11
-    total_grand = total_dpp + total_ppn
-
-    dt_obj = datetime.datetime.combine(boq_date, datetime.time.min)
-    preview_ms_no = generate_boq_ms_number(
-        sequence_num=_next_boq_ms_sequence(),
-        date_obj=dt_obj,
-        company=selected_company,
-    )
-    cfg_active = get_company_config(selected_company)
-
-    site_name_clean = clean_text(manual_site_name)
-    sn_machine_clean = clean_text(sn_machine)
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total DPP", format_currency_ms(total_dpp))
-    m2.metric("PPN 11%", format_currency(total_ppn))
-    m3.metric("Grand Total", format_currency(total_grand))
-
-    st.success(
-        f"✅ Preview BOQ MS: **{site_name_clean or '-'}** | SN: **{sn_machine_clean or '-'}** | "
-        f"Charger: **{charging_type}** | Periode: **{period_str}** | Output: **{cfg_active['name']}** (`{preview_ms_no}`)"
-    )
-
-    pdf_ms_bytes = generate_boq_ms_pdf(
-        records=records,
-        boq_no=preview_ms_no,
-        sn_machine=sn_machine_clean or "-",
-        site_name=site_name_clean or "-",
-        charging_type=charging_type,
-        period=period_str,
-        template_name=template_name,
-        region=region_normalized,
-        issue_note=issue_note,
-        photo_bytes_list=photo_bytes_list,
-        date_obj=dt_obj,
-        company=selected_company,
-    )
-
-    safe_site = re.sub(r'[\\/*?:"<>|]', "_", site_name_clean or "Site")
-    safe_sn = re.sub(r'[\\/*?:"<>|]', "_", sn_machine_clean or charging_type)
-    filename_ms_pdf = f"BOQ_MS_{safe_site}_{safe_sn}.pdf"
-
-    b1, b2 = st.columns(2)
-    with b1:
-        if st.button("🚀 Simpan ke Database (DB BOQ MS)", type="primary", key="save_ms_manual_btn"):
-            if not site_name_clean:
-                st.warning("⚠️ Mohon isi **Site Name** terlebih dahulu sebelum menyimpan ke database.")
-            else:
-                with st.spinner("Menyimpan data BOQ MS ke sheet DB BOQ MS..."):
-                    photo_ref_1 = (
-                        _upload_evident_photo_to_drive(
-                            photo_bytes_1,
-                            f"{safe_site}_{safe_sn}_Evident1_{photo_file_1.name}",
-                            getattr(photo_file_1, "type", "image/jpeg"),
-                        )
-                        if photo_bytes_1
-                        else ""
-                    )
-                    photo_ref_2 = (
-                        _upload_evident_photo_to_drive(
-                            photo_bytes_2,
-                            f"{safe_site}_{safe_sn}_Evident2_{photo_file_2.name}",
-                            getattr(photo_file_2, "type", "image/jpeg"),
-                        )
-                        if photo_bytes_2
-                        else ""
-                    )
-
-                    saved_no = save_to_db_boq_ms(
-                        records=records,
-                        sn_machine=sn_machine_clean or "-",
-                        site_name=site_name_clean,
-                        charging_type=charging_type,
-                        period=period_str,
-                        template_name=template_name,
-                        region=region_normalized,
-                        issue_note=issue_note,
-                        photo_1=photo_ref_1,
-                        photo_2=photo_ref_2,
-                        date_obj=dt_obj,
-                        company=selected_company,
-                    )
-                if saved_no:
-                    st.session_state["boq_ms_saved_success"] = True
-                    st.session_state["last_saved_boq_ms_no"] = saved_no
-                    st.cache_data.clear()
-                    st.rerun()
-
-    with b2:
-        st.download_button(
-            "📥 Download PDF BOQ MS",
-            pdf_ms_bytes,
-            file_name=filename_ms_pdf,
-            mime="application/pdf",
-            key="dl_ms_manual_btn",
-        )
 
 
 def render():
