@@ -61,6 +61,26 @@ BOQ_EDITOR_VERSION = "QTY_TEMPLATE_AUTO_TOTAL_V14"
 
 COMPANY_OPTIONS = ["CLX", "Sunrise"]
 
+STANDARD_CHARGER_TYPES = [
+    "6S1P",
+    "12S1P",
+    "12S3P",
+    "DC20",
+    "DC30",
+    "DC60",
+    "DC120",
+    "7KW",
+    "22KW",
+]
+
+STANDARD_REGIONS = [
+    "JAVA",
+    "SUMATERA",
+    "BALI NUSATENGGARA",
+    "KALIMANTAN",
+    "SULAWESI",
+]
+
 COMPANY_CONFIGS = {
     "CLX": {
         "code": "CLX",
@@ -767,7 +787,6 @@ def _get_book():
     except Exception:
         pass
 
-    # Fallback koneksi langsung ke spreadsheet TARGET_SPREADSHEET_ID via gspread
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -1019,8 +1038,6 @@ def fetch_query_site_options(
         at(8),
     )
 
-    sn_c = at(31)
-
     if site_c is None:
         return [], {}
 
@@ -1072,11 +1089,6 @@ def fetch_query_site_options(
                 "EPC Name": (
                     clean_text(r.get(epc_c, ""))
                     if epc_c
-                    else ""
-                ),
-                "Machine SN": (
-                    clean_text(r.get(sn_c, ""))
-                    if sn_c
                     else ""
                 ),
             }
@@ -2718,6 +2730,26 @@ def _next_boq_ms_sequence():
     return max_no + 1
 
 
+def _get_ms_charger_type_options():
+    """Mengambil daftar pilihan Charging Type khusus untuk dropdown BOQ MS."""
+    types = list(STANDARD_CHARGER_TYPES)
+    seen = {t.upper() for t in types}
+
+    try:
+        df = read_sheet_df(QUERY_SHEET)
+        if not df.empty and len(df.columns) > 2:
+            charger_col = df.columns[2]
+            for val in df[charger_col].dropna().tolist():
+                norm = normalize_charger_type(val)
+                if norm and norm.upper() not in seen:
+                    seen.add(norm.upper())
+                    types.append(norm)
+    except Exception:
+        pass
+
+    return types
+
+
 def _upload_evident_photo_to_drive(photo_bytes, filename, mime_type="image/jpeg"):
     """Opsional: Upload foto evident ke Google Drive jika kredensial tersedia, kembalikan URL atau nama file."""
     if not photo_bytes:
@@ -3082,8 +3114,6 @@ def generate_boq_ms_pdf(
     ms_header_bg = colors.HexColor(cfg["ms_header_hex"])
     ms_header_fg = colors.HexColor(cfg["ms_header_text_hex"])
 
-    # A5 Portrait: lebar = 419.53 pt, tinggi = 595.28 pt
-    # Margin kiri/kanan = 10 pt -> lebar konten = 399.53 pt (tabel utama = 399 pt)
     doc = SimpleDocTemplate(
         buf,
         pagesize=portrait(A5),
@@ -3154,7 +3184,6 @@ def generate_boq_ms_pdf(
 
     story += [ti, Spacer(1, 5)]
 
-    # Tabel Item Material (Total lebar = 399 pt)
     data = [
         [
             Paragraph("No", table_header),
@@ -3216,7 +3245,6 @@ def generate_boq_ms_pdf(
     if company_key == "Sunrise":
         sm_styles.append(("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FDE047")))
 
-    # Ringkasan Total (Total lebar = 399 pt)
     sm = Table(
         [
             [Paragraph("DPP", bold), Paragraph(format_currency_ms(total), bold_right)],
@@ -3230,7 +3258,6 @@ def generate_boq_ms_pdf(
     story.append(sm)
     story.append(Spacer(1, 5))
 
-    # Issue Note (Total lebar = 399 pt)
     issue_text = _esc_pdf_text(issue_note).replace("\n", "<br/>") or "-"
 
     issue_table = Table(
@@ -3253,11 +3280,9 @@ def generate_boq_ms_pdf(
     )
     story.append(issue_table)
 
-    # Foto Evident (2 Kolom sejajar, lebar total = 399 pt -> 199.5 pt per kolom)
     valid_photos = [p for p in (photo_bytes_list or []) if p]
     if valid_photos:
         story.append(Spacer(1, 5))
-        # Hitung sisa tinggi halaman agar Foto Evident tetap fit 1 halaman A5
         max_photo_h = 155.0 if len(records) <= 3 else 115.0
         col_photo_w = 199.5
 
@@ -3594,32 +3619,24 @@ def _render_boq_ms():
         saved_ms_no = st.session_state.pop("last_saved_boq_ms_no", "")
         st.success(f"BOQ MS berhasil disimpan ke sheet **DB BOQ MS**{f' ({saved_ms_no})' if saved_ms_no else ''}.")
 
-    site_options, site_data_map = fetch_query_site_options(exclude_saved=False)
-    PLACEHOLDER_OPTION = "-- Pilih Site Name & Charger --"
+    charger_type_options = _get_ms_charger_type_options()
+    PLACEHOLDER_CHARGER = "-- Pilih Charging Type --"
 
-    selected_label = st.selectbox(
-        "Pilih Site Name & Charger",
-        [PLACEHOLDER_OPTION] + sorted(site_options),
-        index=0,
-        key="create_boq_ms_site_selector",
-    )
-
-    if selected_label == PLACEHOLDER_OPTION:
-        st.info("💡 Silakan pilih **Site Name & Charger** untuk membuat BOQ MS.")
-        return
-
-    meta = site_data_map[selected_label]
-    selected_site = meta.get("Site Name", selected_label)
-    default_company = detect_company_from_context(epc_name=meta.get("EPC Name", ""))
-
-    col_comp, col_tmpl = st.columns([1, 2])
+    col_chg, col_comp, col_tmpl = st.columns([1.2, 1.1, 1.5])
+    with col_chg:
+        selected_charger_label = st.selectbox(
+            "Charging Type",
+            [PLACEHOLDER_CHARGER] + charger_type_options,
+            index=0,
+            key="create_boq_ms_charger_selector",
+        )
     with col_comp:
         selected_company = st.radio(
             "Output Perusahaan / Kop BOQ MS",
             COMPANY_OPTIONS,
-            index=COMPANY_OPTIONS.index(default_company),
+            index=0,
             horizontal=True,
-            key=f"ms_boq_company_{selected_label}",
+            key="ms_boq_company",
         )
     with col_tmpl:
         template_name = st.selectbox(
@@ -3629,43 +3646,46 @@ def _render_boq_ms():
             key="ms_boq_template",
         )
 
-    c1, c2, c3 = st.columns([1.5, 1.2, 1.3])
-    sn_machine = c1.text_input(
-        "SN Machine",
-        value=meta.get("Machine SN", ""),
-        placeholder="Masukkan Serial Number mesin...",
-        key=f"ms_sn_machine_{selected_label}",
+    if selected_charger_label == PLACEHOLDER_CHARGER:
+        st.info("💡 Silakan pilih **Charging Type** terlebih dahulu untuk membuat BOQ MS.")
+        return
+
+    charging_type = normalize_charger_type(selected_charger_label)
+
+    # Site Name & Serial Number Charger diinput secara manual khusus untuk BOQ MS
+    c1, c2 = st.columns(2)
+    manual_site_name = c1.text_input(
+        "Site Name (Manual)",
+        value="",
+        placeholder="Masukkan nama lokasi / site secara manual...",
+        key="ms_manual_site_name",
     )
-    boq_date = c2.date_input(
+    sn_machine = c2.text_input(
+        "SN Machine (Manual)",
+        value="",
+        placeholder="Masukkan Serial Number charger secara manual...",
+        key="ms_manual_sn_machine",
+    )
+
+    c3, c4, c5 = st.columns([1.2, 1.2, 1.2])
+    boq_date = c3.date_input(
         "Tanggal BOQ MS",
         value=datetime.date.today(),
-        key=f"ms_date_{selected_label}",
+        key="ms_date_input",
     )
     period_str = _period_text(boq_date)
-    c3.text_input(
+    c4.text_input(
         "Periode (AUTO)",
         value=period_str,
         disabled=True,
-        key=f"ms_period_{selected_label}",
+        key="ms_period_auto",
     )
-
-    c4, c5, c6 = st.columns([1.5, 1.5, 1])
-    charging_type = normalize_charger_type(
-        c4.text_input(
-            "Charging Type",
-            value=meta.get("Charging Type", "DC20"),
-            key=f"ms_charger_{selected_label}",
-        )
+    province = c5.selectbox(
+        "BOQ Region",
+        STANDARD_REGIONS,
+        index=0,
+        key="ms_region_selector",
     )
-    raw_province = clean_text(meta.get("Province", ""))
-    province = map_to_standard_province(raw_province)
-    c5.text_input(
-        "BOQ Region (AUTO)",
-        value=province,
-        disabled=True,
-        key=f"ms_region_{selected_label}",
-    )
-    c6.caption(f"`{raw_province or '-'} → {province}`")
 
     try:
         df_boq, target_sheet, region_normalized = load_boq_dataframe(
@@ -3686,14 +3706,14 @@ def _render_boq_ms():
         return
 
     st.markdown(f"#### Pilih Material Replacement ({target_sheet} - {region_normalized})")
-    picker_key = f"boq_ms_picker_{hashlib.sha1(f'{selected_label}_{template_name}_{charging_type}'.encode()).hexdigest()[:12]}"
+    picker_key = f"boq_ms_picker_{hashlib.sha1(f'{charging_type}_{province}_{template_name}'.encode()).hexdigest()[:12]}"
     selected_df = _boq_ms_picker(material_df, key=picker_key)
 
     issue_note = st.text_area(
         "Issue Note / Keterangan Kerusakan",
         value="",
         placeholder="Tuliskan catatan kendala / alasan penggantian material (contoh: MCCB Panel Down, Charger Offline)...",
-        key=f"ms_issue_note_{selected_label}",
+        key="ms_issue_note_manual",
     )
 
     st.markdown("#### 📷 Upload Foto Evident (Maks. 2 Foto)")
@@ -3702,7 +3722,7 @@ def _render_boq_ms():
         photo_file_1 = st.file_uploader(
             "Photo Evident 1",
             type=["png", "jpg", "jpeg", "webp"],
-            key=f"ms_photo_1_{selected_label}",
+            key="ms_photo_1_manual",
         )
         if photo_file_1 is not None:
             st.image(photo_file_1, caption="Preview Photo Evident 1", use_container_width=True)
@@ -3710,7 +3730,7 @@ def _render_boq_ms():
         photo_file_2 = st.file_uploader(
             "Photo Evident 2",
             type=["png", "jpg", "jpeg", "webp"],
-            key=f"ms_photo_2_{selected_label}",
+            key="ms_photo_2_manual",
         )
         if photo_file_2 is not None:
             st.image(photo_file_2, caption="Preview Photo Evident 2", use_container_width=True)
@@ -3739,21 +3759,24 @@ def _render_boq_ms():
     )
     cfg_active = get_company_config(selected_company)
 
+    site_name_clean = clean_text(manual_site_name)
+    sn_machine_clean = clean_text(sn_machine)
+
     m1, m2, m3 = st.columns(3)
     m1.metric("Total DPP", format_currency_ms(total_dpp))
     m2.metric("PPN 11%", format_currency(total_ppn))
     m3.metric("Grand Total", format_currency(total_grand))
 
     st.success(
-        f"✅ Preview BOQ MS: **{selected_site}** | Charger: **{charging_type}** | "
-        f"Periode: **{period_str}** | Output: **{cfg_active['name']}** (`{preview_ms_no}`)"
+        f"✅ Preview BOQ MS: **{site_name_clean or '-'}** | SN: **{sn_machine_clean or '-'}** | "
+        f"Charger: **{charging_type}** | Periode: **{period_str}** | Output: **{cfg_active['name']}** (`{preview_ms_no}`)"
     )
 
     pdf_ms_bytes = generate_boq_ms_pdf(
         records=records,
         boq_no=preview_ms_no,
-        sn_machine=sn_machine or "-",
-        site_name=selected_site,
+        sn_machine=sn_machine_clean or "-",
+        site_name=site_name_clean or "-",
         charging_type=charging_type,
         period=period_str,
         template_name=template_name,
@@ -3764,52 +3787,55 @@ def _render_boq_ms():
         company=selected_company,
     )
 
-    safe_site = re.sub(r'[\\/*?:"<>|]', "_", str(selected_site))
-    safe_sn = re.sub(r'[\\/*?:"<>|]', "_", str(sn_machine or charging_type))
+    safe_site = re.sub(r'[\\/*?:"<>|]', "_", site_name_clean or "Site")
+    safe_sn = re.sub(r'[\\/*?:"<>|]', "_", sn_machine_clean or charging_type)
     filename_ms_pdf = f"BOQ_MS_{safe_site}_{safe_sn}.pdf"
 
     b1, b2 = st.columns(2)
     with b1:
-        if st.button("🚀 Simpan ke Database (DB BOQ MS)", type="primary", key=f"save_ms_{selected_label}"):
-            with st.spinner("Menyimpan data BOQ MS ke sheet DB BOQ MS..."):
-                photo_ref_1 = (
-                    _upload_evident_photo_to_drive(
-                        photo_bytes_1,
-                        f"{safe_site}_{safe_sn}_Evident1_{photo_file_1.name}",
-                        getattr(photo_file_1, "type", "image/jpeg"),
+        if st.button("🚀 Simpan ke Database (DB BOQ MS)", type="primary", key="save_ms_manual_btn"):
+            if not site_name_clean:
+                st.warning("⚠️ Mohon isi **Site Name** terlebih dahulu sebelum menyimpan ke database.")
+            else:
+                with st.spinner("Menyimpan data BOQ MS ke sheet DB BOQ MS..."):
+                    photo_ref_1 = (
+                        _upload_evident_photo_to_drive(
+                            photo_bytes_1,
+                            f"{safe_site}_{safe_sn}_Evident1_{photo_file_1.name}",
+                            getattr(photo_file_1, "type", "image/jpeg"),
+                        )
+                        if photo_bytes_1
+                        else ""
                     )
-                    if photo_bytes_1
-                    else ""
-                )
-                photo_ref_2 = (
-                    _upload_evident_photo_to_drive(
-                        photo_bytes_2,
-                        f"{safe_site}_{safe_sn}_Evident2_{photo_file_2.name}",
-                        getattr(photo_file_2, "type", "image/jpeg"),
+                    photo_ref_2 = (
+                        _upload_evident_photo_to_drive(
+                            photo_bytes_2,
+                            f"{safe_site}_{safe_sn}_Evident2_{photo_file_2.name}",
+                            getattr(photo_file_2, "type", "image/jpeg"),
+                        )
+                        if photo_bytes_2
+                        else ""
                     )
-                    if photo_bytes_2
-                    else ""
-                )
 
-                saved_no = save_to_db_boq_ms(
-                    records=records,
-                    sn_machine=sn_machine or "-",
-                    site_name=selected_site,
-                    charging_type=charging_type,
-                    period=period_str,
-                    template_name=template_name,
-                    region=region_normalized,
-                    issue_note=issue_note,
-                    photo_1=photo_ref_1,
-                    photo_2=photo_ref_2,
-                    date_obj=dt_obj,
-                    company=selected_company,
-                )
-            if saved_no:
-                st.session_state["boq_ms_saved_success"] = True
-                st.session_state["last_saved_boq_ms_no"] = saved_no
-                st.cache_data.clear()
-                st.rerun()
+                    saved_no = save_to_db_boq_ms(
+                        records=records,
+                        sn_machine=sn_machine_clean or "-",
+                        site_name=site_name_clean,
+                        charging_type=charging_type,
+                        period=period_str,
+                        template_name=template_name,
+                        region=region_normalized,
+                        issue_note=issue_note,
+                        photo_1=photo_ref_1,
+                        photo_2=photo_ref_2,
+                        date_obj=dt_obj,
+                        company=selected_company,
+                    )
+                if saved_no:
+                    st.session_state["boq_ms_saved_success"] = True
+                    st.session_state["last_saved_boq_ms_no"] = saved_no
+                    st.cache_data.clear()
+                    st.rerun()
 
     with b2:
         st.download_button(
@@ -3817,7 +3843,7 @@ def _render_boq_ms():
             pdf_ms_bytes,
             file_name=filename_ms_pdf,
             mime="application/pdf",
-            key=f"dl_ms_{selected_label}",
+            key="dl_ms_manual_btn",
         )
 
 
