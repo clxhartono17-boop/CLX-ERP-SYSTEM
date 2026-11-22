@@ -11,6 +11,7 @@ import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, A5, portrait
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.platypus import (
     Image,
@@ -50,6 +51,9 @@ except ModuleNotFoundError:
 # ==============================================================================
 # TEMPLATE & COMPANY CONSTANTS
 # ==============================================================================
+TARGET_SPREADSHEET_ID = "1FU1lL3ls3jP_hAxBdx_Fu35Z9Ap4ICdHmOpMvCyA3gY"
+TARGET_DB_BOQ_MS_GID = 1703918628
+
 OLD_TEMPLATE_FILENAME = "Template BOQ Vgreen.xlsx"
 NEW_TEMPLATE_FILENAME = "New Template BOQ Sept 2026 All Charger.xlsx"
 
@@ -272,6 +276,18 @@ def format_currency(value):
         return f"Rp. {num:,.0f}".replace(",", ".")
     except Exception:
         return "Rp. 0"
+
+
+def format_currency_ms(value):
+    try:
+        num = float(value)
+        if abs(num) < 0.005:
+            return "Rp0"
+        if num < 0:
+            return f"-Rp{abs(num):,.0f}"
+        return f"Rp{num:,.0f}"
+    except Exception:
+        return "Rp0"
 
 
 def _format_qty_clean(val):
@@ -546,14 +562,12 @@ def get_logo_path(company="CLX"):
     target_lower = {f.lower() for f in logo_filenames}
     asset_dirs = _candidate_asset_dirs()
 
-    # 1. Exact path match
     for base_dir in asset_dirs:
         for fname in logo_filenames:
             candidate = os.path.join(base_dir, fname)
             if os.path.isfile(candidate):
                 return candidate
 
-    # 2. Case-insensitive scan di folder assets/templates
     for base_dir in asset_dirs:
         if os.path.isdir(base_dir):
             try:
@@ -655,7 +669,6 @@ def find_column_by_keywords(
         ):
             return c
 
-    # Fallback pencarian parsial longgar
     for c in columns:
         s = clean_text(c).upper()
         for k in keywords:
@@ -725,7 +738,6 @@ def build_new_template_column_mapping(columns):
         except Exception:
             pass
 
-    # Mapping Presisi untuk Template Baru yang memiliki kolom MERK di kolom terpisah dari UNIT PRICE
     mapping["MERK"] = find_column_by_keywords(
         cols,
         ["MERK", "BRAND"],
@@ -749,12 +761,38 @@ def build_new_template_column_mapping(columns):
 # ==============================================================================
 def _get_book():
     try:
-        return get_google_sheet_connection()
+        book = get_google_sheet_connection()
+        if book is not None:
+            return book
     except Exception:
-        return None
+        pass
+
+    # Fallback koneksi langsung ke spreadsheet TARGET_SPREADSHEET_ID via gspread
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_dict = None
+        for key in ["gcp_service_account", "google_service_account", "service_account", "gsheets"]:
+            if key in st.secrets:
+                creds_dict = dict(st.secrets[key])
+                break
+
+        if creds_dict and "private_key" in creds_dict:
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            gc = gspread.authorize(creds)
+            return gc.open_by_key(TARGET_SPREADSHEET_ID)
+    except Exception:
+        pass
+
+    return None
 
 
-def _get_ws(sheet_name):
+def _get_ws(sheet_name, gid=None):
     book = _get_book()
 
     if book is None:
@@ -763,10 +801,20 @@ def _get_ws(sheet_name):
     try:
         return book.worksheet(sheet_name)
     except Exception:
+        pass
+
+    if gid is not None:
         try:
-            return book.open_worksheet(sheet_name)
+            for ws in book.worksheets():
+                if getattr(ws, "id", None) == gid:
+                    return ws
         except Exception:
-            return None
+            pass
+
+    try:
+        return book.open_worksheet(sheet_name)
+    except Exception:
+        return None
 
 
 def _values_to_df(values):
@@ -801,8 +849,8 @@ def _values_to_df(values):
     ttl=120,
     show_spinner=False,
 )
-def read_sheet_df(sheet_name):
-    ws = _get_ws(sheet_name)
+def read_sheet_df(sheet_name, gid=None):
+    ws = _get_ws(sheet_name, gid=gid)
 
     if ws is None:
         return pd.DataFrame()
@@ -971,6 +1019,8 @@ def fetch_query_site_options(
         at(8),
     )
 
+    sn_c = at(31)
+
     if site_c is None:
         return [], {}
 
@@ -1024,6 +1074,11 @@ def fetch_query_site_options(
                     if epc_c
                     else ""
                 ),
+                "Machine SN": (
+                    clean_text(r.get(sn_c, ""))
+                    if sn_c
+                    else ""
+                ),
             }
 
             options.append(display)
@@ -1041,7 +1096,7 @@ def save_to_db_boq(
     company="CLX",
 ):
     try:
-        sh = get_google_sheet_connection()
+        sh = _get_book()
 
         if not sh:
             return None
@@ -1110,7 +1165,7 @@ def update_db_boq_row(
     new_boq_no=None,
 ):
     try:
-        sh = get_google_sheet_connection()
+        sh = _get_book()
 
         if not sh:
             return False
@@ -1155,7 +1210,7 @@ def update_google_sheet_summary(
     grand_total,
 ):
     try:
-        sh = get_google_sheet_connection()
+        sh = _get_book()
 
         if not sh:
             return False
@@ -1196,7 +1251,7 @@ def calculate_detail_total(
 ):
     return (
         parse_qty_num(quantity)
-- parse_price(unit_price)
+        * parse_price(unit_price)
     )
 
 
@@ -1233,7 +1288,6 @@ def recalculate_boq_totals(df_boq):
         elif "TOTAL" in no and not item:
             drop_idx.append(i)
         elif not no and not item and not unit and not merk and qty_val == 0 and up_val == 0:
-            # Menghapus baris kosong pemisah antar section serta baris footer total Excel (seperti di DC120)
             drop_idx.append(i)
 
     if drop_idx:
@@ -1257,8 +1311,6 @@ def recalculate_boq_totals(df_boq):
             line_totals[pos] = total
             is_detail[pos] = True
 
-    # Deteksi apakah "I" adalah sub-section Romawi (mis. I & II di bawah B. CIVIL WORK)
-    # atau section utama setelah H
     all_nos = [clean_text(r.get("NO", "")).upper() for _, r in df.iterrows()]
     has_roman_ii = "II" in all_nos
 
@@ -2068,9 +2120,9 @@ def generate_boq_pdf(
     top_margin = 16
     bottom_margin = 26
 
-    avail_w = page_w - (2 * margin_x)            # ~551.28 pt
-    avail_h = page_h - top_margin - bottom_margin  # ~799.89 pt
-    safe_target_h = avail_h - 14.0               # toleransi padding internal frame
+    avail_w = page_w - (2 * margin_x)
+    avail_h = page_h - top_margin - bottom_margin
+    safe_target_h = avail_h - 14.0
 
     doc = SimpleDocTemplate(
         buffer,
@@ -2088,7 +2140,6 @@ def generate_boq_pdf(
     company_key = normalize_company_key(resolved_company)
     cfg = get_company_config(company_key)
 
-    # Palet warna dinamis: Navy/Blue untuk CLX, Yellow Highlight untuk Sunrise
     PRIMARY_BG = colors.HexColor(cfg["primary_hex"])
     BORDER_PRIMARY = colors.HexColor(cfg["border_primary_hex"])
     ACCENT_COLOR = colors.HexColor(cfg["accent_hex"])
@@ -2116,8 +2167,6 @@ def generate_boq_pdf(
     has_roman_ii = "II" in all_nos
 
     logo_path = get_logo_path(company_key)
-
-    # Lebar kolom total = 551 pt (pas dengan lebar konten A4 margin 22 pt)
     col_widths = [24, 217, 36, 38, 86, 75, 75]
 
     def _build_scaled_elements(scale):
@@ -2238,11 +2287,9 @@ def generate_boq_pdf(
             f"BoqSubSecRight_{company_key}_{scale}", parent=subsec_left, alignment=2
         )
 
-        # 1. Kop Surat & Logo Perusahaan
         logo_block = []
         if logo_path and os.path.exists(logo_path):
             try:
-                from reportlab.lib.utils import ImageReader
                 ir = ImageReader(logo_path)
                 iw, ih = ir.getSize()
                 if iw and ih:
@@ -2288,7 +2335,6 @@ def generate_boq_pdf(
             )
         )
 
-        # 2. Kartu Informasi Site & Proyek (2 Kolom)
         meta_rows = [
             [
                 Paragraph("Site Name", info_label_style),
@@ -2326,7 +2372,6 @@ def generate_boq_pdf(
             )
         )
 
-        # 3. Tabel Rincian BOQ (Total lebar = 551 pt)
         table_data = [
             [
                 Paragraph("NO", th_center),
@@ -2442,7 +2487,6 @@ def generate_boq_pdf(
 
         last_item_row = len(table_data) - 1
 
-        # 4. Ringkasan Total (Menggunakan SPAN agar label tidak terpotong)
         sum_label_style = ParagraphStyle(
             f"BoqSumLabel_{company_key}_{scale}",
             parent=cell_right,
@@ -2517,7 +2561,6 @@ def generate_boq_pdf(
 
         return built, total_h
 
-    # Auto-fit: pilih tingkat kepadatan paling nyaman yang muat 1 halaman A4 penuh
     chosen_elements = None
     chosen_h = 0.0
     for sc in (1.06, 1.00, 0.94, 0.88, 0.82, 0.76, 0.70, 0.65, 0.60):
@@ -2527,8 +2570,6 @@ def generate_boq_pdf(
         if measured_h <= safe_target_h:
             break
 
-    # Pengaman akhir: jika item custom sangat banyak sehingga tetap melebihi tinggi A4,
-    # KeepInFrame otomatis menyesuaikan skala agar 100% Fit One Page A4.
     if chosen_h > safe_target_h:
         elements = [
             KeepInFrame(
@@ -2604,10 +2645,13 @@ def _ensure_boq_ms_headers(ws):
         vals = ws.get_all_values()
         first = vals[0] if vals else []
 
-        if first[:9] != BOQ_MS_HEADERS:
-            ws.update("A1:I1", [BOQ_MS_HEADERS])
+        if first[:15] != headers:
+            ws.update("A1:O1", [headers])
     except Exception:
-        ws.update("A1:O1", [headers])
+        try:
+            ws.update("A1:O1", [headers])
+        except Exception:
+            pass
 
     return headers
 
@@ -2617,7 +2661,7 @@ def _ensure_boq_ms_headers(ws):
     show_spinner=False,
 )
 def _read_boq_ms_records():
-    df = read_sheet_df(DB_BOQ_MS_SHEET)
+    df = read_sheet_df(DB_BOQ_MS_SHEET, gid=TARGET_DB_BOQ_MS_GID)
 
     if df.empty:
         return []
@@ -2674,6 +2718,55 @@ def _next_boq_ms_sequence():
     return max_no + 1
 
 
+def _upload_evident_photo_to_drive(photo_bytes, filename, mime_type="image/jpeg"):
+    """Opsional: Upload foto evident ke Google Drive jika kredensial tersedia, kembalikan URL atau nama file."""
+    if not photo_bytes:
+        return ""
+    try:
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+
+        creds_dict = None
+        for key in ["gcp_service_account", "google_service_account", "service_account", "gsheets"]:
+            if key in st.secrets:
+                creds_dict = dict(st.secrets[key])
+                break
+
+        if not creds_dict or "private_key" not in creds_dict:
+            return filename
+
+        scopes = ["https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+        file_metadata = {"name": filename}
+        folder_id = st.secrets.get("gdrive_evident_folder_id", "")
+        if folder_id:
+            file_metadata["parents"] = [folder_id]
+
+        media = MediaIoBaseUpload(io.BytesIO(photo_bytes), mimetype=mime_type, resumable=False)
+        created = (
+            drive_service.files()
+            .create(body=file_metadata, media_body=media, fields="id, webViewLink")
+            .execute()
+        )
+        file_id = created.get("id")
+        if file_id:
+            try:
+                drive_service.permissions().create(
+                    fileId=file_id,
+                    body={"type": "anyone", "role": "reader"},
+                ).execute()
+            except Exception:
+                pass
+            return created.get("webViewLink", f"https://drive.google.com/file/d/{file_id}/view")
+    except Exception:
+        pass
+
+    return filename
+
+
 def save_to_db_boq_ms(
     records,
     sn_machine,
@@ -2689,13 +2782,13 @@ def save_to_db_boq_ms(
     company="CLX",
 ):
     try:
-        sh = get_google_sheet_connection()
+        sh = _get_book()
         if not sh:
+            st.error("❌ Koneksi ke Google Spreadsheet gagal. Periksa konfigurasi credentials.")
             return None
 
-        try:
-            ws = sh.worksheet(DB_BOQ_MS_SHEET)
-        except Exception:
+        ws = _get_ws(DB_BOQ_MS_SHEET, gid=TARGET_DB_BOQ_MS_GID)
+        if ws is None:
             ws = sh.add_worksheet(
                 title=DB_BOQ_MS_SHEET,
                 rows=1000,
@@ -2727,7 +2820,7 @@ def save_to_db_boq_ms(
             date_obj=dt,
             company=company,
         )
-        date_str = dt.strftime("%d-%m-%Y")
+        date_str = f"{dt.day}-{dt.month:02d}-{dt.year}"
 
         rows_to_append = []
         for idx_item, r in enumerate(records):
@@ -2759,8 +2852,11 @@ def save_to_db_boq_ms(
         if not rows_to_append:
             return None
 
-        for row_vals in rows_to_append:
-            ws.append_row(row_vals)
+        try:
+            ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+        except Exception:
+            for row_vals in rows_to_append:
+                ws.append_row(row_vals, value_input_option="USER_ENTERED")
 
         return boq_ms_no
     except Exception as e:
@@ -2880,7 +2976,6 @@ def _draw_pdf_asset(canvas, path, x, y_top, max_width, max_height):
         return
 
     try:
-        from reportlab.lib.utils import ImageReader
         reader = ImageReader(path)
         iw, ih = reader.getSize()
 
@@ -2904,6 +2999,26 @@ def _draw_pdf_asset(canvas, path, x, y_top, max_width, max_height):
         )
     except Exception:
         pass
+
+
+def _make_reportlab_image_from_bytes(img_bytes, max_w, max_h):
+    """Konversi raw image bytes menjadi objek ReportLab Image ter-scale proporsional."""
+    if not img_bytes:
+        return None
+    try:
+        buf = io.BytesIO(img_bytes)
+        reader = ImageReader(buf)
+        iw, ih = reader.getSize()
+        if not iw or not ih:
+            return None
+        scale = min(float(max_w) / float(iw), float(max_h) / float(ih))
+        w = iw * scale
+        h = ih * scale
+        img = Image(io.BytesIO(img_bytes), width=w, height=h)
+        img.hAlign = "CENTER"
+        return img
+    except Exception:
+        return None
 
 
 def _boq_ms_pdf_header_footer(canvas, doc, company="CLX"):
@@ -2955,7 +3070,7 @@ def generate_boq_ms_pdf(
     template_name,
     region,
     issue_note="",
-    photo_bytes=None,
+    photo_bytes_list=None,
     date_obj=None,
     company=None,
 ):
@@ -2967,65 +3082,79 @@ def generate_boq_ms_pdf(
     ms_header_bg = colors.HexColor(cfg["ms_header_hex"])
     ms_header_fg = colors.HexColor(cfg["ms_header_text_hex"])
 
+    # A5 Portrait: lebar = 419.53 pt, tinggi = 595.28 pt
+    # Margin kiri/kanan = 10 pt -> lebar konten = 399.53 pt (tabel utama = 399 pt)
     doc = SimpleDocTemplate(
         buf,
         pagesize=portrait(A5),
         rightMargin=10,
         leftMargin=10,
-        topMargin=52,
-        bottomMargin=42,
+        topMargin=50,
+        bottomMargin=38,
     )
 
     styles = getSampleStyleSheet()
     title = ParagraphStyle(
         "ms_title",
         parent=styles["Title"],
-        fontSize=12,
-        leading=14,
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        leading=13,
         alignment=1,
+        spaceBefore=0,
         spaceAfter=4,
     )
 
-    small = ParagraphStyle("ms_small", parent=styles["Normal"], fontSize=6.5, leading=8)
+    small = ParagraphStyle("ms_small", parent=styles["Normal"], fontSize=6.8, leading=8.5)
     bold = ParagraphStyle("ms_bold", parent=small, fontName="Helvetica-Bold")
-    cell = ParagraphStyle("ms_cell", parent=small, fontSize=6, leading=7)
+    bold_right = ParagraphStyle("ms_bold_right", parent=bold, alignment=2)
+    small_right = ParagraphStyle("ms_small_right", parent=small, alignment=2)
+
+    cell_left = ParagraphStyle("ms_cell_left", parent=small, fontSize=6.5, leading=8)
+    cell_center = ParagraphStyle("ms_cell_center", parent=cell_left, alignment=1)
+    cell_right = ParagraphStyle("ms_cell_right", parent=cell_left, alignment=2)
+
     table_header = ParagraphStyle(
         "ms_table_header",
         parent=small,
         fontName="Helvetica-Bold",
-        fontSize=6,
-        leading=7,
+        fontSize=6.5,
+        leading=8,
         alignment=1,
         textColor=ms_header_fg,
     )
 
     story = []
     dt = date_obj or datetime.datetime.now()
+    date_formatted = f"{dt.day}-{dt.month:02d}-{dt.year}"
 
     story.append(Paragraph("BOQ MS / REPLACEMENT MATERIAL", title))
 
     info = [
-        [Paragraph("No. BOQ", bold), Paragraph(clean_text(boq_no), small)],
-        [Paragraph("Date", bold), Paragraph(dt.strftime("%d-%m-%Y"), small)],
-        [Paragraph("SN Machine", bold), Paragraph(clean_text(sn_machine), small)],
-        [Paragraph("Site Name", bold), Paragraph(clean_text(site_name), small)],
-        [Paragraph("Charging Type", bold), Paragraph(clean_text(charging_type), small)],
-        [Paragraph("Periode", bold), Paragraph(clean_text(period), small)],
+        [Paragraph("No. BOQ", bold), Paragraph(_esc_pdf_text(boq_no), small)],
+        [Paragraph("Date", bold), Paragraph(_esc_pdf_text(date_formatted), small)],
+        [Paragraph("SN Machine", bold), Paragraph(_esc_pdf_text(sn_machine), small)],
+        [Paragraph("Site Name", bold), Paragraph(_esc_pdf_text(site_name), small)],
+        [Paragraph("Charging Type", bold), Paragraph(_esc_pdf_text(charging_type), small)],
+        [Paragraph("Periode", bold), Paragraph(_esc_pdf_text(period), small)],
     ]
 
-    ti = Table(info, colWidths=[65, 315])
+    ti = Table(info, colWidths=[68, 331])
     ti.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("TOPPADDING", (0, 0), (-1, -1), 1.5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 1.2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.2),
             ]
         )
     )
 
-    story += [ti, Spacer(1, 4)]
+    story += [ti, Spacer(1, 5)]
 
+    # Tabel Item Material (Total lebar = 399 pt)
     data = [
         [
             Paragraph("No", table_header),
@@ -3046,76 +3175,123 @@ def generate_boq_ms_pdf(
 
         data.append(
             [
-                Paragraph(str(i), cell),
-                Paragraph(clean_text(r.get("Item Name", "")), cell),
-                Paragraph(f"{qty:g}", cell),
-                Paragraph(format_currency(up), cell),
-                Paragraph(format_currency(dpp), cell),
+                Paragraph(str(i), cell_center),
+                Paragraph(_esc_pdf_text(r.get("Item Name", "")), cell_left),
+                Paragraph(_format_qty_clean(qty), cell_center),
+                Paragraph(format_currency_ms(up), cell_right),
+                Paragraph(format_currency_ms(dpp), cell_right),
             ]
         )
 
-    table = Table(data, colWidths=[22, 171, 35, 76, 76], repeatRows=1)
+    table = Table(data, colWidths=[24, 185, 36, 77, 77], repeatRows=1)
     table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
                 ("BACKGROUND", (0, 0), (-1, 0), ms_header_bg),
                 ("TEXTCOLOR", (0, 0), (-1, 0), ms_header_fg),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
             ]
         )
     )
 
-    story += [table, Spacer(1, 4)]
+    story += [table, Spacer(1, 5)]
 
     vat = total * 0.11
     grand = total + vat
 
     sm_styles = [
-        ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
-        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
     ]
     if company_key == "Sunrise":
         sm_styles.append(("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FDE047")))
 
+    # Ringkasan Total (Total lebar = 399 pt)
     sm = Table(
         [
-            [Paragraph("DPP", bold), Paragraph(format_currency(total), bold)],
-            [Paragraph("PPN 11%", small), Paragraph(format_currency(vat), small)],
-            [Paragraph("Grand Total", bold), Paragraph(format_currency(grand), bold)],
+            [Paragraph("DPP", bold), Paragraph(format_currency_ms(total), bold_right)],
+            [Paragraph("PPN 11%", small), Paragraph(format_currency(vat), small_right)],
+            [Paragraph("Grand Total", bold), Paragraph(format_currency(grand), bold_right)],
         ],
-        colWidths=[285, 95],
+        colWidths=[299, 100],
     )
     sm.setStyle(TableStyle(sm_styles))
 
     story.append(sm)
     story.append(Spacer(1, 5))
 
-    issue_text = clean_text(issue_note).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    issue_text = issue_text.replace("\n", "<br/>") or "-"
+    # Issue Note (Total lebar = 399 pt)
+    issue_text = _esc_pdf_text(issue_note).replace("\n", "<br/>") or "-"
 
     issue_table = Table(
-        [[Paragraph("ISSUE NOTE", table_header)], [Paragraph(issue_text, cell)]],
-        colWidths=[380],
+        [[Paragraph("ISSUE NOTE", table_header)], [Paragraph(issue_text, cell_left)]],
+        colWidths=[399],
     )
     issue_table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
                 ("BACKGROUND", (0, 0), (-1, 0), ms_header_bg),
                 ("TEXTCOLOR", (0, 0), (-1, 0), ms_header_fg),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
                 ("TOPPADDING", (0, 0), (-1, -1), 3),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
             ]
         )
     )
     story.append(issue_table)
+
+    # Foto Evident (2 Kolom sejajar, lebar total = 399 pt -> 199.5 pt per kolom)
+    valid_photos = [p for p in (photo_bytes_list or []) if p]
+    if valid_photos:
+        story.append(Spacer(1, 5))
+        # Hitung sisa tinggi halaman agar Foto Evident tetap fit 1 halaman A5
+        max_photo_h = 155.0 if len(records) <= 3 else 115.0
+        col_photo_w = 199.5
+
+        img1 = _make_reportlab_image_from_bytes(valid_photos[0], col_photo_w - 12, max_photo_h)
+        img2 = (
+            _make_reportlab_image_from_bytes(valid_photos[1], col_photo_w - 12, max_photo_h)
+            if len(valid_photos) > 1
+            else ""
+        )
+
+        photo_table = Table(
+            [
+                [Paragraph("FOTO EVIDENT", table_header), ""],
+                [img1 or "", img2 or ""],
+            ],
+            colWidths=[col_photo_w, col_photo_w],
+        )
+        photo_table.setStyle(
+            TableStyle(
+                [
+                    ("SPAN", (0, 0), (1, 0)),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+                    ("BACKGROUND", (0, 0), (1, 0), ms_header_bg),
+                    ("TEXTCOLOR", (0, 0), (1, 0), ms_header_fg),
+                    ("ALIGN", (0, 1), (1, 1), "CENTER"),
+                    ("VALIGN", (0, 1), (1, 1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        story.append(photo_table)
 
     doc.build(
         story,
@@ -3416,7 +3592,7 @@ def _render_boq_ms():
 
     if st.session_state.pop("boq_ms_saved_success", False):
         saved_ms_no = st.session_state.pop("last_saved_boq_ms_no", "")
-        st.success(f"BOQ MS berhasil disimpan{f' ({saved_ms_no})' if saved_ms_no else ''}.")
+        st.success(f"BOQ MS berhasil disimpan ke sheet **DB BOQ MS**{f' ({saved_ms_no})' if saved_ms_no else ''}.")
 
     site_options, site_data_map = fetch_query_site_options(exclude_saved=False)
     PLACEHOLDER_OPTION = "-- Pilih Site Name & Charger --"
@@ -3456,7 +3632,7 @@ def _render_boq_ms():
     c1, c2, c3 = st.columns([1.5, 1.2, 1.3])
     sn_machine = c1.text_input(
         "SN Machine",
-        value="",
+        value=meta.get("Machine SN", ""),
         placeholder="Masukkan Serial Number mesin...",
         key=f"ms_sn_machine_{selected_label}",
     )
@@ -3516,9 +3692,32 @@ def _render_boq_ms():
     issue_note = st.text_area(
         "Issue Note / Keterangan Kerusakan",
         value="",
-        placeholder="Tuliskan catatan kendala / alasan penggantian material...",
+        placeholder="Tuliskan catatan kendala / alasan penggantian material (contoh: MCCB Panel Down, Charger Offline)...",
         key=f"ms_issue_note_{selected_label}",
     )
+
+    st.markdown("#### 📷 Upload Foto Evident (Maks. 2 Foto)")
+    p1_col, p2_col = st.columns(2)
+    with p1_col:
+        photo_file_1 = st.file_uploader(
+            "Photo Evident 1",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"ms_photo_1_{selected_label}",
+        )
+        if photo_file_1 is not None:
+            st.image(photo_file_1, caption="Preview Photo Evident 1", use_container_width=True)
+    with p2_col:
+        photo_file_2 = st.file_uploader(
+            "Photo Evident 2",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"ms_photo_2_{selected_label}",
+        )
+        if photo_file_2 is not None:
+            st.image(photo_file_2, caption="Preview Photo Evident 2", use_container_width=True)
+
+    photo_bytes_1 = photo_file_1.getvalue() if photo_file_1 is not None else None
+    photo_bytes_2 = photo_file_2.getvalue() if photo_file_2 is not None else None
+    photo_bytes_list = [b for b in (photo_bytes_1, photo_bytes_2) if b]
 
     if selected_df.empty:
         st.info("☑️ Centang minimal satu item material pada tabel di atas untuk membuat BOQ MS.")
@@ -3541,7 +3740,7 @@ def _render_boq_ms():
     cfg_active = get_company_config(selected_company)
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Total DPP", format_currency(total_dpp))
+    m1.metric("Total DPP", format_currency_ms(total_dpp))
     m2.metric("PPN 11%", format_currency(total_ppn))
     m3.metric("Grand Total", format_currency(total_grand))
 
@@ -3560,30 +3759,52 @@ def _render_boq_ms():
         template_name=template_name,
         region=region_normalized,
         issue_note=issue_note,
+        photo_bytes_list=photo_bytes_list,
         date_obj=dt_obj,
         company=selected_company,
     )
 
-    company_code = cfg_active["code"]
     safe_site = re.sub(r'[\\/*?:"<>|]', "_", str(selected_site))
-    safe_charger = re.sub(r'[\\/*?:"<>|]', "_", str(charging_type))
-    filename_ms_pdf = f"BOQ_MS_{company_code}_{safe_charger}_{safe_site}.pdf"
+    safe_sn = re.sub(r'[\\/*?:"<>|]', "_", str(sn_machine or charging_type))
+    filename_ms_pdf = f"BOQ_MS_{safe_site}_{safe_sn}.pdf"
 
     b1, b2 = st.columns(2)
     with b1:
         if st.button("🚀 Simpan ke Database (DB BOQ MS)", type="primary", key=f"save_ms_{selected_label}"):
-            saved_no = save_to_db_boq_ms(
-                records=records,
-                sn_machine=sn_machine or "-",
-                site_name=selected_site,
-                charging_type=charging_type,
-                period=period_str,
-                template_name=template_name,
-                region=region_normalized,
-                issue_note=issue_note,
-                date_obj=dt_obj,
-                company=selected_company,
-            )
+            with st.spinner("Menyimpan data BOQ MS ke sheet DB BOQ MS..."):
+                photo_ref_1 = (
+                    _upload_evident_photo_to_drive(
+                        photo_bytes_1,
+                        f"{safe_site}_{safe_sn}_Evident1_{photo_file_1.name}",
+                        getattr(photo_file_1, "type", "image/jpeg"),
+                    )
+                    if photo_bytes_1
+                    else ""
+                )
+                photo_ref_2 = (
+                    _upload_evident_photo_to_drive(
+                        photo_bytes_2,
+                        f"{safe_site}_{safe_sn}_Evident2_{photo_file_2.name}",
+                        getattr(photo_file_2, "type", "image/jpeg"),
+                    )
+                    if photo_bytes_2
+                    else ""
+                )
+
+                saved_no = save_to_db_boq_ms(
+                    records=records,
+                    sn_machine=sn_machine or "-",
+                    site_name=selected_site,
+                    charging_type=charging_type,
+                    period=period_str,
+                    template_name=template_name,
+                    region=region_normalized,
+                    issue_note=issue_note,
+                    photo_1=photo_ref_1,
+                    photo_2=photo_ref_2,
+                    date_obj=dt_obj,
+                    company=selected_company,
+                )
             if saved_no:
                 st.session_state["boq_ms_saved_success"] = True
                 st.session_state["last_saved_boq_ms_no"] = saved_no
