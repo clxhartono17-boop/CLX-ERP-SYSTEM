@@ -1196,7 +1196,7 @@ def calculate_detail_total(
 ):
     return (
         parse_qty_num(quantity)
-        * parse_price(unit_price)
+- parse_price(unit_price)
     )
 
 
@@ -1993,6 +1993,43 @@ def edit_boq_sections(
 
     df, _, _, _ = recalculate_boq_totals(df)
     return df
+
+
+# ==============================================================================
+# WEB CALCULATION SUMMARY HELPER
+# ==============================================================================
+def _render_boq_calculation_summary(df_boq, sub_total, vat_amount, grand_total):
+    st.markdown("### 🧮 Ringkasan Kalkulasi BOQ")
+
+    if df_boq is not None and not df_boq.empty and "NO" in df_boq.columns:
+        alpha_parents = {"A", "B", "C", "D", "E", "F", "G", "H", "J"}
+        all_nos = [clean_text(x).upper() for x in df_boq["NO"].tolist()]
+        has_roman_ii = "II" in all_nos
+
+        section_rows = []
+        for _, row in df_boq.iterrows():
+            no = clean_text(row.get("NO", "")).upper()
+            if no in alpha_parents or (no == "I" and not has_roman_ii):
+                tp = parse_price(row.get("TOTAL PRICE", 0))
+                section_rows.append(
+                    {
+                        "Point": no,
+                        "Deskripsi Pekerjaan": clean_text(row.get("Item", "")),
+                        "Total (Exc. PPN)": format_currency(tp) if tp != 0 else "Rp. 0",
+                    }
+                )
+
+        if section_rows:
+            st.dataframe(
+                pd.DataFrame(section_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Sub Total (Exc. VAT / DPP)", format_currency(sub_total))
+    m2.metric("VAT / PPN 11%", format_currency(vat_amount))
+    m3.metric("Total Contractor Price (Inc. VAT 11%)", format_currency(grand_total))
 
 
 # ==============================================================================
@@ -3747,6 +3784,8 @@ def _render_boq_create():
         display[c] = display[c].apply(lambda x: format_currency(x) if parse_price(x) != 0 else "-")
 
     st.dataframe(display, use_container_width=True, hide_index=True)
+
+    _render_boq_calculation_summary(df_boq, sub_total, vat_amount, grand_total)
 
     preview_boq_no = generate_boq_number(
         sequence_num=_next_boq_sequence(),
