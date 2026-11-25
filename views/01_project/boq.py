@@ -2,6 +2,7 @@ import ast
 import datetime
 import hashlib
 import io
+import json
 import os
 import re
 import sys
@@ -53,7 +54,7 @@ except ModuleNotFoundError:
 OLD_TEMPLATE_FILENAME = "Template BOQ Vgreen.xlsx"
 NEW_TEMPLATE_FILENAME = "New Template BOQ Sept 2026 All Charger.xlsx"
 
-BOQ_EDITOR_VERSION = "QTY_TEMPLATE_AUTO_TOTAL_V14"
+BOQ_EDITOR_VERSION = "QTY_TEMPLATE_AUTO_TOTAL_V15"
 
 COMPANY_OPTIONS = ["CLX", "Sunrise"]
 
@@ -119,6 +120,18 @@ DB_BOQ_SHEET = "DB BOQ"
 DB_BOQ_MS_SHEET = "DB BOQ MS"
 QUERY_SHEET = "Query"
 SUM_PROJECT_SHEET = "Sum Project"
+
+DB_BOQ_HEADERS = [
+    "No",
+    "BOQ No.",
+    "Site Name",
+    "Charger Type",
+    "BOQ Amount Exc. PPN",
+    "BOQ Amount inc. PPN",
+    "EPC Name",
+    "Template",
+    "Items JSON",
+]
 
 BOQ_MS_HEADERS = [
     "No",
@@ -546,14 +559,12 @@ def get_logo_path(company="CLX"):
     target_lower = {f.lower() for f in logo_filenames}
     asset_dirs = _candidate_asset_dirs()
 
-    # 1. Exact path match
     for base_dir in asset_dirs:
         for fname in logo_filenames:
             candidate = os.path.join(base_dir, fname)
             if os.path.isfile(candidate):
                 return candidate
 
-    # 2. Case-insensitive scan di folder assets/templates
     for base_dir in asset_dirs:
         if os.path.isdir(base_dir):
             try:
@@ -655,7 +666,6 @@ def find_column_by_keywords(
         ):
             return c
 
-    # Fallback pencarian parsial longgar
     for c in columns:
         s = clean_text(c).upper()
         for k in keywords:
@@ -725,7 +735,6 @@ def build_new_template_column_mapping(columns):
         except Exception:
             pass
 
-    # Mapping Presisi untuk Template Baru yang memiliki kolom MERK di kolom terpisah dari UNIT PRICE
     mapping["MERK"] = find_column_by_keywords(
         cols,
         ["MERK", "BRAND"],
@@ -742,6 +751,135 @@ def build_new_template_column_mapping(columns):
     )
 
     return mapping
+
+
+# ==============================================================================
+# SERIALISASI & RESTORASI SNAPSHOT ITEM BOQ (OPSI 1 - KOLOM ITEMS JSON)
+# ==============================================================================
+def serialize_boq_items_json(df_boq):
+    """
+    Serialisasi daftar Qty/Volume setiap item pada df_boq menjadi string JSON
+    ringkas agar dapat disimpan pada kolom 'Items JSON' di sheet DB BOQ.
+    """
+    if df_boq is None or df_boq.empty:
+        return "[]"
+
+    records = []
+    for idx, row in df_boq.iterrows():
+        no_val = clean_text(row.get("NO", ""))
+        item_val = clean_text(row.get("Item", ""))
+        up_val = parse_price(row.get("UNIT PRICE", 0))
+        raw_qty = row.get("Unit/Volume", "")
+
+        if up_val != 0:
+            q_num = parse_qty_num(raw_qty)
+            q_val = int(q_num) if float(q_num).is_integer() else round(float(q_num), 4)
+        else:
+            q_val = clean_text(raw_qty)
+
+        records.append(
+            {
+                "r": int(idx),
+                "n": no_val,
+                "i": item_val,
+                "q": q_val,
+            }
+        )
+
+    payload = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+
+    # Jika melebihi batas karakter sel Google Sheets (50.000 karakter), simpan
+    # versi lebih ringkas tanpa teks item panjang.
+    if len(payload) > 48000:
+        compact = [
+            {"r": rec["r"], "n": rec["n"], "q": rec["q"]}
+            for rec in records
+        ]
+        payload = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+    return payload
+
+
+def apply_saved_boq_items_json(df_boq, items_json_str):
+    """
+    Memulihkan nilai Unit/Volume (Qty) dari string JSON yang tersimpan pada DB BOQ
+    ke dalam DataFrame BOQ hasil load template, lalu menghitung ulang seluruh total.
+    """
+    if df_boq is None or df_boq.empty:
+        return df_boq
+
+    raw_json = clean_text(items_json_str)
+    if not raw_json or raw_json in {"[]", "{}"}:
+        return df_boq
+
+    try:
+        saved_items = json.loads(raw_json)
+    except Exception:
+        return df_boq
+
+    if not isinstance(saved_items, list) or not saved_items:
+        return df_boq
+
+    df = df_boq.copy()
+    for col in ["Unit/Volume", "UNIT PRICE", "TOTAL PRICE"]:
+        if col in df.columns:
+            df[col] = df[col].astype(object)
+
+    # Index lookup berdasarkan (NO, Item) sebagai fallback jika indeks baris bergeser
+    lookup_by_no_item = {}
+    for idx, row in df.iterrows():
+        key = (
+            clean_text(row.get("NO", "")).upper(),
+            clean_text(row.get("Item", "")).upper(),
+        )
+        lookup_by_no_item.setdefault(key, []).append(idx)
+
+    used_indices = set()
+
+    for rec in saved_items:
+        if not isinstance(rec, dict):
+            continue
+
+        row_pos = rec.get("r", rec.get("idx"))
+        no_saved = clean_text(rec.get("n", rec.get("NO", ""))).upper()
+        item_saved = clean_text(rec.get("i", rec.get("Item", ""))).upper()
+        qty_saved = rec.get("q", rec.get("qty"))
+
+        target_idx = None
+
+        # 1. Cocokkan posisi baris & NO (dan Item jika tersedia)
+        if isinstance(row_pos, int) and 0 <= row_pos < len(df) and row_pos not in used_indices:
+            cur_no = clean_text(df.loc[row_pos, "NO"]).upper()
+            cur_item = clean_text(df.loc[row_pos, "Item"]).upper()
+            if cur_no == no_saved and (not item_saved or cur_item == item_saved):
+                target_idx = row_pos
+
+        # 2. Fallback: cocokkan kombinasi (NO, Item) yang belum terpakai
+        if target_idx is None and item_saved:
+            candidates = lookup_by_no_item.get((no_saved, item_saved), [])
+            for cand in candidates:
+                if cand not in used_indices:
+                    target_idx = cand
+                    break
+
+        if target_idx is None:
+            continue
+
+        used_indices.add(target_idx)
+        unit_price = parse_price(df.loc[target_idx, "UNIT PRICE"])
+
+        if unit_price != 0:
+            q_num = parse_qty_num(qty_saved)
+            df.loc[target_idx, "Unit/Volume"] = (
+                int(q_num) if float(q_num).is_integer() else q_num
+            )
+            df.loc[target_idx, "TOTAL PRICE"] = calculate_detail_total(q_num, unit_price)
+        else:
+            if qty_saved is not None and clean_text(qty_saved) != "":
+                df.loc[target_idx, "Unit/Volume"] = clean_text(qty_saved)
+
+    df, _, _, _ = recalculate_boq_totals(df)
+    return df
 
 
 # ==============================================================================
@@ -819,16 +957,7 @@ def read_sheet_df(sheet_name):
 # DB BOQ
 # ==============================================================================
 def ensure_db_boq_headers(worksheet):
-    headers = [
-        "No",
-        "BOQ No.",
-        "Site Name",
-        "Charger Type",
-        "BOQ Amount Exc. PPN",
-        "BOQ Amount inc. PPN",
-        "EPC Name",
-        "Template",
-    ]
+    headers = DB_BOQ_HEADERS
 
     try:
         vals = worksheet.get_all_values()
@@ -836,7 +965,7 @@ def ensure_db_boq_headers(worksheet):
 
         if first[:len(headers)] != headers:
             worksheet.update(
-                "A1:H1",
+                "A1:I1",
                 [headers],
             )
     except Exception:
@@ -872,12 +1001,13 @@ def get_all_saved_boq():
         inc_c,
         epc_c,
         temp_c,
+        items_c,
     ) = [
         col(
             chr(65 + i),
             "",
         )
-        for i in range(8)
+        for i in range(9)
     ]
 
     out = []
@@ -900,6 +1030,7 @@ def get_all_saved_boq():
                 "BOQ Amount inc. PPN": parse_price(row.get(inc_c, 0)),
                 "EPC Name": clean_text(row.get(epc_c, "")),
                 "Template": clean_text(row.get(temp_c, "")),
+                "Items JSON": clean_text(row.get(items_c, "")) if items_c else "",
             }
         )
 
@@ -1039,6 +1170,7 @@ def save_to_db_boq(
     epc_name="-",
     template_name="Template BOQ Vgreen Lama",
     company="CLX",
+    df_boq=None,
 ):
     try:
         sh = get_google_sheet_connection()
@@ -1077,6 +1209,7 @@ def save_to_db_boq(
         no_urut = max_no + 1
 
         boq_no = generate_boq_number(sequence_num=no_urut, company=company)
+        items_json = serialize_boq_items_json(df_boq)
 
         new_row = [
             no_urut,
@@ -1087,6 +1220,7 @@ def save_to_db_boq(
             grand_total,
             str(epc_name),
             template_db_value(template_name),
+            items_json,
         ]
 
         worksheet.append_row(new_row)
@@ -1108,6 +1242,7 @@ def update_db_boq_row(
     epc_name,
     template_name=None,
     new_boq_no=None,
+    df_boq=None,
 ):
     try:
         sh = get_google_sheet_connection()
@@ -1132,6 +1267,13 @@ def update_db_boq_row(
                 row_idx,
                 8,
                 template_db_value(template_name),
+            )
+
+        if df_boq is not None:
+            worksheet.update_cell(
+                row_idx,
+                9,
+                serialize_boq_items_json(df_boq),
             )
 
         update_google_sheet_summary(
@@ -1196,7 +1338,7 @@ def calculate_detail_total(
 ):
     return (
         parse_qty_num(quantity)
-- parse_price(unit_price)
+        * parse_price(unit_price)
     )
 
 
@@ -1936,7 +2078,7 @@ def edit_boq_sections(
         editor_df["TOTAL PRICE"] = editor_df["TOTAL PRICE"].apply(parse_price).astype(float)
 
         editor_key = (
-            f"boq_qty_editor_v14_"
+            f"boq_qty_editor_v15_"
             f"{hashlib.sha1(str(widget_prefix).encode()).hexdigest()[:12]}_"
             f"{section_no}"
         )
@@ -1993,43 +2135,6 @@ def edit_boq_sections(
 
     df, _, _, _ = recalculate_boq_totals(df)
     return df
-
-
-# ==============================================================================
-# WEB CALCULATION SUMMARY HELPER
-# ==============================================================================
-def _render_boq_calculation_summary(df_boq, sub_total, vat_amount, grand_total):
-    st.markdown("### 🧮 Ringkasan Kalkulasi BOQ")
-
-    if df_boq is not None and not df_boq.empty and "NO" in df_boq.columns:
-        alpha_parents = {"A", "B", "C", "D", "E", "F", "G", "H", "J"}
-        all_nos = [clean_text(x).upper() for x in df_boq["NO"].tolist()]
-        has_roman_ii = "II" in all_nos
-
-        section_rows = []
-        for _, row in df_boq.iterrows():
-            no = clean_text(row.get("NO", "")).upper()
-            if no in alpha_parents or (no == "I" and not has_roman_ii):
-                tp = parse_price(row.get("TOTAL PRICE", 0))
-                section_rows.append(
-                    {
-                        "Point": no,
-                        "Deskripsi Pekerjaan": clean_text(row.get("Item", "")),
-                        "Total (Exc. PPN)": format_currency(tp) if tp != 0 else "Rp. 0",
-                    }
-                )
-
-        if section_rows:
-            st.dataframe(
-                pd.DataFrame(section_rows),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Sub Total (Exc. VAT / DPP)", format_currency(sub_total))
-    m2.metric("VAT / PPN 11%", format_currency(vat_amount))
-    m3.metric("Total Contractor Price (Inc. VAT 11%)", format_currency(grand_total))
 
 
 # ==============================================================================
@@ -2585,7 +2690,7 @@ def generate_boq_pdf(
 
 
 # ==============================================================================
-# PERIOD & BOQ MS MODULES (GABUNGAN LOGIKA BOQ MS DARI VERSI LAMA)
+# PERIOD & BOQ MS MODULES
 # ==============================================================================
 def _period_text(date_obj):
     months = [
@@ -3058,7 +3163,6 @@ def generate_boq_ms_pdf(
     )
     story.append(issue_table)
 
-    # FOTO EVIDENT (Logika dari versi lama)
     photos = [x for x in (photo_bytes or []) if x]
     if photos:
         story.append(Spacer(1, 5))
@@ -3127,7 +3231,6 @@ def generate_boq_ms_pdf(
 
 
 def _upload_boq_ms_photo(uploaded_file, boq_no):
-    """Upload evidence photo to Google Drive and return a shareable URL."""
     if uploaded_file is None:
         return ""
     try:
@@ -3785,8 +3888,6 @@ def _render_boq_create():
 
     st.dataframe(display, use_container_width=True, hide_index=True)
 
-    _render_boq_calculation_summary(df_boq, sub_total, vat_amount, grand_total)
-
     preview_boq_no = generate_boq_number(
         sequence_num=_next_boq_sequence(),
         company=selected_company,
@@ -3835,6 +3936,7 @@ def _render_boq_create():
                 epc_name,
                 template_name,
                 company=selected_company,
+                df_boq=df_boq,
             )
             if boq_no:
                 update_google_sheet_summary(selected_site, selected_site, sub_total, grand_total)
@@ -3849,6 +3951,11 @@ def _render_boq_create():
 
 def _render_boq_edit():
     st.subheader("✏️ Edit, Reuse, & Re-Download BOQ Tersimpan")
+
+    if st.session_state.pop("boq_updated_success", False):
+        updated_no = st.session_state.pop("last_updated_boq_no", "")
+        st.success(f"Perubahan BOQ berhasil disimpan ke database{f' ({updated_no})' if updated_no else ''}.")
+
     saved_boq_list = get_all_saved_boq()
 
     if not saved_boq_list:
@@ -3867,7 +3974,8 @@ def _render_boq_edit():
     old_site = data.get("Site Name", "")
     old_charger = data.get("Charger Type", "")
     old_epc = data.get("EPC Name", "-")
-    template_name = template_name_from_db_value(data.get("Template", ""))
+    saved_items_json = data.get("Items JSON", "")
+    default_template_name = template_name_from_db_value(data.get("Template", ""))
     default_company = detect_company_from_context(boq_no=old_boq_no, epc_name=old_epc)
 
     col_comp, col_tmpl = st.columns([1, 2])
@@ -3883,7 +3991,7 @@ def _render_boq_edit():
         template_name = st.selectbox(
             "Pilih Template",
             list(TEMPLATE_OPTIONS.keys()),
-            index=list(TEMPLATE_OPTIONS.keys()).index(template_name),
+            index=list(TEMPLATE_OPTIONS.keys()).index(default_template_name),
             key=f"edit_boq_template_{key}",
         )
 
@@ -3906,10 +4014,10 @@ def _render_boq_edit():
         {"Address": "-", "Province": "JAVA", "EPC Name": "-"},
     )
 
-    site = st.text_input("Site Name", old_site)
-    charger = normalize_charger_type(st.text_input("Charger Type", old_charger))
-    epc = st.text_input("EPC Name", old_epc)
-    address = st.text_input("Address", meta.get("Address", "-"))
+    site = st.text_input("Site Name", old_site, key=f"edit_site_{key}")
+    charger = normalize_charger_type(st.text_input("Charger Type", old_charger, key=f"edit_charger_{key}"))
+    epc = st.text_input("EPC Name", old_epc, key=f"edit_epc_{key}")
+    address = st.text_input("Address", meta.get("Address", "-"), key=f"edit_address_{key}")
     province = map_to_standard_province(meta.get("Province", ""))
 
     try:
@@ -3921,8 +4029,26 @@ def _render_boq_edit():
     if df is None or df.empty:
         return
 
-    df = edit_boq_sections(df, charger, f"edit_detail_{key}")
+    # Pulihkan rincian Qty hasil edit sebelumnya jika tersimpan di DB BOQ (Items JSON)
+    has_saved_snapshot = bool(clean_text(saved_items_json) and clean_text(saved_items_json) != "[]")
+    if has_saved_snapshot:
+        df = apply_saved_boq_items_json(df, saved_items_json)
+        st.info("📂 Data Qty & rincian BOQ sebelumnya berhasil dimuat dari database.")
+    else:
+        st.caption("ℹ️ BOQ ini disimpan sebelum fitur penyimpanan detail aktif, sehingga memuat nilai awal template.")
+
+    df = edit_boq_sections(df, charger, f"edit_detail_{key}_{template_name}_{charger}")
     df, sub, vat, grand = recalculate_boq_totals(df)
+
+    display = df.copy()
+    for c in ["UNIT PRICE", "TOTAL PRICE"]:
+        display[c] = display[c].apply(lambda x: format_currency(x) if parse_price(x) != 0 else "-")
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Sub Total (Exc. PPN)", format_currency(sub))
+    c2.metric("PPN 11%", format_currency(vat))
+    c3.metric("Grand Total (Inc. PPN)", format_currency(grand))
 
     pdf = generate_boq_pdf(
         site,
@@ -3945,7 +4071,7 @@ def _render_boq_edit():
 
     a, b = st.columns(2)
     with a:
-        if st.button("💾 Save & Update BOQ Database", type="primary"):
+        if st.button("💾 Save & Update BOQ Database", type="primary", key=f"btn_update_boq_{key}"):
             if update_db_boq_row(
                 data["row_idx"],
                 old_site,
@@ -3956,12 +4082,15 @@ def _render_boq_edit():
                 epc,
                 template_name,
                 new_boq_no=active_boq_no,
+                df_boq=df,
             ):
+                st.session_state["boq_updated_success"] = True
+                st.session_state["last_updated_boq_no"] = active_boq_no
                 st.cache_data.clear()
                 st.rerun()
 
     with b:
-        st.download_button("📥 Re-Download PDF BOQ", pdf, file_name=filename_updated, mime="application/pdf")
+        st.download_button("📥 Re-Download PDF BOQ", pdf, file_name=filename_updated, mime="application/pdf", key=f"download_edit_{key}")
 
 
 def render():
